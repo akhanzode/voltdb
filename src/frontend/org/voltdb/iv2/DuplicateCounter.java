@@ -44,6 +44,7 @@ public class DuplicateCounter
 
     final long m_destinationId;
     Long m_responseHash = null;
+    protected VoltMessage m_initiation = null;
     protected VoltMessage m_lastResponse = null;
     final List<Long> m_expectedHSIds;
     final long m_txnId;
@@ -51,11 +52,13 @@ public class DuplicateCounter
     DuplicateCounter(
             long destinationHSId,
             long realTxnId,
-            List<Long> expectedHSIds)
+            List<Long> expectedHSIds,
+            VoltMessage initiation)
     {
         m_destinationId = destinationHSId;
         m_txnId = realTxnId;
         m_expectedHSIds = new ArrayList<Long>(expectedHSIds);
+        m_initiation = initiation;
     }
 
     long getTxnId()
@@ -83,9 +86,11 @@ public class DuplicateCounter
             else if (!m_responseHash.equals(hash)) {
                 String msg = String.format("HASH MISMATCH COMPARING: %d to %d\n" +
                         "PREV MESSAGE: %s\n" +
-                        "CURR MESSAGE: %s\n",
+                        "CURR MESSAGE: %s\n" +
+                        "FOR INITIATION: %s\n",
                         hash, m_responseHash,
-                        m_lastResponse.toString(), message.toString());
+                        m_lastResponse.toString(), message.toString(),
+                        m_initiation.toString());
                 tmLog.error(msg);
                 return MISMATCH;
             }

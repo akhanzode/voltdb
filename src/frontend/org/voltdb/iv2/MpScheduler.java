@@ -246,7 +246,7 @@ public class MpScheduler extends Scheduler
             DuplicateCounter counter = new DuplicateCounter(
                     message.getInitiatorHSId(),
                     mpTxnId,
-                    m_iv2Masters);
+                    m_iv2Masters, sp);
             m_duplicateCounters.put(mpTxnId, counter);
             EveryPartitionTask eptask =
                 new EveryPartitionTask(m_mailbox, m_pendingTasks, sp,

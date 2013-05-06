@@ -494,7 +494,7 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
                 }
                 DuplicateCounter counter = new DuplicateCounter(
                         msg.getInitiatorHSId(),
-                        msg.getTxnId(), m_replicaHSIds);
+                        msg.getTxnId(), m_replicaHSIds, msg);
                 m_duplicateCounters.put(new DuplicateCounterKey(msg.getTxnId(), newSpHandle), counter);
             }
         }
@@ -565,7 +565,7 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
         List<Long> expectedHSIds = new ArrayList<Long>(needsRepair);
         DuplicateCounter counter = new DuplicateCounter(
                 HostMessenger.VALHALLA,
-                message.getTxnId(), expectedHSIds);
+                message.getTxnId(), expectedHSIds, message);
         m_duplicateCounters.put(new DuplicateCounterKey(message.getTxnId(), message.getSpHandle()), counter);
 
         m_uniqueIdGenerator.updateMostRecentlyGeneratedUniqueId(message.getUniqueId());
@@ -595,7 +595,7 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
         List<Long> expectedHSIds = new ArrayList<Long>(needsRepair);
         DuplicateCounter counter = new DuplicateCounter(
                 message.getCoordinatorHSId(), // Assume that the MPI's HSID hasn't changed
-                message.getTxnId(), expectedHSIds);
+                message.getTxnId(), expectedHSIds, message);
         m_duplicateCounters.put(new DuplicateCounterKey(message.getTxnId(), message.getSpHandle()), counter);
 
         // is local repair necessary?
@@ -740,12 +740,12 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
                 if (message.getFragmentTaskType() != FragmentTaskMessage.SYS_PROC_PER_SITE) {
                     counter = new DuplicateCounter(
                             msg.getCoordinatorHSId(),
-                            msg.getTxnId(), m_replicaHSIds);
+                            msg.getTxnId(), m_replicaHSIds, msg);
                 }
                 else {
                     counter = new SysProcDuplicateCounter(
                             msg.getCoordinatorHSId(),
-                            msg.getTxnId(), m_replicaHSIds);
+                            msg.getTxnId(), m_replicaHSIds, msg);
                 }
                 m_duplicateCounters.put(new DuplicateCounterKey(msg.getTxnId(), newSpHandle), counter);
             }
