@@ -431,6 +431,9 @@ public class StatsAgent {
             case MANAGEMENT:
                 stats = collectManagementStats(interval);
                 break;
+            case PROCEDUREPROFILE:
+                stats = collectProcedureProfileStats(interval);
+                break;
             default:
                 // Should have been successfully groomed in ClientInterface.dispatchStatistics().  Log something
                 // for our information but let the null check below return harmlessly
@@ -602,6 +605,30 @@ public class StatsAgent {
             stats[0] = pStats;
         }
         return stats;
+    }
+
+    private VoltTable[] collectProcedureProfileStats(boolean interval)
+    {
+        VoltTable[] baseStats = collectProcedureStats(interval);
+
+        if (baseStats.length != 1) {
+           return baseStats;
+        }
+
+        StatsProcProfTable timeTable = new StatsProcProfTable();
+        baseStats[0].resetRowPosition();
+        while (baseStats[0].advanceRow()) {
+            timeTable.updateTable(
+                    baseStats[0].getString("PROCEDURE"),
+                    baseStats[0].getLong("INVOCATIONS"),
+                    baseStats[0].getLong("MIN_EXECUTION_TIME"),
+                    baseStats[0].getLong("MAX_EXECUTION_TIME"),
+                    baseStats[0].getLong("AVG_EXECUTION_TIME"),
+                    baseStats[0].getLong("FAILURES"),
+                    baseStats[0].getLong("ABORTS"));
+        }
+
+        return new VoltTable[] { timeTable.sortByAverage("EXECUTION_TIME") };
     }
 
     private VoltTable[] collectStarvationStats(boolean interval)
