@@ -1929,6 +1929,9 @@ public class ClientInterface implements SnapshotDaemon.DaemonInitiator {
             else if (task.procName.equals("@SystemInformation")) {
                 return dispatchStatistics(OpsSelector.SYSTEMINFORMATION, task, ccxn);
             }
+            else if (task.procName.equals("@SnapshotScan")) {
+                return dispatchStatistics(OpsSelector.SNAPSHOTSCAN, task, ccxn);
+            }
 
             // If you're going to copy and paste something, CnP the pattern
             // up above.  -rtb.
