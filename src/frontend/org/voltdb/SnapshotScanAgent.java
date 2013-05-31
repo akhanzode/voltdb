@@ -185,8 +185,6 @@ public class SnapshotScanAgent extends OpsAgent
         // get disk free scan tables
         VoltTable diskFreeResults = getDiskFreeResults(path);
 
-        // if any results are null, we need to return nothing because of
-        // the current way aggregation works at the requesting agent
         tables[0] = digestResults;
         tables[1] = diskFreeResults;
         tables[2] = scanResults;
