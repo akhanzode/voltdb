@@ -2416,6 +2416,11 @@ public class ClientInterface implements SnapshotDaemon.DaemonInitiator {
             }
         });
         spi.clientHandle = clientData;
+        // Ugh, need to consolidate this with handleRead() somehow but not feeling it at the moment
+        if (procedureName.equals("@SnapshotScan")) {
+            dispatchStatistics(OpsSelector.SNAPSHOTSCAN, spi, m_snapshotDaemonAdapter);
+            return;
+        }
         // initiate the transaction
         createTransaction(m_snapshotDaemonAdapter.connectionId(),
                 "SnapshotDaemon",
