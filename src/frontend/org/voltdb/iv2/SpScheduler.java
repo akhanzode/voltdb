@@ -54,6 +54,7 @@ import org.voltdb.client.ClientResponse;
 import org.voltdb.dtxn.TransactionState;
 import org.voltdb.exceptions.SerializableException;
 import org.voltdb.exceptions.TransactionRestartException;
+import org.voltdb.iv2.DuplicateCounter.HashResult;
 import org.voltdb.iv2.SiteTasker.SiteTaskerRunnable;
 import org.voltdb.messaging.BorrowTaskMessage;
 import org.voltdb.messaging.CompleteTransactionMessage;
@@ -290,8 +291,8 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
         List<DuplicateCounterKey> doneCounters = new LinkedList<DuplicateCounterKey>();
         for (Entry<DuplicateCounterKey, DuplicateCounter> entry : m_duplicateCounters.entrySet()) {
             DuplicateCounter counter = entry.getValue();
-            int result = counter.updateReplicas(m_replicaHSIds);
-            if (result == DuplicateCounter.DONE) {
+            HashResult result = counter.updateReplicas(m_replicaHSIds);
+            if (result.isDone()) {
                 doneCounters.add(entry.getKey());
             }
         }
@@ -710,11 +711,6 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
 
         // set up duplicate counter. expect exactly the responses corresponding
         // to needsRepair. These may, or may not, include the local site.
-
-        // We currently send the final response into the ether, since we don't
-        // have the original ClientInterface HSID stored.  It would be more
-        // useful to have the original ClienInterface HSId somewhere handy.
-
         List<Long> expectedHSIds = new ArrayList<Long>(needsRepair);
         DuplicateCounter counter = new DuplicateCounter(
                 HostMessenger.VALHALLA,
@@ -722,8 +718,9 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
                 expectedHSIds,
                 message,
                 m_mailbox.getHSId());
-        safeAddToDuplicateCounterMap(new DuplicateCounterKey(message.getTxnId(), message.getSpHandle()), counter);
 
+        final DuplicateCounterKey dcKey = new DuplicateCounterKey(message.getTxnId(), message.getSpHandle());
+        updateOrAddDuplicateCounter(dcKey, counter);
         m_uniqueIdGenerator.updateMostRecentlyGeneratedUniqueId(message.getUniqueId());
         // is local repair necessary?
         if (needsRepair.contains(m_mailbox.getHSId())) {
@@ -746,9 +743,15 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
 
     private void handleFragmentTaskMessageRepair(List<Long> needsRepair, FragmentTaskMessage message)
     {
+        if (needsRepair.contains(m_mailbox.getHSId()) && m_outstandingTxns.get(message.getTxnId()) != null) {
+            // Sanity check that we really need repair.
+            hostLog.warn("SPI repair attempted to repair a fragment which it has already seen. " +
+                    "This shouldn't be possible.");
+            // Not sure what to do in this event.  Crash for now
+            throw new RuntimeException("Attempted to repair with a fragment we've already seen.");
+        }
         // set up duplicate counter. expect exactly the responses corresponding
         // to needsRepair. These may, or may not, include the local site.
-
         List<Long> expectedHSIds = new ArrayList<Long>(needsRepair);
         DuplicateCounter counter = new DuplicateCounter(
                 message.getCoordinatorHSId(), // Assume that the MPI's HSID hasn't changed
@@ -756,17 +759,11 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
                 expectedHSIds,
                 message,
                 m_mailbox.getHSId());
-        safeAddToDuplicateCounterMap(new DuplicateCounterKey(message.getTxnId(), message.getSpHandle()), counter);
 
+        final DuplicateCounterKey dcKey = new DuplicateCounterKey(message.getTxnId(), message.getSpHandle());
+        updateOrAddDuplicateCounter(dcKey, counter);
         // is local repair necessary?
         if (needsRepair.contains(m_mailbox.getHSId())) {
-            // Sanity check that we really need repair.
-            if (m_outstandingTxns.get(message.getTxnId()) != null) {
-                hostLog.warn("SPI repair attempted to repair a fragment which it has already seen. " +
-                        "This shouldn't be possible.");
-                // Not sure what to do in this event.  Crash for now
-                throw new RuntimeException("Attempted to repair with a fragment we've already seen.");
-            }
             needsRepair.remove(m_mailbox.getHSId());
             // make a copy because handleIv2 non-repair case does?
             FragmentTaskMessage localWork =
@@ -780,6 +777,25 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
             FragmentTaskMessage replmsg =
                 new FragmentTaskMessage(m_mailbox.getHSId(), m_mailbox.getHSId(), message);
             m_mailbox.send(com.google_voltpatches.common.primitives.Longs.toArray(needsRepair), replmsg);
+        }
+    }
+
+    private void updateOrAddDuplicateCounter(final DuplicateCounterKey dcKey, DuplicateCounter counter) {
+        DuplicateCounter theCounter = m_duplicateCounters.get(dcKey);
+        if (theCounter == null) {
+            counter.setTransactionRepair(true);
+            safeAddToDuplicateCounterMap(dcKey, counter);
+        } else {
+            // The partition leader on the local site is being migrated away, but the migration fails. The local site
+            // can be elected again as leader. In this case, update the duplicate counter.
+
+            // If local site is already in the duplicate counter, retain it.
+            List<Long> expectedHSIDs = new ArrayList<Long>(counter.m_expectedHSIds);
+            if (!expectedHSIDs.contains(m_mailbox.getHSId())) {
+                expectedHSIDs.add(m_mailbox.getHSId());
+            }
+            theCounter.setTransactionRepair(true);
+            theCounter.updateReplicas(expectedHSIDs);
         }
     }
 
@@ -826,9 +842,9 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
                                                   "hash", message.getClientResponseData().getHashes()[0]*/));
         }
         if (counter != null) {
-            int result = counter.offer(message);
-            if (result == DuplicateCounter.DONE) {
-                if (counter.allResponsesMatched()) {
+            HashResult result = counter.offer(message);
+            if (result.isDone()) {
+                if (counter.isSuccess()) {
                     m_duplicateCounters.remove(dcKey);
                     final TransactionState txn = m_outstandingTxns.get(message.getTxnId());
                     setRepairLogTruncationHandle(spHandle, (txn != null && txn.isLeaderMigrationInvolved()));
@@ -846,7 +862,6 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
                             counter.getStoredProcedureName(), m_procSet);
                     VoltDB.crashLocalVoltDB("HASH MISMATCH: replicas produced different results.", true, null);
                 }
-
             }
         } else {
             // the initiatorHSId is the ClientInterface mailbox.
@@ -1203,9 +1218,9 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
                 traceLog.add(() -> VoltTrace.endAsync(finalTraceName, MiscUtils.hsIdPairTxnIdToString(m_mailbox.getHSId(), message.m_sourceHSId, message.getSpHandle(), message.getTxnId()),
                                                       "status", message.getStatusCode()));
             }
-            int result = counter.offer(message);
-            if (result == DuplicateCounter.DONE) {
-                if (counter.allResponsesMatched()) {
+            HashResult result = counter.offer(message);
+            if (result.isDone()) {
+                if (counter.isSuccess()) {
                     if (txn != null && txn.isDone()) {
                         setRepairLogTruncationHandle(txn.m_spHandle, txn.isLeaderMigrationInvolved());
                     }
@@ -1340,7 +1355,7 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
         }
 
         if (counter != null) {
-            txnDone = counter.offer(msg) == DuplicateCounter.DONE;
+            txnDone = counter.offer(msg).isDone();
         }
 
         if (txnDone) {
@@ -1464,8 +1479,7 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
                         HostMessenger.VALHALLA,
                         msg.getTxnId(),
                         m_replicaHSIds,
-                        msg,
-                        m_mailbox.getHSId());
+                        msg,m_mailbox.getHSId());
                 safeAddToDuplicateCounterMap(new DuplicateCounterKey(msg.getTxnId(), newSpHandle), counter);
             }
         } else {
@@ -1500,8 +1514,8 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
             return;
         }
 
-        int result = counter.offer(message);
-        if (result == DuplicateCounter.DONE) {
+        HashResult result = counter.offer(message);
+        if (result.isDone()) {
             // DummyTransactionResponseMessage ends on SPI
             m_duplicateCounters.remove(dcKey);
             setRepairLogTruncationHandle(spHandle, false);
