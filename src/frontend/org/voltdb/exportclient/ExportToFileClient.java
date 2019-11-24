@@ -120,6 +120,14 @@ public class ExportToFileClient extends ExportClientBase {
     //For test
     public static String TEST_VOLTDB_ROOT = null;
 
+    /**
+     * This export client requires decoding all table partitions in same thread.
+     */
+    @Override
+    public DecodingPolicy getDecodingPolicy() {
+        return DecodingPolicy.BY_TABLE;
+    }
+
     class DecoderMetaData {
         final String tableName;
         final long generation;
@@ -653,6 +661,8 @@ public class ExportToFileClient extends ExportClientBase {
                     throw new RestartBlockException("Fail to start the block", e.getCause(),true);
                 }
                 else {
+                    // Make sure to unlock
+                    m_batchLock.readLock().unlock();
                     throw new RuntimeException(e);
                 }
             }
