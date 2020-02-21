@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2019 VoltDB Inc.
+ * Copyright (C) 2008-2020 VoltDB Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -817,6 +817,24 @@ public abstract class CatalogUtil {
         for (Table t : tables) {
             Table matsrc = t.getMaterializer();
             if ((matsrc != null) && (matsrc.getRelativeIndex() == table.getRelativeIndex())) {
+                tlist.add(t);
+            }
+        }
+        return tlist;
+    }
+
+    /**
+     * Return all snapshotable materialized views
+     * @param database
+     * @return
+     */
+    public static List<Table> getAllSnapshotableViews(org.voltdb.catalog.Database database)
+    {
+        ArrayList<Table> tlist = new ArrayList<>();
+        CatalogMap<Table> tables = database.getTables();
+        for (Table t : tables) {
+            if (isSnapshotablePersistentTableView(database, t) ||
+                    isSnapshotableStreamedTableView(database, t)) {
                 tlist.add(t);
             }
         }

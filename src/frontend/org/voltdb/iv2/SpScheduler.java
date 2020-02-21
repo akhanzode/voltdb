@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2019 VoltDB Inc.
+ * Copyright (C) 2008-2020 VoltDB Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -916,11 +916,6 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
             final long ciHsid = CoreUtils.getHSIdFromHostAndSite(hostId, HostMessenger.CLIENT_INTERFACE_SITE_ID);
             if (isClusterComplete) {
                 m_mailbox.send(ciHsid, message);
-            }
-            // Send message to the client interfaces of other hosts. If a host does not host any partition leaders,
-            // the host will be shutdown.
-            if (hostMessenger.getHostId() != hostId) {
-                m_mailbox.send(ciHsid, new HashMismatchMessage(false, true));
             }
         }
     }

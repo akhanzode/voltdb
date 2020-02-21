@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2019 VoltDB Inc.
+ * Copyright (C) 2008-2020 VoltDB Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -1220,12 +1220,7 @@ public class VoltDB {
         if (snmp == null) {
             return;
         }
-        try {
-            snmp.crash(msg);
-        } catch (Throwable t) {
-            VoltLogger log = new VoltLogger("HOST");
-            log.warn("failed to issue a crash SNMP trap", t);
-        }
+        snmp.crash(msg);
     }
     /**
      * Exit the process with an error message, optionally with a stack trace.

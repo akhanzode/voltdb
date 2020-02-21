@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2019 VoltDB Inc.
+ * Copyright (C) 2008-2020 VoltDB Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -1903,6 +1903,24 @@ public final class VoltTable extends VoltTableRow implements JSONString {
         }
         long checksum1 = ClientUtils.cheesyBufferCheckSum(m_buffer);
         long checksum2 = ClientUtils.cheesyBufferCheckSum(other.m_buffer);
+        boolean checksum = (checksum1 == checksum2);
+        assert(verifyTableInvariants());
+        return checksum;
+    }
+
+    public boolean hasSameContentsWithOrder(VoltTable other) {
+        assert(verifyTableInvariants());
+        if (this == other) {
+            return true;
+        }
+
+        int mypos = m_buffer.position();
+        int theirpos = other.m_buffer.position();
+        if (mypos != theirpos) {
+            return false;
+        }
+        long checksum1 = ClientUtils.cheesyBufferCheckSumWithOrder(m_buffer);
+        long checksum2 = ClientUtils.cheesyBufferCheckSumWithOrder(other.m_buffer);
         boolean checksum = (checksum1 == checksum2);
         assert(verifyTableInvariants());
         return checksum;

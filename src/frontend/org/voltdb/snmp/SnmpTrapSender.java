@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2019 VoltDB Inc.
+ * Copyright (C) 2008-2020 VoltDB Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -25,11 +25,16 @@ import org.voltdb.compiler.deploymentfile.SnmpType;
  */
 public interface SnmpTrapSender {
 
-    //From deployment build the Snmp sender.
+    // From deployment build the SNMP sender.
     public void initialize(SnmpType snmpType, HostMessenger hm, int clusterId);
     public void shutdown();
-    //Update Snmp properties.
+
+    // Update SNMP properties.
     public void notifyOfCatalogUpdate(SnmpType snmpType);
+
+    // Methods to send specific SNMP traps, where enabled.
+    // At the discretion of the implementation, a log message may
+    // also be written.
     public void crash(String msg);
     public void hostDown(FaultLevel level, int hostId, String msg);
     public void hostUp(String msg);

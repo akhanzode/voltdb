@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2019 VoltDB Inc.
+ * Copyright (C) 2008-2020 VoltDB Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -55,7 +55,14 @@ namespace voltdb {
          * batched: it deletes in a batch style when fixed
          *       number of entries had been reverted. Kind-of lazy.
          */
-        enum class gc_policy: char {never, always, batched};
+        enum class gc_policy: unsigned char {
+            never, always, batched =
+#ifdef NDEBUG
+                numeric_limits<unsigned char>::max()
+#else
+                16                                     // for eecheck only
+#endif
+        };
 
         /**
          * More efficient stack than STL (which was backed by
@@ -87,21 +94,32 @@ namespace voltdb {
         };
 
         /**
+         * Adaptor allowing for customized memory allocation
+         * behavior.
+         */
+        class StdAllocator : private unique_ptr<char[]> {
+            using super = unique_ptr<char[]>;
+        public:
+            StdAllocator(size_t n) : super(new char[n]) {}
+            using super::get;
+        };
+
+        /**
          * Holder for a chunk, whether it is self-compacting or not.
          */
-        class ChunkHolder {
+        template<typename Alloc = StdAllocator>
+        class ChunkHolder : private Alloc {
+            using super = Alloc;
             size_t const m_id;                         // chunk id
             size_t const m_tupleSize;                  // size of a table tuple per allocation
-            unique_ptr<char[]> m_resource;
             void*const m_end;                          // indication of chunk capacity
         protected:
             void* m_next;                              // tail of allocation
             ChunkHolder(ChunkHolder const&) = delete;  // non-copyable, non-assignable, non-moveable
             ChunkHolder& operator=(ChunkHolder const&) = delete;
             ChunkHolder(ChunkHolder&&) = delete;
-            friend class CompactingChunks;      // for batch free
+            friend class CompactingChunks;              // for batch free
         public:
-            static size_t chunkSize(size_t) noexcept;
             ChunkHolder(size_t id, size_t tupleSize, size_t chunkSize);
             ~ChunkHolder() = default;
             void* allocate() noexcept;                 // returns NULL if this chunk is full.
@@ -122,7 +140,8 @@ namespace voltdb {
          * Since we are keeping a free list of hole spaces, it is
          * only economic to use when tupleSize is large.
          */
-        class EagerNonCompactingChunk final: public ChunkHolder {
+        class EagerNonCompactingChunk final: public ChunkHolder<> {
+            using super = ChunkHolder<>;
             Stack<void*> m_freed{};
             EagerNonCompactingChunk(EagerNonCompactingChunk const&) = delete;
             EagerNonCompactingChunk& operator=(EagerNonCompactingChunk const&) = delete;
@@ -145,7 +164,8 @@ namespace voltdb {
          * locations and achieve faster free() at the cost of lower
          * utilization.
          */
-        class LazyNonCompactingChunk final: public ChunkHolder {
+        class LazyNonCompactingChunk final: public ChunkHolder<> {
+            using super = ChunkHolder<>;
             size_t m_freed = 0;
             LazyNonCompactingChunk(LazyNonCompactingChunk const&) = delete;
             LazyNonCompactingChunk& operator=(LazyNonCompactingChunk const&) = delete;
@@ -163,35 +183,53 @@ namespace voltdb {
         };
 
         /**
+         * Homogeneous-sized singly-linked list of memory holders
+         * (i.e. ChunkHolder).
+         *
          * Gives O(log(n)) search speed for
-         * std::list<ChunkHolder>
+         * std::forward_list<ChunkHolder>, search by void* and by chunk id;
+         * and limit insertion to tail and erase to front.
          */
         template<typename Chunk,
-            typename = typename enable_if<is_base_of<ChunkHolder, Chunk>::value>::type>
-        class ChunkList : private list<Chunk> {
-            using super = list<Chunk>;
-            map<void const*, typename super::iterator> m_map{};
-            void add(typename super::iterator const&&);
+            typename = typename enable_if<is_base_of<ChunkHolder<>, Chunk>::value>::type>
+        class ChunkList : private forward_list<Chunk> {
+            using super = forward_list<Chunk>;
+            size_t const m_tupleSize;
+            size_t const m_chunkSize;                  // how many bytes per chunk
+            size_t m_size = 0;
+            size_t m_lastChunkId = 0;
+            typename super::iterator m_back = super::end();
+            map<void const*, typename super::iterator> m_byAddr{};
+            map<size_t, typename super::iterator> m_byId{};
+            void add(typename super::iterator);
+            void remove(typename super::iterator);
+        protected:
+            size_t& lastChunkId();
+            template<typename Pred> void remove_if(Pred p);
+            typename super::iterator& last() noexcept;
         public:
             using iterator = typename super::iterator;
             using const_iterator = typename super::const_iterator;
             using reference = typename super::reference;
             using const_reference = typename super::const_reference;
+            explicit ChunkList(size_t tupleSize) noexcept;
             // "override" writing behavior
-            template<typename... Args> void emplace_back(Args&&...);
-            iterator erase(iterator);
-            iterator erase(iterator, iterator);
+            template<typename... Args> iterator emplace_back(Args&&...);
+            void pop_front();
+            void pop_back();
+            void clear() noexcept;
+            using super::begin; using super::end; using super::cbegin; using super::cend;
+            using super::empty; using super::front;
+            /**
+             * Queries
+             */
+            size_t size() const noexcept;
+            size_t tupleSize() const noexcept;
+            size_t chunkSize() const noexcept;
+            iterator const& last() const noexcept;
             // the O(log(n)) killer
             iterator const* find(void const*) const;
-            // careful forwarding to maintain invariant
-            void clear() noexcept;
-            void splice(iterator, ChunkList&, iterator) noexcept;
-            // compare two allocation addr in O(1): returns either of -1, 0, 1
-            char compare(pair<iterator, void*> const& , pair<iterator, void*> const&) const;
-            using super::begin; using super::end; using super::cbegin; using super::cend;
-            using super::rbegin; using super::rend;
-            using super::empty; using super::size;
-            using super::front; using super::back;
+            iterator const* find(size_t) const;
         };
 
         /**
@@ -217,33 +255,36 @@ namespace voltdb {
          * weaker than compacting chunks.
          */
         template<typename Chunk,
-            typename = typename enable_if<is_base_of<ChunkHolder, Chunk>::value>::type>
+            typename = typename enable_if<is_base_of<ChunkHolder<>, Chunk>::value>::type>
         class NonCompactingChunks final : private ChunkList<Chunk> {
             template<typename Chunks, typename Tag, typename E> friend class IterableTableTupleChunks;
-            size_t const m_tupleSize;
-            size_t const m_chunkSize;
+            static auto constexpr CHUNK_REMOVAL_THRESHOLD = 64lu;    // iterate list and remove empty chunks when there are so many
+            size_t m_emptyChunks = 0;                  // amortize chunk removal
             size_t m_allocs = 0;
             NonCompactingChunks(EagerNonCompactingChunk const&) = delete;
             NonCompactingChunks(NonCompactingChunks&&) = delete;
             NonCompactingChunks& operator=(NonCompactingChunks const&) = delete;
+        protected:
+            size_t& emptyChunks();
         public:
             using Compact = integral_constant<bool, false>;
             NonCompactingChunks(size_t) noexcept;
             ~NonCompactingChunks() = default;
-            size_t tupleSize() const noexcept;
             size_t size() const noexcept;              // number of allocation requests, <= sum(allocated memory from system), considering modulo and non-full spaces
             size_t chunks() const noexcept;            // number of chunks in the list
             void* allocate();
             void free(void*);
-            bool tryFree(void*);                       // not an error if addr not found
             using list_type = ChunkList<Chunk>;
-            using list_type::empty; using list_type::clear;
+            using typename list_type::iterator; using typename list_type::const_iterator;
+            using list_type::empty; using list_type::clear; using list_type::begin;
+            using list_type::tupleSize; using list_type::chunkSize;
         };
 
         /**
          * self-compacting chunk (with help from CompactingChunks to compact across a list)
          */
-        struct CompactingChunk final : public ChunkHolder {
+        struct CompactingChunk final : public ChunkHolder<> {
+            using super = ChunkHolder<>;
             CompactingChunk(size_t id, size_t tupleSize, size_t chunkSize);
             CompactingChunk(CompactingChunk&&) = delete;
             CompactingChunk(CompactingChunk const&) = delete;
@@ -266,44 +307,17 @@ namespace voltdb {
          */
         class CompactingStorageTrait {
             using list_type = ChunkList<CompactingChunk>;
-            using iterator = typename list_type::iterator;
-            using const_iterator = typename list_type::const_iterator;
             /**
              * Linearized access order depending on shrink
              * direction, to ensure that chunks are accessed in
              * snapshot view the same order as they appear in txn
              * view when snapshot started.
              */
-            class LinearizedChunks : private list_type {
-                using const_iterator = typename list_type::const_iterator;
-                using reference = typename list_type::reference;
-                using const_reference = typename list_type::const_reference;
-                using iterator_type = function<void const*()>;
-                using list_type::empty;
-                using list_type::cbegin; using list_type::cend;
-                reference top();
-                const_reference top() const;
-                void pop();
-                void const* extendedIteratorHelper();
-                class ConstExtendedIteratorHelper {    // Serves for const iterator on snapshot view: in effect only used by test
-                    LinearizedChunks const& m_cont;    // since we always release releaseable chunks as we go in actual iterator.
-                    mutable const_iterator m_iter{};
-                    mutable void const* m_val = nullptr;
-                public:
-                    ConstExtendedIteratorHelper(LinearizedChunks const&) noexcept;
-                    void const* operator()() const;
-                    void reset() const noexcept;       // since each CompactingStorageTrait has a single instance of LinearizedChunks,
-                } m_iterHelper{*this};                 // which has a single instance of ConstExtendedIteratorHelper, using two const_iterator
-            public:                                    // (of snapshot view) at the same time will be a trouble bc. how reset() is used.
-                void emplace(list_type&, typename list_type::iterator const&) noexcept;
-                iterator_type iterator() noexcept;
-                iterator_type iterator() const noexcept;
-                using list_type::clear;
-            } m_unreleased{};
             list_type* m_storage;
             bool m_frozen = false;
         public:
             explicit CompactingStorageTrait(list_type*) noexcept;
+            bool frozen() const noexcept;
             void freeze(); void thaw();
             /**
              * post-action when free() is called, only useful when shrinking
@@ -311,9 +325,14 @@ namespace voltdb {
              * Called after in-chunk operation completes, since this
              * operates on the level of list iterator, not void*.
              */
-            void releasable(iterator);
-            function<void const*()> operator()() noexcept;
-            function<void const*()> operator()() const noexcept;
+            list_type::iterator releasable(typename list_type::iterator);
+            /**
+             * Action associated with *snapshot RW iterator* when
+             * it has done visiting a tuple. If that tuple had
+             * been removed in txn view, then erase the
+             * containing chunk if possible
+             */
+            void release(typename list_type::iterator, void const*);
         };
 
         /**
@@ -350,20 +369,21 @@ namespace voltdb {
          * HookedCompactingChunks
          */
         class CompactingChunks;
-        class AllocPosition {
-            size_t const m_lastChunkId = 0;
-            void const* m_lastAlloc = nullptr;
+        class position_type {
+            size_t const m_chunkId = 0;
+            void const* m_addr = nullptr;
         public:
-            AllocPosition() noexcept = default;        // empty initiator
-            AllocPosition(CompactingChunks const&, void const*);
-            template<typename iterator> AllocPosition(void const*, iterator const&) noexcept;
-            AllocPosition(ChunkHolder const&) noexcept;
-            AllocPosition(AllocPosition const&) noexcept = default;
-            AllocPosition(AllocPosition&&) noexcept = default;
-            AllocPosition& operator=(AllocPosition const&) noexcept;
-            size_t lastChunkId() const noexcept;
-            void const* lastAlloc() const noexcept;
-            bool empty() const noexcept;               // makes it behave like std::optional<AllocPosition>
+            position_type() noexcept = default;        // empty initiator
+            position_type(CompactingChunks const&, void const*);
+            template<typename iterator> position_type(void const*, iterator const&) noexcept;
+            position_type(ChunkHolder<> const&) noexcept;
+            position_type(position_type const&) noexcept = default;
+            position_type(position_type&&) noexcept = default;
+            position_type& operator=(position_type const&) noexcept;
+            size_t chunkId() const noexcept;
+            void const* address() const noexcept;
+            bool empty() const noexcept;               // makes it behave like std::optional<position_type>
+            bool operator==(position_type const&) const noexcept;
         };
 
         /**
@@ -373,30 +393,56 @@ namespace voltdb {
          * the non-empty allocation from the head to freed space.
          */
         class CompactingChunks : private ChunkList<CompactingChunk>, private CompactingStorageTrait {
-            template<typename Chunks, typename Tag, typename E> friend struct IterableTableTupleChunks;
+        public:
+            class TxnLeftBoundary final {
+                ChunkList<CompactingChunk> const& m_chunks;
+                typename ChunkList<CompactingChunk>::iterator m_iter;
+                void const* m_next;
+            public:
+                TxnLeftBoundary(ChunkList<CompactingChunk>&) noexcept;
+                typename ChunkList<CompactingChunk>::iterator const& iterator() const noexcept;
+                typename ChunkList<CompactingChunk>::iterator& iterator() noexcept;
+                typename ChunkList<CompactingChunk>::iterator const&
+                    iterator(ChunkList<CompactingChunk>::iterator const&) noexcept;
+                void const*& next() noexcept;
+                bool empty() const noexcept;
+            };
+            class FrozenTxnBoundaries final {
+                position_type m_left{}, m_right{};
+            public:
+                FrozenTxnBoundaries() noexcept = default;
+                FrozenTxnBoundaries(ChunkList<CompactingChunk> const&) noexcept;
+                position_type const& left() const noexcept;
+                position_type const& right() const noexcept;
+                position_type& right() noexcept;
+                void clear();
+            };
+        private:
+            template<typename, typename, typename> friend struct IterableTableTupleChunks;
             using list_type = ChunkList<CompactingChunk>;
-            using trait = CompactingStorageTrait;
             static size_t s_id;
             static size_t gen_id();
 
-            size_t const m_id;                    // ensure injection relation to rw iterator
-            size_t const m_tupleSize;
-            size_t const m_chunkSize;
-            // used to keep track of end of 1st chunk when frozen:
-            // needed for special case when there is a single
-            // non-full chunk when snapshot started.
-            void const* m_endOfFirstChunk = nullptr;
+            size_t const m_id;                    // equivalent to "table id", to ensure injection relation to rw iterator
+            char const* m_lastFreeFromHead = nullptr;  // arg of previous call to free(from_head, ?)
+            TxnLeftBoundary m_txnFirstChunk;     // (moving) left boundary for txn
+            FrozenTxnBoundaries m_frozenTxnBoundaries{};  // frozen boundaries for txn
             // the end of allocations when snapshot started: (block id, end ptr)
-            AllocPosition m_frozenSentry{};
             CompactingChunks(CompactingChunks const&) = delete;
             CompactingChunks& operator=(CompactingChunks const&) = delete;
             CompactingChunks(CompactingChunks&&) = delete;
+            // helpers to guarantee object invariant
+            typename list_type::iterator releasable();
+            void pop_front();
+            void pop_back();
             class BatchRemoveAccumulator : private map<list_type::iterator, vector<void*>> {
                 CompactingChunks* m_self;
                 using map_type = map<list_type::iterator, vector<void*>>;
             protected:
                 CompactingChunks& chunks() noexcept;
-                list_type::iterator pop();             // force removing the chunk to be compacted from
+                // force "removing" the chunk to be compacted from, either by deleting (when not frozen), or
+                // adjusting m_txnFirstChunk.
+                list_type::iterator pop();
                 vector<void*> collect() const;
                 using map_type::clear;
             public:
@@ -421,14 +467,33 @@ namespace voltdb {
                 map<void*, void*> const& movements() const;
                 set<void*> const& removed() const;
                 // Actuate batch remove
-                size_t force();
+                size_t force(bool);
             } m_batched;
+            using list_type::last;
+            using list_type::pop_back;
+            position_type& frozenRight() noexcept;  // txn right boundary when freezing. Need to be adjusted for LW tail removal
         public:
             using Compact = integral_constant<bool, true>;
             CompactingChunks(size_t tupleSize) noexcept;
-            size_t tupleSize() const noexcept;
-            size_t chunkSize() const noexcept;         // number of bytes per chunk
+            /**
+             * Queries
+             */
             size_t chunks() const noexcept;            // number of chunks
+            size_t size() const noexcept;              // number of allocation requested
+            size_t id() const noexcept;
+            using list_type::tupleSize; using list_type::chunkSize;
+            using list_type::empty; using list_type::begin; using list_type::end;
+            using CompactingStorageTrait::frozen;
+
+            // search in txn memory region (i.e. excludes snapshot-related, front portion of list)
+            list_type::iterator const* find(void const*) const noexcept;
+            list_type::iterator const* find(size_t) const noexcept;
+            TxnLeftBoundary const& beginTxn() const noexcept;   // (moving) txn left boundary
+            TxnLeftBoundary& beginTxn() noexcept;               // NOTE: this should really be private. Use it with care!!!
+            FrozenTxnBoundaries const& frozenBoundaries() const noexcept;  // txn boundaries when freezing
+            /**
+             * Memory operations
+             */
             void* allocate();
             // frees a single tuple, and returns the tuple that gets copied
             // over the given address, which is at the tail of
@@ -437,12 +502,21 @@ namespace voltdb {
             // CompactingChunksIgnorableFree struct in .cpp for
             // details.
             void* free(void*);
-            size_t size() const noexcept;              // number of allocation requested
-            size_t id() const noexcept;
-            void freeze(); void thaw();
-            void const* endOfFirstChunk() const noexcept;
-            AllocPosition const& boundary() const noexcept;        // notify the snapshot iterator state of affairs
-            using list_type::empty; using list_type::end; using list_type::find;
+            /**
+             * Light weight free() operations from either end,
+             * involving no compaction.
+             */
+            enum class remove_direction : char {from_head, from_tail};
+            void free(remove_direction, void const*);
+            /**
+             * State changes
+             */
+            void freeze();
+            void thaw();
+            /**
+             * Auxillary others
+             */
+            using list_type::iterator; using list_type::const_iterator;
         };
 
         struct BaseHistoryRetainTrait {
@@ -472,12 +546,6 @@ namespace voltdb {
         };
 
         template<> struct HistoryRetainTrait<gc_policy::batched> : BaseHistoryRetainTrait {
-            static constexpr auto const BatchSize =
-#ifdef NDEBUG
-512lu;
-#else
-16lu;          // for eecheck only
-#endif
             size_t m_size = 0;
             forward_list<void const*> m_batched{};
             HistoryRetainTrait(cb_type const&);
@@ -502,7 +570,6 @@ namespace voltdb {
             bool m_hasDeletes = false;      // observer for iterator::advance()
             Alloc m_storage;
             void* m_last = nullptr;         // last allocation by copy(void const*);
-            AllocPosition const& m_boundary;
             /**
              * Creates a deep copy of the tuple stored in local
              * storage, and keep track of it.
@@ -526,7 +593,7 @@ namespace voltdb {
         public:
             enum class ChangeType : char {Update, Insertion, Deletion};
             using is_hook = integral_constant<bool, true>;
-            TxnPreHook(size_t, AllocPosition const&);
+            TxnPreHook(size_t);
             TxnPreHook(TxnPreHook const&) = delete;
             TxnPreHook(TxnPreHook&&) = delete;
             TxnPreHook& operator=(TxnPreHook const&) = delete;
@@ -535,7 +602,7 @@ namespace voltdb {
             // NOTE: the deletion event need to happen before
             // calling add(...), unlike insertion/update.
             void add(CompactingChunks const&, ChangeType, void const*);
-            void const* reverted(void const*) const;               // revert history at this place!
+            void const* operator()(void const*) const;             // revert history at this place!
             void release(void const*);                             // local memory clean-up. Client need to call this upon having done what is needed to record current address in snapshot.
             // auxillary buffer that client must need for tuple deletion/update operation,
             // to hold value before change.
@@ -552,7 +619,7 @@ namespace voltdb {
          */
         template<typename Hook, typename E = typename enable_if<Hook::is_hook::value>::type>
         class HookedCompactingChunks : public CompactingChunks, public Hook {
-            using CompactingChunks::allocate; using CompactingChunks::free;// hide details
+            using CompactingChunks::free;// hide details
             using CompactingChunks::freeze; using Hook::freeze;
             using Hook::add; using Hook::copy;
         public:
@@ -566,6 +633,17 @@ namespace voltdb {
             void* allocate();                          // NOTE: now that client in control of when to fill in, be cautious not to overflow!!
             void update(void*);                        // NOTE: this must be called prior to any memcpy operations happen
             void const* remove(void*);
+            /**
+             * Light weight free() operations from either end,
+             * involving no compaction. Removing from head when
+             * frozen is forbidden.
+             *
+             * When removing from head direction, the last invocation must be
+             * followed by another new invocation as
+             * (remove_direction::from_head, nullptr). Forgetting to do so will
+             * result in uncleaned removal (i.e. part of remove calls are lost).
+             */
+            void remove(remove_direction, void const*);
             /**
              * Batch removal using a single call
              * \arg #1: a set of allocation addresses to be
@@ -610,7 +688,7 @@ namespace voltdb {
             typename = typename enable_if<is_class<Tag>::value && is_chunks<Chunks>::value>::type>
         struct IterableTableTupleChunks final {
             using iterator_value_type = void*;         // constness-independent type being iterated over
-            static bool const FALSE_VALUE;             // default binding to iterator_type::m_deletedSnapshot when it is ignored.
+            using chunk_type = Chunks;
             static Tag s_tagger;
             IterableTableTupleChunks() = delete;       // only iterator types can be created/used
             template<iterator_permission_type perm, iterator_view_type vtype>
@@ -626,6 +704,8 @@ namespace voltdb {
                 using list_iterator_type = typename conditional<perm == iterator_permission_type::ro,
                       typename Chunks::list_type::const_iterator, typename Chunks::list_type::iterator>::type;
                 list_iterator_type m_iter;
+                bool const m_hasTxnInvisibleChunks;    // can be true only if in snapshot view, is frozen, and contains chunks
+                // only visible to snapshot
             protected:
                 using value_type = typename super::value_type;
                 // ctor arg type
@@ -639,18 +719,18 @@ namespace voltdb {
                     void remove(container_type);
                 } static s_constructible;
                 value_type m_cursor;
-                bool const& m_deletedSnapshot;        // has any tuple deletion occurred during snapshot process?
                 void advance();
                 container_type storage() const noexcept;
                 list_iterator_type const& list_iterator() const noexcept;
+                list_iterator_type& list_iterator() noexcept;
+                operator position_type() const noexcept;
             public:
                 using constness = integral_constant<bool, perm == iterator_permission_type::ro>;
-                iterator_type(container_type, bool const& = FALSE_VALUE);
+                iterator_type(container_type);
                 iterator_type(iterator_type const&) = default;
                 iterator_type(iterator_type&&) = default;
                 ~iterator_type();
                 static iterator_type begin(container_type);
-                static iterator_type end(container_type);
                 bool operator==(iterator_type const&) const noexcept;
                 inline bool operator!=(iterator_type const& o) const noexcept {
                     return ! operator==(o);
@@ -667,11 +747,31 @@ namespace voltdb {
             using const_iterator = iterator_type<iterator_permission_type::ro, iterator_view_type::txn>;
 
             static iterator begin(Chunks&);
-            static iterator end(Chunks&);
             static const_iterator cbegin(Chunks const&);
-            static const_iterator cend(Chunks const&);
             static const_iterator begin(Chunks const&);
-            static const_iterator end(Chunks const&);
+
+            /**
+             * Special iterator that survives multiple txns.
+             * The enclosing Chunks type must be compacting.
+             */
+            class elastic_iterator : iterator_type<iterator_permission_type::ro, iterator_view_type::txn> {
+                using super = iterator_type<iterator_permission_type::ro, iterator_view_type::txn>;
+                using container_type = typename super::container_type;
+                using value_type = typename super::value_type;
+                position_type const m_txnBoundary;
+                size_t m_chunkId;
+                void refresh();
+            public:
+                elastic_iterator(container_type);
+                using constness = typename super::constness;
+                static elastic_iterator begin(container_type);
+                bool drained() noexcept;
+                elastic_iterator& operator++();
+                elastic_iterator operator++(int);
+                value_type operator*();
+                position_type const& txnBoundary() const noexcept;
+                using super::operator position_type;
+            };
 
             /**
              * Iterators with callback, applied when
@@ -685,52 +785,29 @@ namespace voltdb {
              * if call back may return NULL, the client must know
              * about it and skip/throw accordingly.
              */
-            template<iterator_permission_type perm>
+            template<typename Trans, iterator_permission_type perm>
             class iterator_cb_type : public iterator_type<perm, iterator_view_type::snapshot> {
                 using super = iterator_type<perm, iterator_view_type::snapshot>;
+                using cb_type = typename conditional<perm == iterator_permission_type::ro,
+                      Trans const&, Trans&>::type;
+                cb_type m_cb;
             protected:
                 using value_type = typename super::value_type;
-                // call-back type: must be std::function since it's
-                // determined at run-time via history_type object
-                using cb_type = function<value_type(value_type)> const;
                 using container_type = typename super::container_type;
-                cb_type m_cb;
             public:
                 value_type operator*() noexcept;
-                iterator_cb_type(container_type, cb_type, bool const& = FALSE_VALUE);
+                iterator_cb_type(container_type, cb_type);
                 static iterator_cb_type begin(container_type, cb_type);
             };
-
-            template<typename Hook, iterator_permission_type perm>
-            class time_traveling_iterator_type : public iterator_cb_type<perm> {
-                using super = iterator_cb_type<perm>;
-                using history_type = typename add_lvalue_reference<typename conditional<
-                    perm == iterator_permission_type::ro, Hook const, Hook>::type>::type;
-                function<void const*()> const m_extendingCb;
-                void advance();
-            public:
-                using container_type = typename super::container_type;
-                using value_type = typename super::value_type;
-                static time_traveling_iterator_type begin(container_type, history_type);
-                value_type operator*() noexcept;
-                bool drained() const noexcept;
-                time_traveling_iterator_type& operator++();           // Need to redefine/shadow, since the polymorphism is meant to be used statically
-                time_traveling_iterator_type operator++(int);
-            protected:
-                void const* m_extendingPtr;
-                time_traveling_iterator_type(container_type, history_type);
-            };
-            template<typename Hook>
-            using iterator_cb = time_traveling_iterator_type<Hook, iterator_permission_type::rw>;
-            template<typename Hook>
-            using const_iterator_cb = time_traveling_iterator_type<Hook, iterator_permission_type::ro>;
+            // The following 2 typedefs are for testing purpose only.
+            template<typename Trans> using iterator_cb = iterator_cb_type<Trans, iterator_permission_type::rw>;
+            template<typename Trans> using const_iterator_cb = iterator_cb_type<Trans, iterator_permission_type::ro>;
 
             /**
              * This is the snapshot iterator for the client. The
-             * iterator_cb_type and time_traveling_iterator_type
-             * are intermediate abstractions that prepare for
-             * this type. Of course, you may create slightly
-             * different combinations in the same gist of
+             * iterator_cb_type is an intermediate abstraction that
+             * prepare for this type. Of course, you may create
+             * slightly different combinations in the same gist of
              * HookedCompactingChunks, and instantiate it to
              * hooked_iterator_type.
              *
@@ -742,14 +819,14 @@ namespace voltdb {
              * for where this is checked.
              */
             template<iterator_permission_type perm>
-            class hooked_iterator_type : public time_traveling_iterator_type<typename Chunks::hook_type, perm> {
-                using super = time_traveling_iterator_type<typename Chunks::hook_type, perm>;
+            class hooked_iterator_type : public iterator_cb_type<typename Chunks::hook_type, perm> {
+                using super = iterator_cb_type<typename Chunks::hook_type, perm>;
             public:
                 using container_type = typename super::container_type;
                 using value_type = typename super::value_type;
                 hooked_iterator_type(typename super::container_type);
-                static hooked_iterator_type begin(container_type);
                 bool drained() const noexcept;
+                static hooked_iterator_type begin(container_type);
             };
             using hooked_iterator = hooked_iterator_type<iterator_permission_type::rw>;
             using const_hooked_iterator = hooked_iterator_type<iterator_permission_type::ro>;
@@ -807,14 +884,15 @@ namespace voltdb {
          */
         template<typename iterator_type, typename Fun, typename Chunks,
             typename = typename enable_if<is_chunks<Chunks>::value && iterator_type::constness::value == is_const<Chunks>::value>::type>
-        inline void until(Chunks& c, Fun&& f) {
+        inline bool until(Chunks& c, Fun&& f) {
             for (auto iter = iterator_type::begin(c); ! iter.drained();) {
                 auto* addr = *iter;
                 ++iter;
                 if (f(addr)) {
-                    break;
+                    return true;
                 }
             }
+            return false;
         }
 
         // versions for multi-ary iterator constructors
@@ -837,16 +915,17 @@ namespace voltdb {
         }
 
         template<typename iterator_type, typename Fun, typename Chunks, typename... Args>
-        inline void until(Chunks& c, Fun&& f, Args&&... args) {
+        inline bool until(Chunks& c, Fun&& f, Args&&... args) {
             static_assert(iterator_type::constness::value == is_const<Chunks>::value,
                     "until(): constness of Chunks and iterator should be the same");
             for (auto iter = iterator_type::begin(c, forward<Args&&>(args)...); ! iter.drained();) {
                 auto* addr = *iter;
                 ++iter;
                 if (f(addr)) {
-                    break;
+                    return true;
                 }
             }
+            return false;
         }
     }
 

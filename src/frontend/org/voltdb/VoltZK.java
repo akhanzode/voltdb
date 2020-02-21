@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2019 VoltDB Inc.
+ * Copyright (C) 2008-2020 VoltDB Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -557,9 +557,7 @@ public class VoltZK {
             case mpRepairInProgress:
                 break;
             case decommissionReplicasInProgress:
-                if (blockers.contains(leafNodeRejoinInProgress)) {
-                    errorMsg = ERROR_REJOIN;
-                } else if (blockers.contains(snapshotBlocker)) {
+                if (blockers.contains(snapshotBlocker)) {
                     errorMsg = "while snapshot is in progress";
                 }
                 break;

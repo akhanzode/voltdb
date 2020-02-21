@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2019 VoltDB Inc.
+ * Copyright (C) 2008-2020 VoltDB Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -46,11 +46,6 @@ public class JiggleExportSinglePartition extends VoltProcedure {
 
         // Insert a new record
         SampleRecord record = new SampleRecord(rowid, rand);
-        /*
-          Uncomment this to duplicate the export data in memory.
-          Useful for debugging export data correctness, but not useful
-          for not running out of memory....
-         */
 
         SQLStmt[] statements = {insert, export_kafka, export_rabbit, export_file, export_jdbc};
         for (SQLStmt stmt: statements) {

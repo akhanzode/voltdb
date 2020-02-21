@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2019 VoltDB Inc.
+ * Copyright (C) 2008-2020 VoltDB Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -47,6 +47,25 @@ public class ClientUtils {
         } else {
             for (int ii = 0; ii < mypos; ii++) {
                 checksum += buffer.get();
+            }
+        }
+        buffer.position(mypos);
+        return checksum;
+    }
+
+    public static final long cheesyBufferCheckSumWithOrder(ByteBuffer buffer) {
+        final int mypos = buffer.position();
+        buffer.position(0);
+        long checksum = 0;
+        if (buffer.hasArray()) {
+            final byte bytes[] = buffer.array();
+            final int end = buffer.arrayOffset() + mypos;
+            for (int ii = buffer.arrayOffset(); ii < end; ii++) {
+                checksum += bytes[ii] * ii;
+            }
+        } else {
+            for (int ii = 0; ii < mypos; ii++) {
+                checksum += buffer.get() * ii;
             }
         }
         buffer.position(mypos);
