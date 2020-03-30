@@ -75,7 +75,10 @@ FatalExceptionTypes = ['NullPointerException',
 NonfatalExceptionTypes = ['ClassCastException',
                           'SAXParseException',
                           'VoltTypeException',
-                          'ERROR: IN: NodeSchema'
+                          'ERROR: IN: NodeSchema',
+                          # this is actually a PostgreSQL error message, not,
+                          # strictly speaking, an exception:
+                          'timeout: procedure call took longer than 5 seconds'
                           ]
 # Rejected idea (happens frequently in advanced-scalar-set-subquery):
 #                        'VOLTDB ERROR: UNEXPECTED FAILURE',
@@ -96,7 +99,7 @@ AllExceptionTypes.extend(NonfatalExceptionTypes)
 def highlight(s, flag):
     if not isinstance(s, basestring):
         s = str(s)
-    return flag and "<span style=\"color: red\">%s</span>" % (s) or s
+    return flag and '<span style="color:red">%s**</span>' % (s) or s
 
 def as_html_unicode_string(s):
     if isinstance(s, list):
@@ -185,9 +188,14 @@ def generate_modified_query(cmpdb, sql, modified_sql):
         result = '<p>Modified SQL query, as sent to ' + str(cmpdb) + ':</p><h2>' + str(mod_sql) + '</h2>'
     return result
 
-def generate_detail(name, item, output_dir, cmpdb, modified_sql, reproducer, ddl_file):
+def generate_detail(name, item, output_dir, cmpdb, modified_sql,
+                    reproducer, ddl_file, create_detail_files=True):
     if output_dir == None:
         return
+
+    filename = "%s.html" % (item["id"])
+    if not create_detail_files:
+        return filename
 
     details = """
 <html>
@@ -235,7 +243,6 @@ td {width: 50%%}
        generate_table_str(item, "jni"),
        generate_table_str(item, "cmp") )
 
-    filename = "%s.html" % (item["id"])
     fd = open(os.path.join(output_dir, filename), "w")
     fd.write(details.encode("utf-8"))
     fd.close()
@@ -246,7 +253,8 @@ def safe_print(s):
     if not __quiet:
         print s
 
-def print_section(name, mismatches, output_dir, cmpdb, modified_sql, reproducer, ddl_file):
+def print_section(name, mismatches, output_dir, cmpdb, modified_sql,
+                  reproducer, ddl_file, max_num_detail_files=-1):
     result = """
 <h2>%s: %d</h2>
 <table cellpadding=3 cellspacing=1 border=1>
@@ -258,10 +266,31 @@ def print_section(name, mismatches, output_dir, cmpdb, modified_sql, reproducer,
 </tr>
 """ % (name, len(mismatches), cmpdb)
 
+    max_num_detail_files_int = int(max_num_detail_files)
+    # print "DEBUG: In SQLCoverageReport.py, print_section:"
+    # print "DEBUG:   max_num_detail_files    :", str(max_num_detail_files),     str(type(max_num_detail_files))
+    # print "DEBUG:   max_num_detail_files_int:", str(max_num_detail_files_int), str(type(max_num_detail_files_int))
+    # print "DEBUG:   len(mismatches)         :", str(len(mismatches))
+
+    if max_num_detail_files_int < 0 or len(mismatches) <= max_num_detail_files_int:
+        create_detail_files = mismatches
+    else:
+        n = max_num_detail_files_int / 2.0
+        # create only the first n and the last n detail files (for a total of
+        # max_num_detail_files, with the extra in the first group if it's odd)
+        create_detail_files = []
+        for j in range(0, int(round(n+0.1))):
+            create_detail_files.append(mismatches[j])
+        for j in range(len(mismatches) - int(round(n-0.1)), len(mismatches)):
+            create_detail_files.append(mismatches[j])
+
+    # print "DEBUG:   len(create_detail_files):", str(len(create_detail_files))
+
     temp = []
     for i in mismatches:
         safe_print(i["SQL"])
-        detail_page = generate_detail(name, i, output_dir, cmpdb, modified_sql, reproducer, ddl_file)
+        detail_page = generate_detail(name, i, output_dir, cmpdb, modified_sql,
+                                      reproducer, ddl_file, (i in create_detail_files) )
         jniStatus = i["jni"]["Status"]
         if jniStatus < 0:
             jniStatus = "Error: " + `jniStatus`
@@ -430,8 +459,8 @@ def get_reproducer(reproduce_results, sql):
 def generate_html_reports(suite, seed, statements_path, cmpdb_path, jni_path,
                           output_dir, report_invalid, report_all, extra_stats='',
                           cmpdb='HSqlDB', modified_sql_path=None,
-                          max_mismatches=0, within_minutes=0,
-                          reproducer=Reproduce.NONE, ddl_file=None,
+                          max_expected_mismatches=0, max_detail_pages=-1,
+                          within_minutes=0, reproducer=Reproduce.NONE, ddl_file=None,
                           cntonly=False):
     if output_dir != None and not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -472,12 +501,35 @@ def generate_html_reports(suite, seed, statements_path, cmpdb_path, jni_path,
             notFound = True
             jni = {'Status': -99, 'Exception': 'None', 'Result': None,
                    'Info': '<p style="color:red">RESULT NOT FOUND! Probably due to a VoltDB crash!</p>'}
-        try:
-            cdb = cPickle.load(cmpdb_file)
-        except EOFError as e:
+
+        cdb_info = ''
+        while True:
+            try:
+                cdb = cPickle.load(cmpdb_file)
+            except EOFError as e:
+                notFound = True
+                cdb = {'Status': -98, 'Exception': 'None', 'Result': None,
+                       'Info': '<p style="color:red">RESULT NOT FOUND! Probably due to a ' + cmpdb + ' backend crash!</p>'}
+
+            if 'timeout: procedure call took longer than 5 seconds' in (cdb.get('Info') or ''):
+                if cdb_info:
+                    cdb_info += ';\n' + cdb.get('Info')
+                else:
+                    cdb_info = cdb.get('Info')
+                print "WARNING: found %s error '%s'; ignoring Status '%s'" % (cmpdb, cdb.get('Info'), cdb.get('Status'))
+            else:
+                if cdb_info:
+                    if cdb.get('Info'):
+                        cdb['Info'] = cdb_info + ';\n' + cdb.get('Info')
+                    else:
+                        cdb['Info'] = cdb_info
+                break
+
+        # VoltDB usually produces this error message, for the first couple
+        # of queries after a crash, before results disappear completely
+        if ('Connection broken' in (jni.get('Info') or '') or
+            'Connection broken' in (cdb.get('Info') or '') ):
             notFound = True
-            cdb = {'Status': -98, 'Exception': 'None', 'Result': None,
-                   'Info': '<p style="color:red">RESULT NOT FOUND! Probably due to a ' + cmpdb + ' backend crash!</p>'}
 
         count += 1
         if int(jni["Status"]) != 1:
@@ -559,7 +611,7 @@ def generate_html_reports(suite, seed, statements_path, cmpdb_path, jni_path,
     topLines = getTopSummaryLines(cmpdb, False)
     currentTime = datetime.now().strftime("%A, %B %d, %I:%M:%S %p")
     keyStats = createSummaryInHTML(count, failures, len(mismatches), len(volt_fatal_excep), len(volt_nonfatal_excep),
-                                   len(cmpdb_excep), extra_stats, seed, max_mismatches)
+                                   len(cmpdb_excep), extra_stats, seed, max_expected_mismatches)
     report = """
 <html>
 <head>
@@ -586,36 +638,36 @@ h2 {text-transform: uppercase}
         return int(x["id"])
     if(len(mismatches) > 0):
         sorted(mismatches, cmp=cmp, key=key)
-        report += print_section("Mismatched Statements",
-                                mismatches,  output_dir, cmpdb, modified_sql, reproducer, ddl_file)
+        report += print_section("Mismatched Statements", mismatches,
+                                output_dir, cmpdb, modified_sql, reproducer, ddl_file, max_detail_pages)
 
     if(len(crashed) > 0):
         sorted(crashed, cmp=cmp, key=key)
-        report += print_section("Statements Missing Results, due to a Crash<br>(the first one probably caused the crash)",
-                                crashed,     output_dir, cmpdb, modified_sql, reproducer, ddl_file)
+        report += print_section("Statements Missing Results, due to a Crash<br>(the first one probably caused the crash)", crashed,
+                                output_dir, cmpdb, modified_sql, reproducer, ddl_file, max_detail_pages)
 
     if(len(volt_fatal_excep) > 0):
         sorted(volt_fatal_excep, cmp=cmp, key=key)
-        report += print_section("Statements That Cause a 'Fatal' Exception in VoltDB",
-                                volt_fatal_excep,    output_dir, cmpdb, modified_sql, reproducer, ddl_file)
+        report += print_section("Statements That Cause a 'Fatal' Exception in VoltDB", volt_fatal_excep,
+                                output_dir, cmpdb, modified_sql, reproducer, ddl_file, max_detail_pages)
 
     if(len(volt_nonfatal_excep) > 0):
         sorted(volt_nonfatal_excep, cmp=cmp, key=key)
-        report += print_section("Statements That Cause a 'Non-fatal' Exception in VoltDB",
-                                volt_nonfatal_excep, output_dir, cmpdb, modified_sql, reproducer, ddl_file)
+        report += print_section("Statements That Cause a 'Non-fatal' Exception in VoltDB", volt_nonfatal_excep,
+                                output_dir, cmpdb, modified_sql, reproducer, ddl_file, max_detail_pages)
 
     if(len(cmpdb_excep) > 0):
         sorted(cmpdb_excep, cmp=cmp, key=key)
-        report += print_section("Statements That Cause (any) Exception in " + cmpdb,
-                                cmpdb_excep, output_dir, cmpdb, modified_sql, reproducer, ddl_file)
+        report += print_section("Statements That Cause (any) Exception in " + cmpdb, cmpdb_excep,
+                                output_dir, cmpdb, modified_sql, reproducer, ddl_file, max_detail_pages)
 
     if report_invalid and (len(invalid) > 0):
-        report += print_section("Invalid Statements",
-                                invalid,     output_dir, cmpdb, modified_sql, reproducer, ddl_file)
+        report += print_section("Invalid Statements", invalid,
+                                output_dir, cmpdb, modified_sql, reproducer, ddl_file, max_detail_pages)
 
     if report_all:
-        report += print_section("Total Statements",
-                                all_results, output_dir, cmpdb, modified_sql, reproducer, ddl_file)
+        report += print_section("Total Statements", all_results,
+                                output_dir, cmpdb, modified_sql, reproducer, ddl_file)
 
     report += """
 </body>
@@ -761,7 +813,7 @@ h2 {text-transform: uppercase}
                                                    against VoltDB.</td></tr>
 <tr><td colspan=2>Exceptions/VN: number of 'Non-fatal' Exceptions (those deemed NOT worth failing the test, e.g., VoltTypeException's) while running
                                                    against VoltDB.</td></tr>
-<tr><td colspan=2>Exceptions/%s: number of (any) Exceptions while running against %s (likely in VoltDB's %s backend code).</td></tr>
+<tr><td colspan=2>Exceptions/%s: number of (any) Exceptions (or timeouts) while running against %s (likely in VoltDB's %s backend code).</td></tr>
 <tr><td colspan=2>Crashes/V: number of VoltDB crashes.</td></tr>
 <tr><td colspan=2>Crashes/%s: number of %s crashes.</td></tr>
 <tr><td colspan=2>Crashes/C: number of crashes while comparing VoltDB and %s results.</td></tr>

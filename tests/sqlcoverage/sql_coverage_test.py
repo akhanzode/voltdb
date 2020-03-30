@@ -241,23 +241,11 @@ def get_max_mismatches(comparison_database, suite_name):
         # Failures in joined-matview-int due to ENG-11086
         elif config_name == 'joined-matview-int':
             max_mismatches = 46440
+        # Failures in geo-functions due to ENG-19236
+        elif config_name == 'geo-functions':
+            max_mismatches = 3
 
     return max_mismatches
-
-
-def ignore_known_mismatches(comparison_database, suite_name, reproducer):
-    """Returns the type of reproducer to use when reproducing mismatches or
-    other problems. Normally, this just means the same 'reproducer' passed
-    in, but in certain cases, when running against PostgreSQL (or the PostGIS
-    extension of PostgreSQL), and using the default reproducer, 'DML', and
-    the test suite is one of those that regularly has known failures (see
-    get_max_mismatches above), then Reproduce.NONE should be used instead,
-    to avoid producing lots of meaningless reproducer*.html files.
-    """
-    if (comparison_database.startswith('Post') and reproducer == Reproduce.DML and
-            suite_name in ['joined-matview-default-full', 'joined-matview-int']):
-        reproducer = Reproduce.NONE
-    return reproducer
 
 
 def get_config_path(basedir, config_key, config_value):
@@ -275,9 +263,9 @@ def get_config_path(basedir, config_key, config_value):
 
 
 def run_config(suite_name, config, basedir, output_dir, random_seed,
-               report_invalid, report_all, reproducer, generate_only,
-               subversion_generation, submit_verbosely, ascii_only,
-               args, testConfigKit):
+               report_invalid, report_all, max_detail_files, reproducer,
+               generate_only, subversion_generation, submit_verbosely,
+               ascii_only, args, testConfigKit):
 
     # Store the current, initial system time (in seconds since January 1, 1970)
     time0 = time.time()
@@ -424,15 +412,15 @@ def run_config(suite_name, config, basedir, output_dir, random_seed,
     extraStats = (get_numerical_html_table_element(volt_crashes, error_above=0) +
                   get_numerical_html_table_element(cmp_crashes,  error_above=0) +
                   get_numerical_html_table_element(diff_crashes, error_above=0) + someStats )
-    max_mismatches = get_max_mismatches(comparison_database, suite_name)
+    max_expected_mismatches = get_max_mismatches(comparison_database, suite_name)
 
     global compare_results
     try:
         compare_results = imp.load_source("normalizer", config["normalizer"]).compare_results
         success = compare_results(suite_name, random_seed, statements_path, cmpdb_path,
                                   jni_path, output_dir, report_invalid, report_all, extraStats,
-                                  comparison_database, modified_sql_path, max_mismatches, within_minutes,
-                                  ignore_known_mismatches(comparison_database, config_name, reproducer),
+                                  comparison_database, modified_sql_path, max_expected_mismatches,
+                                  max_detail_files, within_minutes, reproducer,
                                   config.get("ddl"))
     except:
         print >> sys.stderr, "Compare (VoltDB & " + comparison_database + ") results crashed!"
@@ -769,6 +757,9 @@ if __name__ == "__main__":
     parser.add_option("-G", "--postgis", action="store_true",
                       dest="postgis", default=False,
                       help="compare VoltDB results to PostgreSQL, with the PostGIS extension")
+    parser.add_option("-d", "--maxdetailfiles", dest="max_detail_files", default="6",
+                      help="maximum number of detail files, per test suite, per failure category "
+                         + "(e.g. mismatches vs crashes vs various types of exceptions)")
     parser.add_option("-R", "--reproduce", dest="reproduce", default="DML",
                       help="Provide steps to reproduce failures, up to the specified level "
                          + "(NONE, DDL, DML, CTE, ALL)")
@@ -853,7 +844,8 @@ if __name__ == "__main__":
             # To add one more key
             testConfigKits["testCatalog"] = testCatalog
         result = run_config(config_name, config, basedir, report_dir, seed,
-                            options.report_invalid, options.report_all, reproducer,
+                            options.report_invalid, options.report_all,
+                            options.max_detail_files, reproducer,
                             options.generate_only, options.subversion_generation,
                             options.report_all, options.ascii_only, args, testConfigKits)
         statistics[config_name] = result["keyStats"]
@@ -863,15 +855,6 @@ if __name__ == "__main__":
         # for certain rare cases involving known errors in PostgreSQL
         if result["mis"] > get_max_mismatches(comparison_database, config_name):
             success = False
-        # If the number of mismatches is nonzero but less than (or equal to) the
-        # acceptable maximum, then we don't need to save the detailed results,
-        # so delete them
-        elif result["mis"] > 0:
-            print "Deleting unneeded result files, for expected mismatches:\n    " + \
-                report_dir + "/*.html"
-            for file in os.listdir(report_dir):
-                if file.endswith(".html") and not file.endswith("index.html"):
-                    os.remove(os.path.join(report_dir, file))
 
     # Write the summary
     time1 = time.time()
