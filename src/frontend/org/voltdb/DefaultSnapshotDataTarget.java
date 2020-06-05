@@ -39,11 +39,13 @@ import org.apache.hadoop_voltpatches.util.PureJavaCrc32;
 import org.apache.hadoop_voltpatches.util.PureJavaCrc32C;
 import org.json_voltpatches.JSONObject;
 import org.json_voltpatches.JSONStringer;
+import org.voltcore.logging.Level;
 import org.voltcore.logging.VoltLogger;
 import org.voltcore.utils.Bits;
 import org.voltcore.utils.CoreUtils;
 import org.voltcore.utils.DBBPool;
 import org.voltcore.utils.DBBPool.BBContainer;
+import org.voltcore.utils.RateLimitedLogger;
 import org.voltdb.messaging.FastSerializer;
 import org.voltdb.sysprocs.saverestore.SnapshotUtil;
 import org.voltdb.utils.CompressionService;
@@ -70,7 +72,9 @@ public class DefaultSnapshotDataTarget implements SnapshotDataTarget {
     private final FileChannel m_channel;
     private final FileOutputStream m_fos;
     private static final VoltLogger SNAP_LOG = new VoltLogger("SNAPSHOT");
+    private final RateLimitedLogger m_syncServiceLogger =  new RateLimitedLogger(TimeUnit.MINUTES.toNanos(1), SNAP_LOG, Level.ERROR);
     private Runnable m_onCloseHandler = null;
+    private Runnable m_inProgressHandler = null;
 
     /*
      * If a write fails then this snapshot is hosed.
@@ -86,7 +90,14 @@ public class DefaultSnapshotDataTarget implements SnapshotDataTarget {
 
     private volatile long m_bytesWritten = 0;
 
-    private static final Semaphore m_bytesAllowedBeforeSync = new Semaphore((1024 * 1024) * 256);
+    /**
+     * Ideally this number should be equal or more than
+     * 2MB * (# of persistent tables + # of materialized views),
+     * 2MB is the maximum snapshot buffer size.
+     * If this number is set too low, database will sync frequently, results in longer snapshot generation time.
+     */
+    private static final int s_maxPermit = Integer.getInteger("SNAPSHOT_MEGABYTES_ALLOWED_BEFORE_SYNC", 256);
+    private static final Semaphore s_bytesAllowedBeforeSync = new Semaphore((1024 * 1024) * s_maxPermit);
     private final AtomicInteger m_bytesWrittenSinceLastSync = new AtomicInteger(0);
 
     private final ScheduledFuture<?> m_syncTask;
@@ -148,7 +159,7 @@ public class DefaultSnapshotDataTarget implements SnapshotDataTarget {
             final int numPartitions,
             final boolean isReplicated,
             final List<Integer> partitionIds,
-            final VoltTable schemaTable,
+            final byte[] schemaBytes,
             final long txnId,
             final long timestamp) throws IOException {
         this(
@@ -160,7 +171,7 @@ public class DefaultSnapshotDataTarget implements SnapshotDataTarget {
                 numPartitions,
                 isReplicated,
                 partitionIds,
-                schemaTable,
+                schemaBytes,
                 txnId,
                 timestamp,
                 new int[] { 0, 0, 0, 2 });
@@ -175,7 +186,7 @@ public class DefaultSnapshotDataTarget implements SnapshotDataTarget {
             final int numPartitions,
             final boolean isReplicated,
             final List<Integer> partitionIds,
-            final VoltTable schemaTable,
+            final byte[] schemaBytes,
             final long txnId,
             final long timestamp,
             int version[]
@@ -237,9 +248,6 @@ public class DefaultSnapshotDataTarget implements SnapshotDataTarget {
         container.b().putInt(container.b().remaining() - 4);
         container.b().position(0);
 
-        final byte schemaBytes[];
-        schemaBytes = PrivateVoltTableFactory.getSchemaBytes(schemaTable);
-
         final PureJavaCrc32 crc = new PureJavaCrc32();
         ByteBuffer aggregateBuffer = ByteBuffer.allocate(container.b().remaining() + schemaBytes.length);
         aggregateBuffer.put(container.b());
@@ -286,10 +294,16 @@ public class DefaultSnapshotDataTarget implements SnapshotDataTarget {
             private long syncedBytes = 0;
             @Override
             public void run() {
-                //Only sync for at least 4 megabyte of data, enough to amortize the cost of seeking
-                //on ye olden platters. Since we are appending to a file it's actually 2 seeks.
-                while (m_bytesWrittenSinceLastSync.get() > (1024 * 1024 * 4)) {
-                    final int bytesSinceLastSync = m_bytesWrittenSinceLastSync.getAndSet(0);
+                /*
+                 * Only sync for at least 4 megabyte of data, enough to amortize the cost of seeking
+                 * on ye olden platters. Since we are appending to a file it's actually 2 seeks.
+                 *
+                 * Sync for at least single page size (4K, thus more frequently) if bytes allowed to
+                 * write is running low.
+                 */
+                while (m_bytesWrittenSinceLastSync.get() > (1024 * 1024 * 4) ||
+                        (m_bytesWrittenSinceLastSync.get() > Bits.pageSize() &&
+                                s_bytesAllowedBeforeSync.availablePermits() < SnapshotSiteProcessor.m_snapshotBufferLength)) {
                     long positionAtSync = 0;
                     try {
                         positionAtSync = m_channel.position();
@@ -297,12 +311,20 @@ public class DefaultSnapshotDataTarget implements SnapshotDataTarget {
                         syncedBytes = Bits.sync_file_range(SNAP_LOG, m_fos.getFD(), m_channel, syncStart, positionAtSync);
                     } catch (IOException e) {
                         if (!(e instanceof java.nio.channels.AsynchronousCloseException )) {
-                            SNAP_LOG.error("Error syncing snapshot", e);
+                            m_syncServiceLogger.log(System.nanoTime(), Level.ERROR, e,
+                                    "Error syncing snapshot " + m_file +
+                                    ". This message is rate limited to once every one minute.");
                         } else {
-                            SNAP_LOG.debug("Asynchronous close syncing snasphot data, presumably graceful", e);
+                            SNAP_LOG.info("Asynchronous close syncing snasphot data, presumably graceful", e);
                         }
+                    } catch (Throwable t) {
+                        m_syncServiceLogger.log(System.nanoTime(), Level.ERROR, t,
+                                "Unexpected error while fsyncing snapshot data to file " + m_file +
+                                ". This message is rate limited to once every one minute.");
+                    } finally {
+                        final int bytesSinceLastSync = m_bytesWrittenSinceLastSync.getAndSet(0);
+                        s_bytesAllowedBeforeSync.release(bytesSinceLastSync);
                     }
-                    m_bytesAllowedBeforeSync.release(bytesSinceLastSync);
 
                     /*
                      * Don't pollute the page cache with snapshot data, use fadvise
@@ -328,7 +350,9 @@ public class DefaultSnapshotDataTarget implements SnapshotDataTarget {
                             }
                         }
                     } catch (Throwable t) {
-                        SNAP_LOG.error("Error fadvising snapshot data", t);
+                        m_syncServiceLogger.log(System.nanoTime(), Level.ERROR, t,
+                                "Error fadvising snapshot data." +
+                                " This message is rate limited to once every one minute.");
                     }
                 }
             }
@@ -373,7 +397,7 @@ public class DefaultSnapshotDataTarget implements SnapshotDataTarget {
             }
             m_channel.force(false);
         } finally {
-            m_bytesAllowedBeforeSync.release(m_bytesWrittenSinceLastSync.getAndSet(0));
+            s_bytesAllowedBeforeSync.release(m_bytesWrittenSinceLastSync.getAndSet(0));
         }
         m_channel.position(8);
         ByteBuffer completed = ByteBuffer.allocate(1);
@@ -477,7 +501,7 @@ public class DefaultSnapshotDataTarget implements SnapshotDataTarget {
 
                             ByteBuffer lengthPrefix = ByteBuffer.allocate(12);
                             permitAcquired = payloadBuffer.remaining();
-                            m_bytesAllowedBeforeSync.acquire(permitAcquired);
+                            s_bytesAllowedBeforeSync.acquire(permitAcquired);
                             //Length prefix does not include 4 header items, just compressd payload
                             //that follows
                             lengthPrefix.putInt(payloadBuffer.remaining() - 16);//length prefix
@@ -506,7 +530,7 @@ public class DefaultSnapshotDataTarget implements SnapshotDataTarget {
                         }
                     } else {
                         permitAcquired = tupleData.remaining();
-                        m_bytesAllowedBeforeSync.acquire(permitAcquired);
+                        s_bytesAllowedBeforeSync.acquire(permitAcquired);
                         while (tupleData.hasRemaining()) {
                             totalWritten += m_channel.write(tupleData);
                         }
@@ -515,7 +539,7 @@ public class DefaultSnapshotDataTarget implements SnapshotDataTarget {
                     m_bytesWrittenSinceLastSync.addAndGet(totalWritten);
                 } catch (IOException e) {
                     if (permitAcquired > 0) {
-                        m_bytesAllowedBeforeSync.release(permitAcquired);
+                        s_bytesAllowedBeforeSync.release(permitAcquired);
                     }
                     m_writeException = e;
                     SNAP_LOG.error("Error while attempting to write snapshot data to file " + m_file, e);
@@ -592,5 +616,13 @@ public class DefaultSnapshotDataTarget implements SnapshotDataTarget {
                 }
             }
         });
+    }
+
+    public void setInProgressHandler(Runnable inProgress) {
+        m_inProgressHandler = inProgress;
+    }
+
+    public void trackProgress() {
+        m_inProgressHandler.run();
     }
 }

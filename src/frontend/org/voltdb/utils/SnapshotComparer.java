@@ -17,27 +17,17 @@
 
 package org.voltdb.utils;
 
-import com.jcraft.jsch.ChannelSftp;
-import com.jcraft.jsch.JSch;
-import com.jcraft.jsch.JSchException;
-import com.jcraft.jsch.Session;
-import com.jcraft.jsch.SftpException;
-import org.apache.commons.io.FileUtils;
-import org.voltcore.logging.VoltLogger;
-import org.voltcore.utils.DBBPool;
-import org.voltdb.ElasticHashinator;
-import org.voltdb.PrivateVoltTableFactory;
-import org.voltdb.RestoreAgent;
-import org.voltdb.VoltTable;
-import org.voltdb.catalog.Catalog;
-import org.voltdb.catalog.Cluster;
-import org.voltdb.catalog.Database;
-import org.voltdb.catalog.Table;
-import org.voltdb.sysprocs.saverestore.HashinatorSnapshotData;
-import org.voltdb.sysprocs.saverestore.SnapshotPathType;
-import org.voltdb.sysprocs.saverestore.SnapshotUtil;
-import org.voltdb.sysprocs.saverestore.SnapshotUtil.Snapshot;
-import org.voltdb.sysprocs.saverestore.TableSaveFile;
+import static org.voltdb.RestoreAgent.checkSnapshotIsComplete;
+import static org.voltdb.utils.SnapshotComparer.CONSOLE_LOG;
+import static org.voltdb.utils.SnapshotComparer.DELIMITER;
+import static org.voltdb.utils.SnapshotComparer.DIFF_FOLDER;
+import static org.voltdb.utils.SnapshotComparer.REMOTE_SNAPSHOT_FOLDER;
+import static org.voltdb.utils.SnapshotComparer.SNAPSHOT_LOG;
+import static org.voltdb.utils.SnapshotComparer.STATUS_INCONSISTENCY;
+import static org.voltdb.utils.SnapshotComparer.STATUS_INVALID_INPUT;
+import static org.voltdb.utils.SnapshotComparer.STATUS_OK;
+import static org.voltdb.utils.SnapshotComparer.TEMP_FOLDER;
+import static org.voltdb.utils.SnapshotComparer.VPTFILE_PATTERN;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -52,11 +42,27 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.Vector;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-import static org.voltdb.RestoreAgent.checkSnapshotIsComplete;
-import static org.voltdb.utils.SnapshotComparer.CONSOLE_LOG;
-import static org.voltdb.utils.SnapshotComparer.SNAPSHOT_LOG;
-import static org.voltdb.utils.SnapshotComparer.remoteSnapshotFolder;
+import org.apache.commons.io.FileUtils;
+import org.voltcore.logging.VoltLogger;
+import org.voltcore.utils.DBBPool;
+import org.voltdb.ElasticHashinator;
+import org.voltdb.PrivateVoltTableFactory;
+import org.voltdb.RestoreAgent;
+import org.voltdb.SnapshotTableInfo;
+import org.voltdb.VoltTable;
+import org.voltdb.sysprocs.saverestore.SnapshotPathType;
+import org.voltdb.sysprocs.saverestore.SnapshotUtil;
+import org.voltdb.sysprocs.saverestore.SnapshotUtil.Snapshot;
+import org.voltdb.sysprocs.saverestore.TableSaveFile;
+
+import com.jcraft.jsch.ChannelSftp;
+import com.jcraft.jsch.JSch;
+import com.jcraft.jsch.JSchException;
+import com.jcraft.jsch.Session;
+import com.jcraft.jsch.SftpException;
 
 
 /**
@@ -64,13 +70,25 @@ import static org.voltdb.utils.SnapshotComparer.remoteSnapshotFolder;
  */
 
 public class SnapshotComparer {
+    public static int STATUS_OK = 0;
+    public static int STATUS_INVALID_INPUT = -1;
+    public static int STATUS_INCONSISTENCY = -2;
+    public static int STATUS_UNKNOWN_ERROR = -3;
+
     public static final VoltLogger CONSOLE_LOG = new VoltLogger("CONSOLE");
     public static final VoltLogger SNAPSHOT_LOG = new VoltLogger("SNAPSHOT");
     // A string builder to hold all snapshot validation errors, gets printed when no viable snapshot is found
     public static final StringBuilder m_ErrLogStr =
             new StringBuilder("The comparing process can not find a viable snapshot. "
                     + "Restore requires a complete, uncorrupted snapshot.");
-    public static final String remoteSnapshotFolder = "./remoteSnapshot/";
+    public static final String REMOTE_SNAPSHOT_FOLDER = "./remoteSnapshot/";
+    public static final Pattern VPTFILE_PATTERN =
+            Pattern.compile("host_(\\d)\\.vpt", Pattern.CASE_INSENSITIVE);
+    // for temp result of csv/tsv file
+    public static final char DELIMITER = '\t';
+    public static final String TEMP_FOLDER = "./tempFolder/";
+    public static final String DIFF_FOLDER = "./diffOutput/";
+
 
     public static void main(String[] args) {
         if (args.length == 0 || args[0].equals("--help")) {
@@ -79,34 +97,42 @@ public class SnapshotComparer {
 
         Config config = new Config(args);
         if (!config.valid) {
-            System.exit(-1);
+            System.exit(STATUS_INVALID_INPUT);
         }
 
-        SnapshotLoader source = new SnapshotLoader(config.local, config.username, config.sourceNonce, config.sourceDirs, config.sourceHosts);
+        SnapshotLoader source = new SnapshotLoader(config.local, config.username, config.sourceNonce, config.sourceDirs, config.sourceHosts, config.tables);
         if (config.selfCompare) {
-            source.selfCompare();
+            source.selfCompare(config.orderLevel);
         } else {
-            SnapshotLoader target = new SnapshotLoader(config.local, config.username, config.targetNonce, config.targetDirs, config.targetHosts);
+            SnapshotLoader target = new SnapshotLoader(config.local, config.username, config.targetNonce, config.targetDirs, config.targetHosts, config.tables);
             source.compareWith(target);
         }
-        System.exit(0);
     }
 
     private static void printHelpAndQuit(int code) {
         System.out.println("Usage: snapshotComparer --help");
         System.out.println("Self Comparision, verify data consistency among replicas of single snapshot: snapshotComparer --self nonce");
-        System.out.println("for local snapshots, use --dirs for specify directories: snapshotComparer --self --nonce nonce1 --dir dir1,dir2,dir3");
+        System.out.println("for local snapshots, use --dirs for specify directories: snapshotComparer --self --nonce nonce1 --dirs dir1,dir2,dir3");
         System.out.println("for remote snapshots, use --paths and --hosts for specify remote directories: snapshotComparer --self --nonce nonce1 --paths path1,path2 --hosts host1,host2 --user username");
         System.out.println();
         System.out.println("Peer Comparision, verify data consistency among snapshots: snapshotComparer nonce1 nonce2");
-        System.out.println("for local snapshots, use --dirs for specify directories: snapshotComparer  --nonce1 nonce1 --dir1 dir1-1,dir1-2,dir1-3 nonce2 --dir2 dir2-1,dir2-2,dir2-3");
+        System.out.println("for local snapshots, use --dirs for specify directories: snapshotComparer  --nonce1 nonce1 --dirs1 dir1-1,dir1-2,dir1-3 nonce2 --dirs2 dir2-1,dir2-2,dir2-3");
         System.out.println("for remote snapshots, use --paths and --hosts for specify remote directories: snapshotComparer --nonce1 nonce1 --paths1 path1,path2 --hosts1 host1,host2 --nonce2 nonce2 --paths2 path1,path2 --hosts2 host1,host2 --user username");
-
+        System.out.println();
+        System.out.println("For fast integrity check only without row order, use --fastscan");
+        System.out.println("For integrity check with full divergence report, use --deepscan");
+        // System.out.println("For integrity check only with only chunk level row order, use --ignoreChunkOrder");
         System.exit(code);
     }
 
     static class Config {
         boolean selfCompare;
+        // level of row order consistency
+        // 0 for total order
+        // 1 for chunk level order (there could be out of order within chunk, but not across chunk)
+        // 2 for no order with checksum compare only (shallow scan)
+        // 3 for no order with detail diff info (will reorder Lexicographically first then do the diff, deep scan)
+        byte orderLevel = 0;
         Boolean local = null;
         String username = "";
         String password = "";
@@ -120,6 +146,7 @@ public class SnapshotComparer {
         String[] targetHosts;
         boolean cleanup = false;
         boolean valid = false;
+        String[] tables;
 
         public Config(String[] args) {
             selfCompare = args[0].equalsIgnoreCase("--self");
@@ -129,50 +156,63 @@ public class SnapshotComparer {
                     if (arg.equalsIgnoreCase("--nonce")) {
                         if (i + 1 >= args.length) {
                             System.err.println("Error: Not enough args following --nonce");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         i++;
                         sourceNonce = args[i];
+                    } else if (arg.equalsIgnoreCase("--ignoreChunkOrder")) {
+                        orderLevel = 1;
+                    } else if (arg.equalsIgnoreCase("--fastScan")) {
+                        orderLevel = 2;
+                    } else if (arg.equalsIgnoreCase("--deepScan")) {
+                        orderLevel = 3;
                     } else if (arg.equalsIgnoreCase("--dirs")) {
                         if (local != null && !local) {
                             System.err.println("Error: already specify snapshot from remote");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         local = true;
                         if (i + 1 >= args.length) {
                             System.err.println("Error: Not enough args following --dirs");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         i++;
                         sourceDirs = args[i].split(",");
                     } else if (arg.equalsIgnoreCase("--paths")) {
                         if (local != null && local) {
                             System.err.println("Error: already specify snapshot from local");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         local = false;
                         if (i + 1 >= args.length) {
                             System.err.println("Error: Not enough args following --paths");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         i++;
                         sourceDirs = args[i].split(",");
                     } else if (arg.equalsIgnoreCase("--hosts")) {
                         if (local != null && local) {
                             System.err.println("Error: already specify snapshot from local");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         local = false;
                         if (i + 1 >= args.length) {
                             System.err.println("Error: Not enough args following --hosts");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         i++;
                         sourceHosts = args[i].split(",");
+                    } else if (arg.equalsIgnoreCase("--tables")) {
+                            if (i + 1 >= args.length) {
+                                System.err.println("Error: Not enough args following --tables");
+                                printHelpAndQuit(STATUS_INVALID_INPUT);
+                            }
+                            i++;
+                            tables = args[i].split(",");
                     } else if (arg.equalsIgnoreCase("--user")) {
                         if (i + 1 >= args.length) {
                             System.err.println("Error: Not enough args following --user");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         i++;
                         username = args[i];
@@ -182,21 +222,21 @@ public class SnapshotComparer {
                 }
                 if (sourceNonce == null || sourceNonce.isEmpty()) {
                     System.err.println("Error: Does not specify snapshot nonce.");
-                    printHelpAndQuit(1);
+                    printHelpAndQuit(STATUS_INVALID_INPUT);
                 }
                 if (local == null) {
                     System.err.println("Error: Does not specify location of snapshot, either using --dirs for local or --paths for remote.");
-                    printHelpAndQuit(1);
+                    printHelpAndQuit(STATUS_INVALID_INPUT);
                 }
                 if (!local && (
                         (sourceDirs == null) || (sourceHosts == null) || (sourceDirs.length == 0)
                                 || (sourceDirs.length != sourceHosts.length))) {
                     System.err.println("Error: Directories and Host number does not match.");
-                    printHelpAndQuit(1);
+                    printHelpAndQuit(STATUS_INVALID_INPUT);
                 }
                 if (!local && username.isEmpty()) {
                     System.err.println("Error: Does not specify username.");
-                    printHelpAndQuit(1);
+                    printHelpAndQuit(STATUS_INVALID_INPUT);
                 }
             } else {
                 // TODO: better UI for specify target snapshot
@@ -205,93 +245,93 @@ public class SnapshotComparer {
                     if (arg.equalsIgnoreCase("--nonce1")) {
                         if (i + 1 >= args.length) {
                             System.err.println("Error: Not enough args following --nonce");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         i++;
                         sourceNonce = args[i];
                     } else if (arg.equalsIgnoreCase("--nonce2")) {
                         if (i + 1 >= args.length) {
                             System.err.println("Error: Not enough args following --nonce");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         i++;
                         targetNonce = args[i];
                     } else if (arg.equalsIgnoreCase("--dirs1")) {
                         if (local != null && !local) {
                             System.err.println("Error: already specify snapshot from remote");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         local = true;
                         if (i + 1 >= args.length) {
                             System.err.println("Error: Not enough args following --dirs");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         i++;
                         sourceDirs = args[i].split(",");
                     } else if (arg.equalsIgnoreCase("--dirs2")) {
                         if (local != null && !local) {
                             System.err.println("Error: already specify snapshot from remote");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         local = true;
                         if (i + 1 >= args.length) {
                             System.err.println("Error: Not enough args following --dirs");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         i++;
                         targetDirs = args[i].split(",");
                     } else if (arg.equalsIgnoreCase("--paths1")) {
                         if (local != null && local) {
                             System.err.println("Error: already specify snapshot from local");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         local = false;
                         if (i + 1 >= args.length) {
                             System.err.println("Error: Not enough args following --paths");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         i++;
                         sourceDirs = args[i].split(",");
                     } else if (arg.equalsIgnoreCase("--paths2")) {
                         if (local != null && local) {
                             System.err.println("Error: already specify snapshot from local");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         local = false;
                         if (i + 1 >= args.length) {
                             System.err.println("Error: Not enough args following --paths");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         i++;
                         targetDirs = args[i].split(",");
                     } else if (arg.equalsIgnoreCase("--hosts1")) {
                         if (local != null && local) {
                             System.err.println("Error: already specify snapshot from local");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         local = false;
                         if (i + 1 >= args.length) {
                             System.err.println("Error: Not enough args following --hosts");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         i++;
                         sourceHosts = args[i].split(",");
                     } else if (arg.equalsIgnoreCase("--hosts2")) {
                         if (local != null && local) {
                             System.err.println("Error: already specify snapshot from local");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         local = false;
                         if (i + 1 >= args.length) {
                             System.err.println("Error: Not enough args following --hosts");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         i++;
                         targetHosts = args[i].split(",");
                     } else if (arg.equalsIgnoreCase("--user")) {
                         if (i + 1 >= args.length) {
                             System.err.println("Error: Not enough args following --user");
-                            printHelpAndQuit(1);
+                            printHelpAndQuit(STATUS_INVALID_INPUT);
                         }
                         i++;
                         username = args[i];
@@ -301,32 +341,40 @@ public class SnapshotComparer {
                 }
                 if (sourceNonce == null || sourceNonce.isEmpty()) {
                     System.err.println("Error: Does not specify source snapshot nonce.");
-                    printHelpAndQuit(1);
+                    printHelpAndQuit(STATUS_INVALID_INPUT);
                 }
                 if (targetNonce == null || targetNonce.isEmpty()) {
                     System.err.println("Error: Does not specify comparing snapshot nonce.");
-                    printHelpAndQuit(1);
+                    printHelpAndQuit(STATUS_INVALID_INPUT);
                 }
                 if (local == null) {
                     System.err.println("Error: Does not specify location of snapshot, either using --dirs for local or --paths for remote.");
-                    printHelpAndQuit(1);
+                    printHelpAndQuit(STATUS_INVALID_INPUT);
                 }
                 if (!local && (
                         (sourceDirs == null) || (sourceHosts == null) || (sourceDirs.length == 0)
                                 || (sourceDirs.length != sourceHosts.length)
-                        || (targetDirs == null) || (targetHosts == null) || (targetDirs.length == 0)
+                                || (targetDirs == null) || (targetHosts == null) || (targetDirs.length == 0)
                                 || (targetDirs.length != targetHosts.length))) {
                     System.err.println("Error: Directories and Host number does not match.");
-                    printHelpAndQuit(1);
+                    printHelpAndQuit(STATUS_INVALID_INPUT);
                 }
                 if (!local && username.isEmpty()) {
                     System.err.println("Error: Does not specify username.");
-                    printHelpAndQuit(1);
+                    printHelpAndQuit(STATUS_INVALID_INPUT);
                 }
             }
             if (!local && cleanup) {
                 try {
-                    FileUtils.deleteDirectory(new File(remoteSnapshotFolder));
+                    FileUtils.deleteDirectory(new File(REMOTE_SNAPSHOT_FOLDER));
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+            if (cleanup) {
+                try {
+                    FileUtils.deleteDirectory(new File(TEMP_FOLDER));
+                    FileUtils.deleteDirectory(new File(DIFF_FOLDER));
                 } catch (IOException e) {
                     e.printStackTrace();
                 }
@@ -341,13 +389,12 @@ class SnapshotLoader {
     final String[] dirs;
     final String[] hosts;
     InMemoryJarfile jar;
-    SnapShotMetaData metaData;
     ElasticHashinator hashinator;
     final Snapshot snapshot;
     final Map<String, Boolean> tables;
     int partitionCount, totalHost;
 
-    public SnapshotLoader(boolean local, String username, String nonce, String[] dirs, String[] hosts) {
+    public SnapshotLoader(boolean local, String username, String nonce, String[] dirs, String[] hosts, String[] verifyTables) {
         this.dirs = dirs;
         this.nonce = nonce;
         this.hosts = hosts;
@@ -368,22 +415,24 @@ class SnapshotLoader {
                     System.err.println("Error: " + path + " does not have execute permission set");
                     invalidDir = true;
                 }
-                directories.add(f);
                 if (invalidDir) {
-                    System.exit(-1);
+                    System.exit(STATUS_INVALID_INPUT);
                 }
-                if (directories.isEmpty()) {
-                    directories.add(new File("."));
-                }
+                directories.add(f);
+            }
+            if (directories.isEmpty()) {
+                directories.add(new File("."));
             }
         } else {
             // if from remote, first fetch to local
-            File localRootDir = new File(remoteSnapshotFolder + nonce);
+            File localRootDir = new File(REMOTE_SNAPSHOT_FOLDER + nonce);
             localRootDir.mkdirs();
             for (int i = 0; i < hosts.length; i++) {
-                File localDir = new File(localRootDir.getPath()+ PATHSEPARATOR + hosts[i]);
+                File localDir = new File(localRootDir.getPath() + PATHSEPARATOR + hosts[i]);
                 localDir.mkdirs();
-                downloadFiles(username, hosts[i], dirs[i], localDir.getPath());
+                if (!downloadFiles(username, hosts[i], dirs[i], localDir.getPath(), nonce)) {
+                    System.exit(STATUS_INVALID_INPUT);
+                }
                 directories.add(localDir);
             }
         }
@@ -413,17 +462,17 @@ class SnapshotLoader {
                 }
                 ii++;
             }
-            System.exit(-1);
+            System.exit(STATUS_INVALID_INPUT);
         }
 
         if (snapshots.size() < 1) {
             System.err.println("Error: Did not find any snapshots with the specified name");
-            System.exit(-1);
+            System.exit(STATUS_INVALID_INPUT);
         }
         snapshot = snapshots.values().iterator().next();
         RestoreAgent.SnapshotInfo info = checkSnapshotIsComplete(snapshot.getTxnId(), snapshot, SnapshotComparer.m_ErrLogStr, 0);
         if (info == null) {
-            System.exit(-1);
+            System.exit(STATUS_INVALID_INPUT);
         }
         partitionCount = info.partitionCount;
 
@@ -432,24 +481,34 @@ class SnapshotLoader {
             jar = getInMemoryJarFileBySnapShotName(directories.get(0).getPath(), nonce);
         } catch (IOException e) {
             e.printStackTrace();
+            System.exit(STATUS_INVALID_INPUT);
         }
-        // Construct SnapShotMetaData object to hold database and table information
-        metaData = new SnapShotMetaData(nonce, jar);
+
         // Deserialize hashinator from .hash file
         // Use HASH_EXTENSION
         // ElasticHashinator hashinator = getHashinatorFromFile(dirs[0], nonce, Integer.parseInt(hosts.get(0)));
         // Validate SnapshotName
         // Collect tables
         tables = new HashMap<>();
-        // if not supply tables
-        if (tables.isEmpty()) {
-            // check all tables, get from catalog
-            for (Table table : metaData.getAllReplicatedTables()) {
-                tables.put(table.getTypeName(), true);
+        // check all tables, get from catalog
+        Set<String> tableSet = new HashSet<>();
+        if (verifyTables != null) {
+            for (String tablename: verifyTables) {
+                tableSet.add(tablename.toUpperCase());
             }
-            for (Table table : metaData.getAllPartitionedTables()) {
-                tables.put(table.getTypeName(), false);
+        }
+        for (SnapshotTableInfo sti : SnapshotUtil.getTablesToSave(CatalogUtil.getDatabaseFrom(jar), t-> true, t->false)) {
+            if (verifyTables!= null && tableSet.contains(sti.getName().toUpperCase())) {
+                tables.put(sti.getName(), sti.isReplicated());
+                tableSet.remove(sti.getName().toUpperCase());
             }
+            if (verifyTables == null) {
+                tables.put(sti.getName(), sti.isReplicated());
+            }
+        }
+        if (verifyTables != null && !tableSet.isEmpty()) {
+            System.err.println("Error: Cannot find snapshot for these tables:" + tableSet);
+            System.exit(STATUS_INVALID_INPUT);
         }
     }
 
@@ -457,14 +516,14 @@ class SnapshotLoader {
      * Validate the data consistency within the snapshot
      */
     // Todo: now is 1-1 comparing, implement m-way comparing
-    public void selfCompare() {
+    public void selfCompare(byte orderLevel) {
         boolean fail = false;
         // Build a plan for which save file as the baseline for each partition
         Map<String, List<List<File>>> tableToCopies = new HashMap<>();
         for (String tableName : tables.keySet()) {
             if (!snapshot.m_tableFiles.containsKey(tableName)) {
                 System.err.println("Error: Snapshot does not contain table " + tableName);
-                System.exit(-1);
+                System.exit(STATUS_INVALID_INPUT);
             }
             SnapshotUtil.TableFiles tableFiles = snapshot.m_tableFiles.get(tableName);
             if (!tableFiles.m_isReplicated) {
@@ -497,7 +556,13 @@ class SnapshotLoader {
             }
         }
         if (fail) {
-            System.exit(-1);
+            System.exit(STATUS_INVALID_INPUT);
+        }
+        if (orderLevel == 3) {
+            File tempFolder = new File(TEMP_FOLDER);
+            tempFolder.mkdir();
+            tempFolder = new File(DIFF_FOLDER);
+            tempFolder.mkdir();
         }
 
         // based on the plan, retrieve the file and compare
@@ -508,17 +573,29 @@ class SnapshotLoader {
             for (int p = 0; p < partitionToFiles.size(); p++) {
                 Integer[] relevantPartition = isReplicated ? null : new Integer[]{p};
                 int partitionid = isReplicated ? 16383 : p;
-                try {
-                    TableSaveFile referenceSaveFile =
-                            new TableSaveFile(new FileInputStream(partitionToFiles.get(p).get(0)),
-                                    1, relevantPartition);
-                    for (int target = 1; target < partitionToFiles.get(p).size(); target++) {
-                        boolean isConsistent = true;
-                        TableSaveFile compareSaveFile =
-                                new TableSaveFile(new FileInputStream(partitionToFiles.get(p).get(target)),
-                                        1, relevantPartition);
+                // figure out real hostId;
+                int baseHostId = 0;
+                Matcher matcher = VPTFILE_PATTERN.matcher(partitionToFiles.get(p).get(0).getName());
+                if (matcher.find()) {
+                    baseHostId = Integer.parseInt(matcher.group(1));
+                }
+                for (int target = 1; target < partitionToFiles.get(p).size(); target++) {
+                    boolean isConsistent = true;
+                    // figure out real comparing hostId
+                    int compareHostId = target;
+                    Matcher matcher2 = VPTFILE_PATTERN.matcher(partitionToFiles.get(p).get(target).getName());
+                    if (matcher2.find()) {
+                        compareHostId = Integer.parseInt(matcher2.group(1));
+                    }
+
+                    long refCheckSum = 0l, compCheckSum = 0l;
+                    try (TableSaveFile referenceSaveFile = new TableSaveFile(
+                            new FileInputStream(partitionToFiles.get(p).get(0)), 1, relevantPartition);
+                            TableSaveFile compareSaveFile = new TableSaveFile(
+                                    new FileInputStream(partitionToFiles.get(p).get(target)), 1, relevantPartition)) {
                         DBBPool.BBContainer cr = null, cc = null;
-                        while (referenceSaveFile.hasMoreChunks() && compareSaveFile.hasMoreChunks()) {
+
+                        while (referenceSaveFile.hasMoreChunks() || compareSaveFile.hasMoreChunks()) {
                             // skip chunk for irrelevant partition
                             cr = referenceSaveFile.getNextChunk();
                             cc = compareSaveFile.getNextChunk();
@@ -526,27 +603,60 @@ class SnapshotLoader {
                             if (cr == null && cc == null) { // both reached EOF
                                 break;
                             }
-                            // TODO: chunk not aligned?
-                            if (cr != null && cc == null) {
-                                System.err.println("Reference file still contain chunks while comparing file does not");
-                                break;
-                            }
-                            if (cr == null && cc != null) {
-                                System.err.println("Comparing file still contain chunks while Reference file does not");
-                                break;
-                            }
                             try {
-                                final VoltTable tr = PrivateVoltTableFactory.createVoltTableFromBuffer(cr.b(), true);
-                                final VoltTable tc = PrivateVoltTableFactory.createVoltTableFromBuffer(cc.b(), true);
-                                // cheesy check sum should already guaranteed row order
-                                if (!tr.hasSameContentsWithOrder(tc)) {
-                                    // seek to find where discrepancy happened
-                                    if (SNAPSHOT_LOG.isDebugEnabled()) {
-                                        SNAPSHOT_LOG.debug("table from file: " + partitionToFiles.get(p).get(0) + " : " + tr);
-                                        SNAPSHOT_LOG.debug("table from file: " + partitionToFiles.get(p).get(target) + " : " + tc);
+                                if (orderLevel >= 2) {
+                                    if (cr != null) {
+                                        refCheckSum += PrivateVoltTableFactory.createVoltTableFromBuffer(cr.b(), true)
+                                                .getTableCheckSum(false);
                                     }
-                                    isConsistent = false;
-                                    break;
+                                    if (cc != null) {
+                                        compCheckSum += PrivateVoltTableFactory.createVoltTableFromBuffer(cc.b(), true)
+                                                .getTableCheckSum(false);
+                                    }
+                                    if (CONSOLE_LOG.isDebugEnabled()) {
+                                        CONSOLE_LOG.debug("Checksum for " + tableName + " partition " + partitionid
+                                                + " on host" + baseHostId + " is " + refCheckSum + " on host"
+                                                + compareHostId + " is " + compCheckSum);
+                                    }
+                                } else {
+                                    if (cr != null && cc == null) {
+                                        System.err.println(
+                                                "Reference file still contains chunks while comparing file does not");
+                                        break;
+                                    }
+                                    if (cr == null && cc != null) {
+                                        System.err.println(
+                                                "Comparing file still contains chunks while reference file does not");
+                                        break;
+                                    }
+
+                                    final VoltTable tr = PrivateVoltTableFactory.createVoltTableFromBuffer(cr.b(),
+                                            true);
+                                    final VoltTable tc = PrivateVoltTableFactory.createVoltTableFromBuffer(cc.b(),
+                                            true);
+
+                                    if (!tr.hasSameContents(tc, orderLevel == 1)) {
+                                        // seek to find where discrepancy happened
+                                        if (SNAPSHOT_LOG.isDebugEnabled()) {
+                                            SNAPSHOT_LOG.debug(
+                                                    "table from file: " + partitionToFiles.get(p).get(0) + " : " + tr);
+                                            SNAPSHOT_LOG.debug("table from file: " + partitionToFiles.get(p).get(target)
+                                                    + " : " + tc);
+                                        }
+
+                                        int trSize = tr.getRowCount(), tcSize = tc.getRowCount();
+                                        int[][] lookup = new int[trSize + 1][tcSize + 1];
+                                        // fill lookup table
+                                        lcsLength(tr, tc, trSize, tcSize, lookup);
+                                        // find difference
+                                        StringBuilder output = new StringBuilder().append("Diffs between file ")
+                                                .append(partitionToFiles.get(p).get(0)).append(" and file ")
+                                                .append(partitionToFiles.get(p).get(target)).append(" \n");
+                                        diff(tr, tc, trSize, tcSize, lookup, output);
+                                        CONSOLE_LOG.info(output.toString());
+                                        isConsistent = false;
+                                        break;
+                                    }
                                 }
                             } catch (Exception e) {
                                 e.printStackTrace();
@@ -559,17 +669,38 @@ class SnapshotLoader {
                                 }
                             }
                         }
+
+                        if (orderLevel >= 2) {
+                            isConsistent = (refCheckSum == compCheckSum);
+                            // for orderLevel 3. drill down the discrepancies by reorder the whole table to csv then diff
+                            if (!isConsistent && orderLevel == 3) {
+                                CONSOLE_LOG.warn("Checksum for " + tableName + " partition " + partitionid + " on host"
+                                        + baseHostId + " is " + refCheckSum + " on host" + compareHostId + " is "
+                                        + compCheckSum);
+                                // For every output file that will be created attempt to instantiate and print an error  couldn't be created.
+                                String baseOutfileName = (isReplicated ? "Replicated" : "Partitioned") + "-Table-" + tableName + "-host" + baseHostId + "-partition" + partitionid;
+                                convertTableToCSV(baseOutfileName, tableName, partitionid, partitionToFiles.get(p).get(0), TEMP_FOLDER, DELIMITER, isReplicated, true);
+
+                                String compareOutfileName = (isReplicated ? "Replicated" : "Partitioned") + "-Table-" + tableName + "-host" + compareHostId + "-partition" + partitionid;
+                                convertTableToCSV(compareOutfileName, tableName, partitionid, partitionToFiles.get(p).get(target), TEMP_FOLDER, DELIMITER, isReplicated, false);
+
+                                String diffFileName = tableName + "-partition" + partitionid + "-host" + baseHostId + "-vs-host"+ compareHostId + ".diff";
+                                generateDiffOutput(TEMP_FOLDER, baseOutfileName, compareOutfileName, diffFileName);
+                            }
+                        }
                         if (isConsistent) {
-                            SNAPSHOT_LOG.info((isReplicated ? "Replicated" : "Partitioned") + " Table " + tableName + " is consistent between host0 with host" + target +
-                                    " on partition " + partitionid);
+                            SNAPSHOT_LOG.info((isReplicated ? "Replicated" : "Partitioned") + " Table " + tableName
+                                    + " is consistent between host" + baseHostId + " with host" + compareHostId + " on partition "
+                                    + partitionid);
                         } else {
                             inconsistentTable.add(tableName);
-                            SNAPSHOT_LOG.warn((isReplicated ? "Replicated" : "Partitioned") + " Table " + tableName + " is inconsistent between host0 with host" + target +
-                                    " on partition " + partitionid);
+                            SNAPSHOT_LOG.warn((isReplicated ? "Replicated" : "Partitioned") + " Table " + tableName
+                                    + " is inconsistent between host" + baseHostId + " with host" + compareHostId + " on partition "
+                                    + partitionid);
                         }
+                    } catch (IOException e) {
+                        e.printStackTrace();
                     }
-                } catch (IOException e) {
-                    e.printStackTrace();
                 }
             }
             CONSOLE_LOG.info("Finished comparing table " + tableName + ".\n");
@@ -577,6 +708,151 @@ class SnapshotLoader {
         CONSOLE_LOG.info("Finished comparing all tables.");
         if (!inconsistentTable.isEmpty()) {
             CONSOLE_LOG.info("The inconsistent tables are: " + inconsistentTable);
+            System.exit(STATUS_INCONSISTENCY);
+        } else {
+            System.exit(STATUS_OK);
+        }
+    }
+
+    private static boolean generateDiffOutput(String localTempFolder, String baseOutfileName, String compareOutfileName, String diffFileName) {
+        try {
+            // invoke external diff command
+            ProcessBuilder pb = new ProcessBuilder("diff", "-u",  baseOutfileName+"-sorted.tsv", compareOutfileName+"-sorted.tsv");
+            pb.directory(new File(localTempFolder));
+            pb.redirectErrorStream(true);
+            pb.redirectOutput(new File(DIFF_FOLDER + diffFileName));
+            Process p = pb.start();
+            //Check result
+            if (p.waitFor() == 0) {
+                return true;
+            }
+        } catch (Exception e) {
+            CONSOLE_LOG.error("Failed to diff between" + baseOutfileName + " and " + compareOutfileName, e);
+        }
+        return false;
+    }
+
+    private static boolean convertTableToCSV(String outfileName, String tableName, int partitionid, File infile, String outputFolder, char delimiter, boolean isReplicated, boolean skipExist) {
+        File outfile = new File(outputFolder + outfileName + ".tsv");
+
+        try {
+            if (outfile.exists()) {
+                if (skipExist) {
+                    return true;
+                }
+                System.err.println("Error: Failed to create output file "
+                        + outfile.getPath() + " for table " + tableName + "\n File already exists");
+                return false;
+            }
+            if (!outfile.createNewFile()) {
+                return false;
+            }
+        } catch (IOException e) {
+            System.err.println(e.getMessage());
+            System.err.println("Error: Failed to create output file "
+                    + outfile.getPath() + " for table " + tableName);
+            return false;
+
+        }
+
+        // Actually convert the tables and write the data to the appropriate destination
+        try {
+            SNAPSHOT_LOG.debug("Converting table " + tableName + " to " + outfileName);
+            Integer[] relevantPartition = isReplicated ? null : new Integer[]{partitionid};
+            CSVTableSaveFile.convertTableSaveFile(delimiter, relevantPartition, outfile, infile);
+        } catch (Exception e) {
+            System.err.println(e.getMessage());
+            System.err.println("Error: Failed to convert " + infile.getPath() + " to " + outfile.getPath());
+        }
+
+        try {
+            // invoke external sort command for sorting
+            ProcessBuilder pb = new ProcessBuilder("sort", "-n", "-o" , outfileName+"-sorted.tsv", outfile.getName());
+            pb.directory(new File(outputFolder));
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            //Read output
+            java.io.InputStreamReader reader = new java.io.InputStreamReader(p.getInputStream());
+            java.io.BufferedReader br = new java.io.BufferedReader(reader);
+            StringBuilder out = new StringBuilder();
+            String line = null, previous = null;
+            while ((line = br.readLine()) != null) {
+                if (!line.equals(previous)) {
+                    previous = line;
+                    out.append(line).append('\n');
+                    System.out.println(line);
+                }
+            }
+
+            //Check result
+            if (p.waitFor() == 0) {
+                return true;
+            }
+        } catch (Exception e) {
+            CONSOLE_LOG.error("Failed to sort " + outfileName, e);
+        }
+
+        return false;
+    }
+
+    // Function to display the differences between two voltTables
+    public static void diff(VoltTable X, VoltTable Y, int m, int n, int[][] lookup, StringBuilder sb) {
+        // if last character of X and Y matches
+        // TODO: optimize by useing bottom up dp, need traverse volttable backward
+        X.resetRowPosition();
+        X.advanceRow();
+        X.advanceToRow(m-1);
+        Y.resetRowPosition();
+        Y.advanceRow();
+        Y.advanceToRow(n-1);
+        if (m > 0 && n > 0 && X.getRawRow().equals(Y.getRawRow())) {
+            String curRow = "  " + X.getRow();
+            diff(X, Y, m - 1, n - 1, lookup, sb);
+            sb.append(curRow);
+        }
+        // current row of Y is not present in X
+        else if (n > 0 && (m == 0 || lookup[m][n - 1] >= lookup[m - 1][n])) {
+            String curRow = " +" + Y.getRow();
+            diff(X, Y, m, n - 1, lookup, sb);
+            sb.append(curRow);
+        }
+
+        // current row of X is not present in Y
+        else if (m > 0 && (n == 0 || lookup[m][n - 1] < lookup[m - 1][n])) {
+            String curRow = " -" + X.getRow();
+            diff(X, Y, m - 1, n, lookup, sb);
+            sb.append(curRow);
+        }
+    }
+
+    // Function to fill lookup table by finding the length of LCS
+    private static void lcsLength(VoltTable X, VoltTable Y, int m, int n,
+                                 int[][] lookup) {
+        // first column of the lookup table will be all 0
+        for (int i = 0; i <= m; i++) {
+            lookup[i][0] = 0;
+        }
+
+        // first row of the lookup table will be all 0
+        for (int j = 0; j <= n; j++) {
+            lookup[0][j] = 0;
+        }
+
+        // fill the lookup table in bottom-up manner
+        for (int i = 1; i <= m; i++) {
+            X.advanceRow();
+            Y.resetRowPosition();
+            for (int j = 1; j <= n; j++) {
+                Y.advanceRow();
+                // if current row of X and Y matches
+                if (X.getRawRow().equals(Y.getRawRow())) {
+                    lookup[i][j] = lookup[i - 1][j - 1] + 1;
+                } // else if current row of X and Y don't match
+                else {
+                    lookup[i][j] = Integer.max(lookup[i - 1][j],
+                            lookup[i][j - 1]);
+                }
+            }
         }
     }
 
@@ -587,7 +863,7 @@ class SnapshotLoader {
         for (String tableName : tables.keySet()) {
             if (!snapshot.m_tableFiles.containsKey(tableName)) {
                 System.err.println("Error: Snapshot does not contain table " + tableName);
-                System.exit(-1);
+                System.exit(STATUS_INVALID_INPUT);
             }
             SnapshotUtil.TableFiles tableFiles = snapshot.m_tableFiles.get(tableName);
             if (!tableFiles.m_isReplicated) {
@@ -620,7 +896,7 @@ class SnapshotLoader {
             }
         }
         if (fail) {
-            System.exit(-1);
+            System.exit(STATUS_INVALID_INPUT);
         }
         // based on the plan, retrieve the file and compare
         Set<String> inconsistentTable = new HashSet<>();
@@ -628,6 +904,9 @@ class SnapshotLoader {
         CONSOLE_LOG.info("Finished comparing all tables.");
         if (!inconsistentTable.isEmpty()) {
             CONSOLE_LOG.info("The inconsistent tables are: " + inconsistentTable);
+            System.exit(STATUS_INCONSISTENCY);
+        } else {
+            System.exit(STATUS_OK);
         }
     }
 
@@ -640,15 +919,8 @@ class SnapshotLoader {
         return CatalogUtil.loadInMemoryJarFile(bytes);
     }
 
-    private static ElasticHashinator getHashinatorFromFile(String location, String nonce, int hostId) throws IOException {
-        File hashFile = new File(location + '/' + nonce + "-host_" + hostId + ".hash");
-        HashinatorSnapshotData hashinatorSSData = new HashinatorSnapshotData();
-        hashinatorSSData.restoreFromFile(hashFile);
-        return new ElasticHashinator(hashinatorSSData.m_serData, true);
-    }
-
     /**
-     *  using publickey for auth
+     * using publickey for auth
      */
     private ChannelSftp setupJsch(String username, String remoteHost) throws JSchException {
         JSch jsch = new JSch();
@@ -668,7 +940,9 @@ class SnapshotLoader {
      * download remote files through ssh
      */
     static String PATHSEPARATOR = "/";
-    private boolean downloadFiles(String username, String remoteHost, String sourcePath, String destinationPath) { ;
+
+    private boolean downloadFiles(String username, String remoteHost, String sourcePath, String destinationPath,
+            String nonce) {
         ChannelSftp channelSftp = null;
         try {
             channelSftp = setupJsch(username, remoteHost);
@@ -678,19 +952,17 @@ class SnapshotLoader {
             Vector<ChannelSftp.LsEntry> fileAndFolderList = channelSftp.ls(sourcePath);
             //Iterate through list of folder content
             for (ChannelSftp.LsEntry item : fileAndFolderList) {
-                if (!item.getAttrs().isDir()) { // Check if it is a file (not a directory).
-                    if (!(new File(destinationPath + PATHSEPARATOR + item.getFilename())).exists()
-                            || (item.getAttrs().getMTime() > Long
-                            .valueOf(new File(destinationPath + PATHSEPARATOR + item.getFilename()).lastModified()
-                                    / (long) 1000)
-                            .intValue())) { // Download only if changed later.
-                        new File(destinationPath + PATHSEPARATOR + item.getFilename());
-                        channelSftp.get(sourcePath + PATHSEPARATOR + item.getFilename(),
-                                destinationPath + PATHSEPARATOR + item.getFilename()); // Download file from source (source filename, destination filename).
+                // Check if it is a file (not a directory).and starts with the desired nonce
+                if (!item.getAttrs().isDir() && item.getFilename().startsWith(nonce)) {
+                    File file = new File(destinationPath + PATHSEPARATOR + item.getFilename());
+                    if (!file.exists() || item.getAttrs().getMTime() > file.lastModified() / 1000) {
+                        // Download only if changed later.
+                        // Download file from source (source filename, destination filename).
+                        channelSftp.get(sourcePath + PATHSEPARATOR + item.getFilename(), file.getPath());
                     }
                 }
             }
-        } catch (JSchException | SftpException  ex) {
+        } catch (JSchException | SftpException ex) {
             ex.printStackTrace();
             return false;
         } finally {
@@ -699,76 +971,5 @@ class SnapshotLoader {
             }
         }
         return true;
-    }
-}
-
-class SnapShotMetaData {
-    private String nonce;
-    private Catalog catalog;
-    private Cluster cluster;
-    private Database database;
-    private List<Table> partitionedTables;
-    private List<Table> replicatedTables;
-    private List<String> tableNames;
-
-
-    public SnapShotMetaData(String nonce, InMemoryJarfile jarfile) {
-        // TODO: handle exceptions
-        this.nonce = nonce;
-        catalog = new Catalog();
-        catalog.execute(CatalogUtil.getSerializedCatalogStringFromJar(jarfile));
-        cluster = catalog.getClusters().get("cluster");
-        database = cluster.getDatabases().get("database");
-        replicatedTables = new ArrayList<>();
-        partitionedTables = new ArrayList<>();
-        tableNames = new ArrayList<>();
-
-        assert database != null;
-        for (Table table : CatalogUtil.getNormalTables(database, true)) {
-            replicatedTables.add(table);
-            tableNames.add(table.getTypeName());
-        }
-        for (Table table : CatalogUtil.getNormalTables(database, false)) {
-            partitionedTables.add(table);
-            tableNames.add(table.getTypeName());
-        }
-
-        // also have to capture snapshotable views
-        for (Table table : CatalogUtil.getAllSnapshotableViews(database)) {
-            if (table.getIsreplicated()) {
-                replicatedTables.add(table);
-            } else {
-                partitionedTables.add(table);
-            }
-            tableNames.add(table.getTypeName());
-        }
-    }
-    public String getNonce()
-    {
-        return nonce;
-    }
-    public Catalog getCatalog()
-    {
-        return catalog;
-    }
-    public Cluster getCluster()
-    {
-        return cluster;
-    }
-    public Database getDatabase()
-    {
-        return database;
-    }
-    public List<Table> getAllPartitionedTables()
-    {
-        return partitionedTables;
-    }
-    public List<Table> getAllReplicatedTables()
-    {
-        return replicatedTables;
-    }
-    public List<String> getTableNames()
-    {
-        return tableNames;
     }
 }

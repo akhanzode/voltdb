@@ -73,6 +73,7 @@ import org.voltdb.client.ClientStatusListenerExt;
 import org.voltdb.client.NoConnectionsException;
 import org.voltdb.client.NullCallback;
 import org.voltdb.client.ProcedureCallback;
+import org.voltdb.client.ProcCallException;
 import org.voltdb.client.exampleutils.AppHelper;
 import org.voltdb.iv2.TxnEgo;
 
@@ -352,9 +353,9 @@ public class AsyncExportClient
                                                       0);
                     }
                     catch (Exception e) {
-                        log.fatal("Exception: " + e);
+                        log.info("Exception: " + e);
                         e.printStackTrace();
-                        System.exit(-1);
+                        // System.exit(-1);
                     }
                 }
             }
@@ -542,6 +543,15 @@ public class AsyncExportClient
                          ", file: " + results[2].asScalarLong() +
                          ", jdbc: " + results[3].asScalarLong()
                          );
+            }
+        }
+        catch (ProcCallException e1) {
+            if (e1.getMessage().contains("was lost before a response was received")) {
+                log.warn("Possible problem executing " + config.procedure + ", procedure may not have completed");
+            } else {
+                log.fatal("Exception: " + e1);
+                e1.printStackTrace();
+                System.exit(-1);
             }
         }
         catch (Exception e) {
