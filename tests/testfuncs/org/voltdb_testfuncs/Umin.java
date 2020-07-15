@@ -27,10 +27,9 @@ import java.io.Serializable;
 import org.voltdb.VoltUDAggregate;
 
 public class Umin implements Serializable, VoltUDAggregate<Double, Umin> {
-    private double min;
+    private double min = Double.POSITIVE_INFINITY;
 
     public void start() {
-        min = 2147483647;
     }
 
     public void assemble (Double value) {

@@ -86,7 +86,7 @@
 #include "storage/ConstraintFailureException.h"
 #include "storage/DRTupleStream.h"
 
-#include "kipling/GroupStore.h"
+#include "topics/GroupStore.h"
 
 #if !defined(NDEBUG) && defined(MACOSX)
 // Mute EXC_BAD_ACCESS in the debug mode for running LLDB.
@@ -215,7 +215,7 @@ VoltDBEngine::initialize(
     EngineLocals newLocals = EngineLocals(ExecutorContext::getExecutorContext());
     SynchronizedThreadLock::init(sitesPerHost, newLocals);
     SynchronizedThreadLock::unlockReplicatedResourceForInit();
-    m_groupStore.reset(new kipling::GroupStore());
+    m_groupStore.reset(new topics::GroupStore());
 }
 
 VoltDBEngine::~VoltDBEngine() {
@@ -834,7 +834,11 @@ void VoltDBEngine::checkUserDefinedFunctionInfo(UserDefinedFunctionInfo *info, i
 
 void VoltDBEngine::checkJavaFunctionReturnCode(int32_t returnCode, const char* name) {
     if (returnCode != 0) {
-        throwSQLException(SQLException::volt_user_defined_function_error, "%s failed", name);
+        throwSQLException(
+                SQLException::volt_user_defined_function_error,
+                "%s failed: %s",
+                name,
+                ReferenceSerializeInputBE(m_udfBuffer, m_udfBufferCapacity).readTextString().c_str());
     }
 }
 
@@ -864,7 +868,7 @@ NValue VoltDBEngine::udfResultHelper(int32_t returnCode, bool partition_table, V
 void VoltDBEngine::callJavaUserDefinedAggregateStart(int32_t functionId) {
     checkUserDefinedFunctionInfo(findInMapOrNull(functionId, m_functionInfo), functionId);
     checkJavaFunctionReturnCode(m_topend->callJavaUserDefinedAggregateStart(functionId),
-            "callJavaUserDefinedAggregateStart");
+            "UserDefinedAggregate::start()");
 }
 
 void VoltDBEngine::callJavaUserDefinedAggregateAssemble(
@@ -874,7 +878,7 @@ void VoltDBEngine::callJavaUserDefinedAggregateAssemble(
     serializeToUDFOutputBuffer(functionId, argVector, argCount,
             info->paramTypes.front(), udafIndex);
     checkJavaFunctionReturnCode(m_topend->callJavaUserDefinedAggregateAssemble(),
-            "callJavaUserDefinedAggregateAssemble");
+            "UserDefinedAggregate::assemble()");
 }
 
 void VoltDBEngine::callJavaUserDefinedAggregateCombine(
@@ -884,7 +888,7 @@ void VoltDBEngine::callJavaUserDefinedAggregateCombine(
     // array after the worker end method
     serializeToUDFOutputBuffer(functionId, argument, ValueType::tVARBINARY, udafIndex);
     checkJavaFunctionReturnCode(m_topend->callJavaUserDefinedAggregateCombine(),
-            "callJavaUserDefinedAggregateCombine");
+            "UserDefinedAggregate::combine()");
 }
 
 NValue VoltDBEngine::callJavaUserDefinedAggregateWorkerEnd(int32_t functionId, int32_t udafIndex) {
@@ -3062,7 +3066,7 @@ bool VoltDBEngine::externalStreamsEnabled() {
     return m_executorContext->externalStreamsEnabled();
 }
 
-int32_t VoltDBEngine::storeKiplingGroup(int64_t undoToken, SerializeInputBE& in){
+int32_t VoltDBEngine::storeTopicsGroup(int64_t undoToken, SerializeInputBE& in){
     setUndoToken(undoToken);
     try {
         m_groupStore->storeGroup(in);
@@ -3073,7 +3077,7 @@ int32_t VoltDBEngine::storeKiplingGroup(int64_t undoToken, SerializeInputBE& in)
     return 1;
 }
 
-int32_t VoltDBEngine::deleteKiplingGroup(int64_t undoToken, const NValue& groupId){
+int32_t VoltDBEngine::deleteTopicsGroup(int64_t undoToken, const NValue& groupId){
     setUndoToken(undoToken);
     try {
         m_groupStore->deleteGroup(groupId);
@@ -3084,7 +3088,7 @@ int32_t VoltDBEngine::deleteKiplingGroup(int64_t undoToken, const NValue& groupI
     return 1;
 }
 
-int32_t VoltDBEngine::fetchKiplingGroups(int32_t maxResultSize, const NValue& startGroupId) {
+int32_t VoltDBEngine::fetchTopicsGroups(int32_t maxResultSize, const NValue& startGroupId) {
     resetReusedResultOutputBuffer();
     try {
         return m_groupStore->fetchGroups(maxResultSize, startGroupId, m_resultOutput) ? 1 : 0;
@@ -3094,7 +3098,7 @@ int32_t VoltDBEngine::fetchKiplingGroups(int32_t maxResultSize, const NValue& st
     return -1;
 }
 
-int32_t VoltDBEngine::commitKiplingGroupOffsets(int64_t spUniqueId, int64_t undoToken, int16_t requestVersion,
+int32_t VoltDBEngine::commitTopicsGroupOffsets(int64_t spUniqueId, int64_t undoToken, int16_t requestVersion,
         const NValue& groupId, SerializeInputBE& in) {
     setUndoToken(undoToken);
     resetReusedResultOutputBuffer();
@@ -3107,7 +3111,7 @@ int32_t VoltDBEngine::commitKiplingGroupOffsets(int64_t spUniqueId, int64_t undo
     return 1;
 }
 
-int32_t VoltDBEngine::fetchKiplingGroupOffsets(int16_t requestVersion, const NValue& groupId, SerializeInputBE& in) {
+int32_t VoltDBEngine::fetchTopicsGroupOffsets(int16_t requestVersion, const NValue& groupId, SerializeInputBE& in) {
     resetReusedResultOutputBuffer();
     try {
         m_groupStore->fetchOffsets(requestVersion, groupId, in, m_resultOutput);
@@ -3118,7 +3122,7 @@ int32_t VoltDBEngine::fetchKiplingGroupOffsets(int16_t requestVersion, const NVa
     return 1;
 }
 
-int32_t VoltDBEngine::deleteExpiredKiplingOffsets(int64_t undoToken, int64_t deleteOlderThan) {
+int32_t VoltDBEngine::deleteExpiredTopicsOffsets(int64_t undoToken, int64_t deleteOlderThan) {
     setUndoToken(undoToken);
     try {
         m_groupStore->deleteExpiredOffsets(deleteOlderThan);

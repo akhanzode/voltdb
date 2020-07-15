@@ -86,7 +86,8 @@ public class ExecutionEngineJNI extends ExecutionEngine {
     static {
         EE_COMPACTION_THRESHOLD = Integer.getInteger("EE_COMPACTION_THRESHOLD", 95);
         if (EE_COMPACTION_THRESHOLD < 0 || EE_COMPACTION_THRESHOLD > 99) {
-            VoltDB.crashLocalVoltDB("EE_COMPACTION_THRESHOLD " + EE_COMPACTION_THRESHOLD + " is not valid, must be between 0 and 99", false, null);
+            VoltDB.crashLocalVoltDB("EE_COMPACTION_THRESHOLD " +
+                    EE_COMPACTION_THRESHOLD + " is not valid, must be between 0 and 99", false, null);
         }
         HOST_TRACE_ENABLED = LOG.isTraceEnabled();
     }
@@ -803,8 +804,8 @@ public class ExecutionEngineJNI extends ExecutionEngine {
         m_udfBuffer.getInt(); // skip the buffer size integer, it is only used by VoltDB IPC.
         int functionId = m_udfBuffer.getInt();
         UserDefinedScalarFunctionRunner udfRunner = m_functionManager.getFunctionRunnerById(functionId);
-        Object returnValue = null;
-        Throwable throwable = null;
+        Object returnValue;
+        Throwable throwable;
         try {
             assert(udfRunner != null);
             // Call the user-defined function.
@@ -846,13 +847,11 @@ public class ExecutionEngineJNI extends ExecutionEngine {
             UserDefinedScalarFunctionRunner.writeValueToBuffer(m_udfBuffer, returnType, returnValue);
             // Return zero status code for a successful execution.
             return 0;
-        }
-        catch (InvocationTargetException ex1) {
+        } catch (InvocationTargetException ex1) {
             // Exceptions thrown during Java reflection will be wrapped into this InvocationTargetException.
             // We need to get its cause and throw that to the user.
             throwable = ex1.getCause();
-        }
-        catch (Throwable ex2) {
+        } catch (Throwable ex2) {
             throwable = ex2;
         }
         // Getting here means the execution was not successful.
@@ -878,7 +877,7 @@ public class ExecutionEngineJNI extends ExecutionEngine {
     private void handleUDAFError(Throwable throwable) {
         // Getting here means the execution was not successful.
         assert(throwable != null);
-        byte[] errorMsg = throwable.toString().getBytes(Constants.UTF8ENCODING);
+        byte[] errorMsg = throwable.getLocalizedMessage().getBytes(Constants.UTF8ENCODING);
         // It is very unlikely that the size of a user's error message will exceed the UDF buffer size.
         // But you never know.
         if (errorMsg.length + 4 > m_udfBuffer.capacity()) {
@@ -916,13 +915,11 @@ public class ExecutionEngineJNI extends ExecutionEngine {
             m_udfBuffer.clear();
             // Return zero status code for a successful execution.
             return 0;
-        }
-        catch (InvocationTargetException ex1) {
+        } catch (InvocationTargetException ex1) {
             // Exceptions thrown during Java reflection will be wrapped into this InvocationTargetException.
             // We need to get its cause and throw that to the user.
             handleUDAFError(ex1.getCause());
-        }
-        catch (Throwable ex2) {
+        } catch (Throwable ex2) {
             handleUDAFError(ex2);
         }
         return -1;
@@ -938,13 +935,11 @@ public class ExecutionEngineJNI extends ExecutionEngine {
             udafRunner.assemble(m_udfBuffer, udafIndex);
             m_udfBuffer.clear();
             return 0;
-        }
-        catch (InvocationTargetException ex1) {
+        } catch (InvocationTargetException ex1) {
             // Exceptions thrown during Java reflection will be wrapped into this InvocationTargetException.
             // We need to get its cause and throw that to the user.
             handleUDAFError(ex1.getCause());
-        }
-        catch (Throwable ex2) {
+        } catch (Throwable ex2) {
             handleUDAFError(ex2);
         }
         return -1;
@@ -962,13 +957,11 @@ public class ExecutionEngineJNI extends ExecutionEngine {
             // Write the result to the shared buffer.
             m_udfBuffer.clear();
             return 0;
-        }
-        catch (InvocationTargetException ex1) {
+        } catch (InvocationTargetException ex1) {
             // Exceptions thrown during Java reflection will be wrapped into this InvocationTargetException.
             // We need to get its cause and throw that to the user.
             handleUDAFError(ex1.getCause());
-        }
-        catch (Throwable ex2) {
+        } catch (Throwable ex2) {
             handleUDAFError(ex2);
         }
         return -1;
@@ -1126,22 +1119,22 @@ public class ExecutionEngineJNI extends ExecutionEngine {
     }
 
     @Override
-    public void storeKiplingGroup(long undoToken, byte[] serializedGroup) {
+    public void storeTopicsGroup(long undoToken, byte[] serializedGroup) {
         clearPsetAndEnsureCapacity(serializedGroup.length);
         m_psetBuffer.put(serializedGroup);
-        checkErrorCode(nativeStoreKiplingGroup(pointer, undoToken));
+        checkErrorCode(nativeStoreTopicsGroup(pointer, undoToken));
     }
 
     @Override
-    public void deleteKiplingGroup(long undoToken, String groupId) {
-        checkErrorCode(nativeDeleteKiplingGroup(pointer, undoToken, groupId.getBytes(Constants.UTF8ENCODING)));
+    public void deleteTopicsGroup(long undoToken, String groupId) {
+        checkErrorCode(nativeDeleteTopicsGroup(pointer, undoToken, groupId.getBytes(Constants.UTF8ENCODING)));
     }
 
     @Override
-    public Pair<Boolean, byte[]> fetchKiplingGroups(int maxResultSize, String startGroupId) {
+    public Pair<Boolean, byte[]> fetchTopicsGroups(int maxResultSize, String startGroupId) {
         byte[] groupIdBytes = startGroupId == null ? null : startGroupId.getBytes(Constants.UTF8ENCODING);
         m_nextDeserializer.clear();
-        int result = nativeFetchKiplingGroups(pointer, maxResultSize, groupIdBytes);
+        int result = nativeFetchTopicsGroups(pointer, maxResultSize, groupIdBytes);
         if (result < 0) {
             checkErrorCode(ERRORCODE_ERROR);
         }
@@ -1153,13 +1146,13 @@ public class ExecutionEngineJNI extends ExecutionEngine {
     }
 
     @Override
-    public byte[] commitKiplingGroupOffsets(long spUniqueId, long undoToken, short requestVersion, String groupId,
+    public byte[] commitTopicsGroupOffsets(long spUniqueId, long undoToken, short requestVersion, String groupId,
             byte[] offsets) {
         clearPsetAndEnsureCapacity(offsets.length);
         m_psetBuffer.putInt(offsets.length);
         m_psetBuffer.put(offsets);
         m_nextDeserializer.clear();
-        checkErrorCode(nativeCommitKiplingGroupOffsets(pointer, spUniqueId, undoToken, requestVersion,
+        checkErrorCode(nativeCommitTopicsGroupOffsets(pointer, spUniqueId, undoToken, requestVersion,
                 groupId.getBytes(Constants.UTF8ENCODING)));
         try {
             return readVarbinary(m_nextDeserializer);
@@ -1169,13 +1162,13 @@ public class ExecutionEngineJNI extends ExecutionEngine {
     }
 
     @Override
-    public byte[] fetchKiplingGroupOffsets(short requestVersion, String groupId, byte[] offsets) {
+    public byte[] fetchTopicsGroupOffsets(short requestVersion, String groupId, byte[] offsets) {
         clearPsetAndEnsureCapacity(offsets.length);
         m_psetBuffer.putInt(offsets.length);
         m_psetBuffer.put(offsets);
         m_nextDeserializer.clear();
         checkErrorCode(
-                nativeFetchKiplingGroupOffsets(pointer, requestVersion, groupId.getBytes(Constants.UTF8ENCODING)));
+                nativeFetchTopicsGroupOffsets(pointer, requestVersion, groupId.getBytes(Constants.UTF8ENCODING)));
         try {
             return readVarbinary(m_nextDeserializer);
         } catch (IOException e) {
@@ -1184,8 +1177,8 @@ public class ExecutionEngineJNI extends ExecutionEngine {
     }
 
     @Override
-    public void deleteExpiredKiplingOffsets(long undoToken, TimestampType deleteOlderThan) {
-        checkErrorCode(nativeDeleteExpiredKiplingOffsets(pointer, undoToken, deleteOlderThan.getTime()));
+    public void deleteExpiredTopicsOffsets(long undoToken, TimestampType deleteOlderThan) {
+        checkErrorCode(nativeDeleteExpiredTopicsOffsets(pointer, undoToken, deleteOlderThan.getTime()));
     }
 
     private byte[] readVarbinary(FastDeserializer defaultDeserializer) throws IOException {
