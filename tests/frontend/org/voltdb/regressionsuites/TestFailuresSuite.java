@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -31,7 +31,6 @@ import org.voltdb.BackendTarget;
 import org.voltdb.ProcedurePartitionData;
 import org.voltdb.VoltTable;
 import org.voltdb.client.Client;
-import org.voltdb.client.ClientImpl;
 import org.voltdb.client.ClientResponse;
 import org.voltdb.client.ProcCallException;
 import org.voltdb.compiler.VoltProjectBuilder;
@@ -442,7 +441,7 @@ public class TestFailuresSuite extends RegressionSuite {
         }
 
         try {
-            ((ClientImpl)client).callProcedureWithClientTimeout(100, "PartitionedSelect", 100, TimeUnit.MILLISECONDS);
+            client.callProcedureWithClientTimeout(100, "PartitionedSelect", 100, TimeUnit.MILLISECONDS);
         }
         catch (ProcCallException e) {
             m_fatalFailure = true;

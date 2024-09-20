@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -32,6 +32,7 @@ import org.voltdb.VoltDB.Configuration;
 import org.voltdb.client.Client;
 import org.voltdb.client.ClientImpl;
 import org.voltdb.client.ClientResponse;
+import org.voltdb.client.UpdateApplicationCatalog;
 import org.voltdb.compiler.VoltProjectBuilder;
 import org.voltdb.regressionsuites.LocalCluster;
 import org.voltdb.regressionsuites.MultiConfigSuiteBuilder;
@@ -51,7 +52,6 @@ public class TestExportV2SuitePro extends TestExportBaseSocketExport {
 
         startListener();
         m_verifier = new ExportTestExpectedData(m_serverSockets, m_isExportReplicated, true, k_factor+1);
-        m_streamNames.add("S_ALLOW_NULLS");
     }
 
     @Override
@@ -66,18 +66,17 @@ public class TestExportV2SuitePro extends TestExportBaseSocketExport {
     public void testExportAndAddedTable() throws Exception {
         System.out.println("testExportAndAddedTable");
         final Client client = getClient();
-        while (!((ClientImpl) client).isHashinatorInitialized()) {
-            Thread.sleep(1000);
-            System.out.println("Waiting for hashinator to be initialized...");
+        if (!client.waitForTopology(60_000)) {
+            throw new RuntimeException("Timed out waiting for topology info");
         }
 
         // add a new table
         final String newCatalogURL = Configuration.getPathToCatalogForTest("export-ddl-addedtable.jar");
         final String deploymentURL = Configuration.getPathToCatalogForTest("export-ddl-addedtable.xml");
-        final ClientResponse callProcedure = client.updateApplicationCatalog(new File(newCatalogURL),
+        final ClientResponse callProcedure = UpdateApplicationCatalog.update(client,
+                                                                             new File(newCatalogURL),
                                                                              new File(deploymentURL));
         assertTrue(callProcedure.getStatus() == ClientResponse.SUCCESS);
-        m_streamNames.add("S_ADDED_STREAM");
 
         // verify that it exports
         for (int i=0; i < 10; i++) {
@@ -88,7 +87,7 @@ public class TestExportV2SuitePro extends TestExportBaseSocketExport {
             client.callProcedure("InsertAddedStream", params);
         }
 
-        quiesceAndVerifyTarget(client, m_streamNames, m_verifier);
+        m_verifier.waitForTuplesAndVerify(client);
     }
 
     public TestExportV2SuitePro(final String name) {

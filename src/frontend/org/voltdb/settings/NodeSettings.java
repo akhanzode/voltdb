@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -26,14 +26,11 @@ import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Properties;
 import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import org.aeonbits.owner.Config.Sources;
 import org.aeonbits.owner.ConfigFactory;
 import org.voltdb.common.Constants;
 import org.voltdb.utils.MiscUtils;
-import org.voltdb.utils.VoltFile;
 
 import com.google_voltpatches.common.collect.ImmutableList;
 import com.google_voltpatches.common.collect.ImmutableMap;
@@ -45,7 +42,7 @@ public interface NodeSettings extends Settings {
 
     public final static String CL_SNAPSHOT_PATH_KEY = "org.voltdb.path.command_log_snapshot";
     public final static String CL_PATH_KEY = "org.voltdb.path.command_log";
-    public final static String SNAPTHOT_PATH_KEY = "org.voltdb.path.snapshots";
+    public final static String SNAPSHOT_PATH_KEY = "org.voltdb.path.snapshots";
     public final static String VOLTDBROOT_PATH_KEY = "org.voltdb.path.voltdbroot";
     public final static String EXPORT_CURSOR_PATH_KEY = "org.voltdb.path.export_cursor";
     public final static String EXPORT_OVERFLOW_PATH_KEY = "org.voltdb.path.export_overflow";
@@ -56,7 +53,7 @@ public interface NodeSettings extends Settings {
     public final static String LOCAL_ACTIVE_SITES_COUNT_KEY = "org.voltdb.local_active_sites_count";
 
     @Key(VOLTDBROOT_PATH_KEY)
-    public VoltFile getVoltDBRoot();
+    public File getVoltDBRoot();
 
     @Key(CL_PATH_KEY)
     public File getCommandLog();
@@ -64,8 +61,8 @@ public interface NodeSettings extends Settings {
     @Key(CL_SNAPSHOT_PATH_KEY)
     public File getCommandLogSnapshot();
 
-    @Key(SNAPTHOT_PATH_KEY)
-    public File getSnapshoth();
+    @Key(SNAPSHOT_PATH_KEY)
+    public File getSnapshot();
 
     @Key(EXPORT_OVERFLOW_PATH_KEY)
     public File getExportOverflow();
@@ -97,6 +94,49 @@ public interface NodeSettings extends Settings {
         return ConfigFactory.create(NodeSettings.class, imports);
     }
 
+    // check properties that don't have a default value were set from path.properties
+    default void checkKeys() {
+        File f;
+        String key = VOLTDBROOT_PATH_KEY;
+        try {
+            f = getVoltDBRoot();
+            if (f == null)
+                throw new SettingsException("Missing property " + key + " in path.properties");
+
+            key = CL_PATH_KEY;
+            f = getCommandLog();
+            if (f == null)
+                throw new SettingsException("Missing property " + key + " in path.properties");
+
+            key = CL_SNAPSHOT_PATH_KEY;
+            f = getCommandLogSnapshot();
+            if (f == null)
+                throw new SettingsException("Missing property " + key + " in path.properties");
+
+            key = SNAPSHOT_PATH_KEY;
+            f = getSnapshot();
+            if (f == null)
+                throw new SettingsException("Missing property " + key + " in path.properties");
+
+            key = EXPORT_OVERFLOW_PATH_KEY;
+            f = getExportOverflow();
+            if (f == null)
+                throw new SettingsException("Missing property " + key + " in path.properties");
+
+            key = DR_OVERFLOW_PATH_KEY;
+            f = getDROverflow();
+            if (f == null)
+                throw new SettingsException("Missing property " + key + " in path.properties");
+
+        } catch (NullPointerException npe) {
+            throw new SettingsException("Missing property " + key + " in path.properties");
+        }
+    }
+
+
+
+
+
     default File resolve(File path) {
         return path.isAbsolute() ? path : new File(getVoltDBRoot(), path.getPath());
     }
@@ -117,56 +157,13 @@ public interface NodeSettings extends Settings {
         return ImmutableSortedMap.<String, File>naturalOrder()
                 .put(CL_PATH_KEY, resolve(getCommandLog()))
                 .put(CL_SNAPSHOT_PATH_KEY, resolve(getCommandLogSnapshot()))
-                .put(SNAPTHOT_PATH_KEY, resolve(getSnapshoth()))
+                .put(SNAPSHOT_PATH_KEY, resolve(getSnapshot()))
                 .put(EXPORT_OVERFLOW_PATH_KEY, resolve(getExportOverflow()))
                 .put(DR_OVERFLOW_PATH_KEY, resolve(getDROverflow()))
                 .put(LARGE_QUERY_SWAP_PATH_KEY, resolve(getLargeQuerySwap()))
                 .put(EXPORT_CURSOR_PATH_KEY, resolve(getExportCursor()))
                 .put(TOPICS_DATA_PATH_KEY, resolve(getTopicsData()))
                 .build();
-    }
-
-    default boolean archiveSnapshotDirectory() {
-        File snapshotDH = resolveToAbsolutePath(getSnapshoth());
-        String [] snapshots = snapshotDH.list();
-        if (snapshots == null || snapshots.length == 0) {
-            return false;
-        }
-
-        Pattern archvRE = Pattern.compile(getSnapshoth().getName() + "\\.(\\d+)");
-        final ImmutableSortedMap.Builder<Integer, File> mb = ImmutableSortedMap.naturalOrder();
-
-        File parent = snapshotDH.getParentFile();
-        parent.listFiles(new FileFilter() {
-            @Override
-            public boolean accept(File path) {
-                Matcher mtc = archvRE.matcher(path.getName());
-                if (path.isDirectory() && mtc.matches()) {
-                    mb.put(Integer.parseInt(mtc.group(1)), path);
-                    return true;
-                }
-                return false;
-            }
-        });
-        NavigableMap<Integer, File> snapdirs = mb.build();
-        for (Map.Entry<Integer, File> e: snapdirs.descendingMap().entrySet()) {
-            File renameTo = new File(snapshotDH.getPath() + "." + (e.getKey() + 1));
-            try {
-                Files.move(e.getValue().toPath(), renameTo.toPath());
-            } catch (IOException exc) {
-                throw new SettingsException("failed to rename " + e.getValue()  + " to " + renameTo, exc);
-            }
-        }
-        File renameTo = new File(snapshotDH.getPath() + ".1");
-        try {
-            Files.move(snapshotDH.toPath(), renameTo.toPath());
-        } catch (IOException e) {
-            throw new SettingsException("failed to rename " + snapshotDH  + " to " + renameTo, e);
-        }
-        if (!snapshotDH.mkdir()) {
-            throw new SettingsException("failed to create snapshot directory " + snapshotDH);
-        }
-        return true;
     }
 
     default List<String> ensureDirectoriesExist() {
@@ -201,8 +198,7 @@ public interface NodeSettings extends Settings {
         return failed.build();
     }
 
-    default boolean clean() {
-        boolean archivedSnapshots = archiveSnapshotDirectory();
+    default void clean() {
         for (File path: getManagedArtifactPaths().values()) {
             File [] children = path.listFiles();
             if (children == null) {
@@ -212,23 +208,12 @@ public interface NodeSettings extends Settings {
                 MiscUtils.deleteRecursively(child);
             }
         }
-        return archivedSnapshots;
     }
 
     @Override
     default Properties asProperties() {
         ImmutableMap.Builder<String, String> mb = ImmutableMap.builder();
         try {
-            /*
-             * Check if the VoltDBRoot exists to avoid NullPointerException
-             * Note that the VoltDB root directory info may not exist in path.properties file
-             * or the path.properties file can be empty
-             */
-            if (getVoltDBRoot() == null) {
-                // The exception will be handled and printed out in RealVoltDB.java
-                throw new SettingsException("Missing VoltDB root " +
-                                            "information in path.properties file.");
-            }
             // Voltdbroot path is always absolute
             File voltdbroot = getVoltDBRoot().getCanonicalFile();
             mb.put(VOLTDBROOT_PATH_KEY, voltdbroot.getCanonicalPath());
@@ -245,7 +230,7 @@ public interface NodeSettings extends Settings {
             mb.put(LOCAL_SITES_COUNT_KEY, Integer.toString(getLocalSitesCount()));
             mb.put(LOCAL_ACTIVE_SITES_COUNT_KEY, Integer.toString(getLocalActiveSitesCount()));
         } catch (IOException e) {
-            throw new SettingsException("failed to canonicalize" + this);
+            throw new SettingsException("Failed to canonicalize " + this);
         }
         Properties props = new Properties();
         props.putAll(mb.build());
@@ -253,27 +238,36 @@ public interface NodeSettings extends Settings {
     }
 
     default void store() {
+
+        // check required properties are set
+        checkKeys();
+
+        // delete stranded temp files if any exist
         for (File f : Settings.getConfigDir().listFiles()) {
             if (f.getName().endsWith(".tmp")) {
                 f.delete();
             }
         }
+
+        // Create a new temp file and write NodeSettings properties to file
         File tempFH = null;
         try {
-            tempFH = File.createTempFile("path", null, Settings.getConfigDir());
+            tempFH = File.createTempFile("path", ".tmp", Settings.getConfigDir());
         } catch (IOException e) {
-            throw new SettingsException("failed to create temp file in config dir");
+            throw new SettingsException("Failed to create .tmp file for paths in config directory");
         }
-        File configFH = new File(Settings.getConfigDir(), "path.properties");
         store(tempFH, "VoltDB path settings. DO NOT MODIFY THIS FILE!");
-        // need rename to be atomic on the platform...
-        if (!tempFH.renameTo(configFH)) {
-            throw new SettingsException("unable to rename path properties");
+
+        // rename temp file to path.properties
+        File pathFH = new File(Settings.getConfigDir(), "path.properties");
+        if (!tempFH.renameTo(pathFH)) {
+            throw new SettingsException("Unable to rename " + tempFH.getName() + " to path.properties");
         }
 
-        File deprectedConfigFH = new File(getVoltDBRoot(),".paths");
-        if (deprectedConfigFH.exists()) {
-            deprectedConfigFH.delete();
+        // delete deprecated file
+        File deprecatedPathFile = new File(getVoltDBRoot(),".paths");
+        if (deprecatedPathFile.exists()) {
+            deprecatedPathFile.delete();
         }
     }
 }

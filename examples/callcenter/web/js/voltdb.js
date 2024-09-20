@@ -1,6 +1,6 @@
 /*
  This file is part of VoltDB.
- Copyright (C) 2008-2015 VoltDB Inc.
+ Copyright (C) 2008-2022 Volt Active Data Inc.
 
  This program is free software: you can redistribute it and/or modify
  it under the terms of the GNU Affero General Public License as
@@ -255,7 +255,6 @@ var IVoltDB = (function(){
                           , '@SnapshotRestore': { '1' : ['varchar'],'2' : ['varchar', 'varchar'] }
                           , '@SnapshotSave': { '3' : ['varchar', 'varchar', 'bit'], '1' : ['varchar'] }
                           , '@SnapshotScan': { '1' : ['varchar'] }
-                          , '@SnapshotStatus': { '0' : [] }
                           , '@Statistics': { '2' : ['StatisticsComponent', 'bit' ] }
                           , '@SystemCatalog': { '1' : ['CatalogComponent'] }
                           , '@SystemInformation': { '1' : ['SysInfoSelector'] }
@@ -324,7 +323,6 @@ var IVoltDB = (function(){
                                                   , '@SnapshotRestore': { '2' : ['DirectoryPath (varchar)', 'UniqueId (varchar)', 'Returns Table[]'], '1' : ['JSON (varchar)', 'Returns Table[]'] }
                                                   , '@SnapshotSave': { '3' : ['DirectoryPath (varchar)', 'UniqueId (varchar)', 'Blocking (bit)', 'Returns Table[]'], '1' : ['JSON (varchar)', 'Returns Table[]']  }
                                                   , '@SnapshotScan': { '1' : ['DirectoryPath (varchar)', 'Returns Table[]'] }
-                                                  , '@SnapshotStatus': { '0' : ['Returns Table[]'] }
                                                   , '@Statistics': { '2' : ['Statistic (StatisticsComponent)', 'Interval (bit)', 'Returns Table[]' ] }
                                                   , '@SystemCatalog': { '1' : ['SystemCatalog (CatalogComponent)', 'Returns Table[]'] }
                                                   , '@SystemInformation': { '1' : ['Selector (SysInfoSelector)', 'Returns Table[]'] }

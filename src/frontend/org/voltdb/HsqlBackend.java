@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -20,11 +20,9 @@ package org.voltdb;
 import java.sql.Connection;
 import java.sql.Statement;
 
-import org.voltcore.logging.Level;
 import org.voltcore.logging.VoltLogger;
 import org.voltdb.utils.CompressionService;
 import org.voltdb.utils.Encoder;
-import org.voltdb.utils.LogKeys;
 
 /**
  * A wrapper around the HSQLDB engine. This class can be used to execute SQL
@@ -85,7 +83,7 @@ public class HsqlBackend extends NonVoltDBBackend {
             dbconn = null;
             System.gc();
         } catch (Exception e) {
-            hostLog.l7dlog( Level.ERROR, LogKeys.host_Backend_ErrorOnShutdown.name(), e);
+            hostLog.error("Error shutting down backend", e);
         }
     }
 

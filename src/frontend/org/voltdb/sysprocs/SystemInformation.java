@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -21,7 +21,6 @@ import java.io.File;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
-import java.text.SimpleDateFormat;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,6 +42,7 @@ import org.voltdb.DependencyPair;
 import org.voltdb.ParameterSet;
 import org.voltdb.SystemProcedureExecutionContext;
 import org.voltdb.VoltDB;
+import org.voltdb.VoltDBInterface;
 import org.voltdb.VoltSystemProcedure;
 import org.voltdb.VoltTable;
 import org.voltdb.VoltTable.ColumnInfo;
@@ -54,14 +54,15 @@ import org.voltdb.catalog.Connector;
 import org.voltdb.catalog.Database;
 import org.voltdb.catalog.Deployment;
 import org.voltdb.catalog.GroupRef;
+import org.voltdb.catalog.Priorities;
 import org.voltdb.catalog.SnapshotSchedule;
 import org.voltdb.catalog.Systemsettings;
 import org.voltdb.catalog.User;
-import org.voltdb.licensetool.LicenseApi;
 import org.voltdb.settings.ClusterSettings;
 import org.voltdb.settings.NodeSettings;
 import org.voltdb.utils.CatalogUtil;
 import org.voltdb.utils.MiscUtils;
+import org.voltdb.utils.PlatformProperties;
 import org.voltdb.utils.VoltTableUtil;
 
 /**
@@ -223,10 +224,10 @@ public class SystemInformation extends VoltSystemProcedure
                     if (second_value == null || !second_value.equals(first_entry.getValue()))
                     {
                         // Ignore deltas due to LocalCluster's use of
-                        // VoltFileRoot
+                        // VoltSnapshotFilePrefix
                         if ((((first_entry.getKey())).contains("path") ||
                                 ((first_entry.getKey())).contains("root")) &&
-                                (System.getProperty("VoltFilePrefix") != null))
+                                (System.getProperty("VoltSnapshotFilePrefix") != null))
                         {
                             continue;
                         }
@@ -341,6 +342,9 @@ public class SystemInformation extends VoltSystemProcedure
         String publicInterface = null;
         String drPublicInterface = null;
         int drPublicPort = 0;
+        String topicsPublicInterface = null;
+        int topicsPublicPort = 0;
+        int topicsPort = VoltDB.DEFAULT_TOPICS_PORT;
         try {
             String localMetadata = VoltDB.instance().getLocalMetadata();
             JSONObject jsObj = new JSONObject(localMetadata);
@@ -362,6 +366,9 @@ public class SystemInformation extends VoltSystemProcedure
             publicInterface = jsObj.getString("publicInterface");
             drPublicInterface = jsObj.getString(VoltZK.drPublicHostProp);
             drPublicPort = jsObj.getInt(VoltZK.drPublicPortProp);
+            topicsPublicInterface = jsObj.getString("topicsPublicHost");
+            topicsPublicPort = jsObj.getInt("topicsPublicPort");
+            topicsPort = jsObj.getInt("topicsport");
         } catch (JSONException e) {
             hostLog.info("Failed to get local metadata, falling back to first resolvable IP address.");
         } catch (UnknownHostException e) {
@@ -430,6 +437,10 @@ public class SystemInformation extends VoltSystemProcedure
         vt.addRow(hostId, "IV2ENABLED", "true");
         long startTimeMs = VoltDB.instance().getHostMessenger().getInstanceId().getTimestamp();
         vt.addRow(hostId, "STARTTIME", Long.toString(startTimeMs));
+        long createTimeMs = VoltDB.instance().getClusterCreateTime();
+        vt.addRow(hostId, "CREATIONTIME", Long.toString(createTimeMs));
+        long hostStartTimeMs = VoltDB.instance().getHostStartTime().toEpochMilli();
+        vt.addRow(hostId, "HOSTSTARTTIME", Long.toString(hostStartTimeMs));
         vt.addRow(hostId, "UPTIME", MiscUtils.formatUptime(VoltDB.instance().getClusterUptime()));
 
         vt.addRow(hostId, "LAST_UPDATECORE_DURATION",
@@ -444,7 +455,7 @@ public class SystemInformation extends VoltSystemProcedure
         vt.addRow(hostId, "LOG4JPORT", Integer.toString(port));
         //Add license information
         if (MiscUtils.isPro()) {
-            vt.addRow(hostId, "LICENSE", VoltDB.instance().getLicenseInformation());
+            vt.addRow(hostId, "LICENSE", VoltDB.instance().getLicensing().getLicenseSummary());
         }
         populatePartitionGroups(hostId, vt);
 
@@ -452,6 +463,17 @@ public class SystemInformation extends VoltSystemProcedure
         vt.addRow(hostId, "VOLTDBROOT", VoltDB.instance().getVoltDBRootPath());
         vt.addRow(hostId, "FULLCLUSTERSIZE", Integer.toString(VoltDB.instance().getCatalogContext().getClusterSettings().hostcount()));
         vt.addRow(hostId, "CLUSTERID", Integer.toString(VoltDB.instance().getCatalogContext().getCluster().getDrclusterid()));
+        vt.addRow(hostId, "TOPICSPUBLICINTERFACE", topicsPublicInterface);
+        vt.addRow(hostId, "TOPICSPUBLICPORT", Integer.toString(topicsPublicPort));
+        vt.addRow(hostId, "TOPICSPORT", Integer.toString(topicsPort));
+
+        // platform properties
+        PlatformProperties pp = PlatformProperties.getPlatformProperties();
+        vt.addRow(hostId, "CPUCORES", Integer.toString(pp.coreCount));
+        vt.addRow(hostId, "CPUTHREADS", Integer.toString(pp.hardwareThreads));
+        vt.addRow(hostId, "MEMORY", Integer.toString(pp.ramInMegabytes) + " MB");
+        vt.addRow(hostId, "KUBERNETES", Boolean.toString(VoltDB.instance().getConfig().runningUnderKubernetes()));
+
         return vt;
     }
 
@@ -475,10 +497,11 @@ public class SystemInformation extends VoltSystemProcedure
             ClusterSettings clusterSettings,
             NodeSettings nodeSettings)
     {
+        VoltDBInterface voltdb = VoltDB.instance();
         VoltTable results = new VoltTable(clusterInfoSchema);
         // it would be awesome if these property names could come
         // from the RestApiDescription.xml (or the equivalent thereof) someday --izzy
-        results.addRow("voltdbroot", VoltDB.instance().getVoltDBRootPath());
+        results.addRow("voltdbroot", voltdb.getVoltDBRootPath());
 
         Deployment deploy = cluster.getDeployment().get("deployment");
         results.addRow("hostcount", Integer.toString(clusterSettings.hostcount()));
@@ -486,7 +509,7 @@ public class SystemInformation extends VoltSystemProcedure
         results.addRow("sitesperhost", Integer.toString(nodeSettings.getLocalSitesCount()));
 
         String http_enabled = "false";
-        int http_port = VoltDB.instance().getConfig().m_httpPort;
+        int http_port = voltdb.getConfig().m_httpPort;
         if (http_port != -1 && http_port != Integer.MAX_VALUE) {
             http_enabled = "true";
             results.addRow("httpport", Integer.toString(http_port));
@@ -500,27 +523,34 @@ public class SystemInformation extends VoltSystemProcedure
         }
         results.addRow("jsonenabled", json_enabled);
 
+        results.addRow("snapshotpath", voltdb.getSnapshotPath());
         SnapshotSchedule snaps = database.getSnapshotschedule().get("default");
-        String snap_enabled = "false";
+        String autosnap_enabled = "false";
         if (snaps != null && snaps.getEnabled())
         {
-            snap_enabled = "true";
+            autosnap_enabled = "true";
             String snap_freq = Integer.toString(snaps.getFrequencyvalue()) + snaps.getFrequencyunit();
-            results.addRow("snapshotpath", VoltDB.instance().getSnapshotPath());
             results.addRow("snapshotprefix", snaps.getPrefix());
             results.addRow("snapshotfrequency", snap_freq);
             results.addRow("snapshotretain", Integer.toString(snaps.getRetain()));
         }
-        results.addRow("snapshotenabled", snap_enabled);
+        results.addRow("snapshotenabled", autosnap_enabled);
 
         for (Connector export_conn : database.getConnectors()) {
             if (export_conn != null && export_conn.getEnabled())
             {
-                results.addRow("exportoverflowpath", VoltDB.instance().getExportOverflowPath().getPath());
+                results.addRow("exportoverflowpath", voltdb.getExportOverflowPath().getPath());
+                results.addRow("exportcursorpath", voltdb.getExportCursorPath());
                 break;
             }
         }
+
         results.addRow("export", Boolean.toString(CatalogUtil.isExportEnabled()));
+
+        if (cluster.getDrproducerenabled() || cluster.getDrconsumerenabled()) {
+            results.addRow("droverflowpath", voltdb.getDROverflowPath());
+        }
+        results.addRow("largequeryswappath", voltdb.getLargeQuerySwapPath());
 
         String partition_detect_enabled = "false";
         if (cluster.getNetworkpartition())
@@ -530,7 +560,7 @@ public class SystemInformation extends VoltSystemProcedure
         results.addRow("partitiondetection", partition_detect_enabled);
 
         results.addRow("heartbeattimeout", Integer.toString(cluster.getHeartbeattimeout()));
-        results.addRow("adminport", Integer.toString(VoltDB.instance().getConfig().m_adminPort));
+        results.addRow("adminport", Integer.toString(voltdb.getConfig().m_adminPort));
 
         String command_log_enabled = "false";
         // log name is MAGIC, you knoooow
@@ -543,8 +573,8 @@ public class SystemInformation extends VoltSystemProcedure
             {
                 command_log_mode = "sync";
             }
-            String command_log_path = VoltDB.instance().getCommandLogPath();
-            String command_log_snaps = VoltDB.instance().getCommandLogSnapshotPath();
+            String command_log_path = voltdb.getCommandLogPath();
+            String command_log_snaps = voltdb.getCommandLogSnapshotPath();
             String command_log_fsync_interval =
                 Integer.toString(command_log.getFsyncinterval());
             String command_log_max_txns =
@@ -578,12 +608,24 @@ public class SystemInformation extends VoltSystemProcedure
         // Add system setting information also
         // the attribute names follows the above naming rule
         Systemsettings sysSettings = deploy.getSystemsettings().get("systemsettings");
+        Priorities priorities = sysSettings.getPriorities().get("priorities");
+
         results.addRow("elasticduration", Integer.toString(sysSettings.getElasticduration()));
         results.addRow("elasticthroughput", Integer.toString(sysSettings.getElasticthroughput()));
-        results.addRow("snapshotpriority", Integer.toString(sysSettings.getSnapshotpriority()));
+        results.addRow("snapshotpriority", priorities.getEnabled() ?
+                Integer.toString(priorities.getSnapshotpriority()) : Integer.toString(sysSettings.getSnapshotpriority()));
         results.addRow("temptablesmaxsize", Integer.toString(sysSettings.getTemptablemaxsize()));
         results.addRow("querytimeout", Integer.toString(sysSettings.getQuerytimeout()));
 
+        // Add xdcr related information
+        if (cluster.getDrrole() != null) {
+            results.addRow("drrole", cluster.getDrrole());
+        }
+
+        // Add priorities information
+        results.addRow("prioritiesenabled", Boolean.toString(priorities.getEnabled()));
+        results.addRow("drpriority", priorities.getEnabled() ?
+                Integer.toString(priorities.getDrpriority()) : "null");
         return results;
     }
 
@@ -605,61 +647,7 @@ public class SystemInformation extends VoltSystemProcedure
     static public VoltTable populateLicenseProperties()
     {
         VoltTable results = new VoltTable(clusterInfoSchema);
-        SimpleDateFormat sdf = new SimpleDateFormat("EEE MMM d, yyyy");
-        LicenseApi licenseApi = VoltDB.instance().getLicenseApi();
-
-
-        results.addRow("PERMIT_VERSION", Integer.toString(licenseApi.getVersion()));
-        results.addRow("PERMIT_SCHEME", Integer.toString(licenseApi.getScheme()));
-
-        if(licenseApi.getLicenseType() != null)
-        {
-            results.addRow("TYPE", licenseApi.getLicenseType());
-        }
-        if(licenseApi.getIssuerCompany() != null)
-        {
-            results.addRow("ISSUER_COMPANY", licenseApi.getIssuerCompany());
-        }
-        if(licenseApi.getIssuerEmail() != null)
-        {
-            results.addRow("ISSUER_EMAIL", licenseApi.getIssuerEmail());
-        }
-        if(licenseApi.getIssuerUrl() != null)
-        {
-            results.addRow("ISSUER_URL", licenseApi.getIssuerUrl());
-        }
-        if(licenseApi.getIssuerPhone() != null)
-        {
-            results.addRow("ISSUER_PHONE", licenseApi.getIssuerPhone());
-        }
-        if(licenseApi.issued() != null)
-        {
-            results.addRow("ISSUE_DATE", sdf.format(licenseApi.issued().getTime()));
-        }
-        if(licenseApi.licensee() != null)
-        {
-            results.addRow("LICENSEE", licenseApi.licensee());
-        }
-        if(licenseApi.expires() != null)
-        {
-            results.addRow("EXPIRATION", sdf.format(licenseApi.expires().getTime()));
-        }
-
-        results.addRow("HOSTCOUNT_MAX", Integer.toString(licenseApi.maxHostcount()));
-        results.addRow("FEATURES_TRIAL", Boolean.toString(licenseApi.isAnyKindOfTrial()));
-        results.addRow("FEATURES_UNRESTRICTED", Boolean.toString(licenseApi.isUnrestricted()));
-        results.addRow("FEATURES_COMMANDLOGGING", Boolean.toString(licenseApi.isCommandLoggingAllowed()));
-        results.addRow("FEATURES_DRREPLICATION", Boolean.toString(licenseApi.isDrReplicationAllowed()));
-        results.addRow("FEATURES_DRACTIVEACTIVE", Boolean.toString(licenseApi.isDrActiveActiveAllowed()));
-
-        if(licenseApi.note() != null)
-        {
-            results.addRow("NOTE", licenseApi.note());
-        }
-        if(licenseApi.getSignature() != null)
-        {
-            results.addRow("SIGNATURE", licenseApi.getSignature());
-        }
+        VoltDB.instance().getLicensing().populateLicenseInfo(results);
         return results;
     }
 }

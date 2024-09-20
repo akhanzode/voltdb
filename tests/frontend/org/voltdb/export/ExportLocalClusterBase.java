@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -23,21 +23,26 @@
 
 package org.voltdb.export;
 
+import static org.junit.Assert.assertTrue;
+
 import java.io.File;
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Properties;
+import java.util.concurrent.CountDownLatch;
 
 import org.voltdb.client.Client;
 import org.voltdb.client.ClientConfig;
 import org.voltdb.client.ClientFactory;
-import org.voltdb.client.ClientImpl;
+import org.voltdb.client.ClientResponse;
 import org.voltdb.export.TestExportBaseSocketExport.ServerListener;
 import org.voltdb.regressionsuites.JUnit4LocalClusterTest;
 import org.voltdb.regressionsuites.LocalCluster;
-import org.voltdb.utils.VoltFile;
+
+import org.apache.commons.io.FileUtils;
 
 /**
  * A convenient base class to write export end-to-end test case by using local cluster. Comparing
@@ -75,8 +80,12 @@ public class ExportLocalClusterBase extends JUnit4LocalClusterTest {
     }
 
     public void startListener() throws IOException {
+        startListener(0);
+    }
+
+    public void startListener(int blockingCount) throws IOException {
         for (Entry<String, Integer> target : m_portForTable.entrySet()) {
-            ServerListener m_serverSocket = new ServerListener(target.getValue());
+            ServerListener m_serverSocket = new ServerListener(target.getValue(), blockingCount);
             m_serverSockets.put(target.getKey(), m_serverSocket);
             m_serverSocket.start();
         }
@@ -89,16 +98,7 @@ public class ExportLocalClusterBase extends JUnit4LocalClusterTest {
         for (String connectStr : cluster.getListenerAddresses()) {
             client.createConnection(connectStr);
         }
-        int sleptTimes = 0;
-        while (!((ClientImpl) client).isHashinatorInitialized() && sleptTimes < 60000) {
-            try {
-                Thread.sleep(1);
-                sleptTimes++;
-            } catch (InterruptedException ex) {
-                ;
-            }
-        }
-        if (sleptTimes >= 60000) {
+        if (!client.waitForTopology(60_000)) {
             throw new IOException("Failed to Initialize Hashinator.");
         }
         return client;
@@ -106,24 +106,65 @@ public class ExportLocalClusterBase extends JUnit4LocalClusterTest {
 
     public static void resetDir() throws IOException {
         File f = new File("/tmp/" + System.getProperty("user.name"));
-         VoltFile.recursivelyDelete(f);
+         FileUtils.deleteDirectory(f);
          f.mkdirs();
     }
 
-    protected void insertToStream(String streamName, int startPkey, int numberOfRows, Client client, Object[] params) throws Exception {
+    protected void insertToStream(String streamName, int startPkey, int numberOfRows, Client client, Object[] params)
+            throws Exception {
+        insertToStream(streamName, startPkey, numberOfRows, client, params, true);
+    }
+
+    protected void insertToStream(String streamName, int startPkey, int numberOfRows, Client client, Object[] params,
+            boolean partitioned) throws Exception {
+        String procName = streamName.toUpperCase() + ".insert";
+        HashSet<String> errors = new HashSet<>();
+        CountDownLatch latch = new CountDownLatch(numberOfRows);
+
         for (int i = startPkey; i < startPkey + numberOfRows; i++) {
             params[1] = i; // Pkey column
-            m_verifier.addRow(client, streamName, i, params);
-            client.callProcedure("@AdHoc", "insert into "+ streamName + " values(" + i + ", 1)");
+            if (m_verifier != null) {
+                m_verifier.addRow(client, streamName, partitioned ? i : null, params);
+            }
+            client.callProcedure(cr -> {
+                latch.countDown();
+                if (cr.getStatus() != ClientResponse.SUCCESS) {
+                    synchronized (errors) {
+                        errors.add(cr.getStatusString());
+                    }
+                }
+            }, procName, i, 1);
         }
+        latch.await();
+        assertTrue(errors.toString(), errors.isEmpty());
     }
 
     protected void insertToStreamWithNewColumn(String streamName, int startPkey, int numberOfRows, Client client, Object[] params) throws Exception {
+        insertToStreamWithNewColumn(streamName, startPkey, numberOfRows, client, params, true);
+    }
+
+    protected void insertToStreamWithNewColumn(String streamName, int startPkey, int numberOfRows, Client client,
+            Object[] params, boolean partitioned) throws Exception {
+        String procName = streamName.toUpperCase() + ".insert";
+        HashSet<String> errors = new HashSet<>();
+        CountDownLatch latch = new CountDownLatch(numberOfRows);
+
         for (int i = startPkey; i < startPkey + numberOfRows; i++) {
             params[1] = i; // Pkey column
             params[2] = i; // new column
-            m_verifier.addRow(client, streamName, i, params);
-            client.callProcedure("@AdHoc", "insert into " + streamName + " values(" + i + "," + i + ",1)");
+            if (m_verifier != null) {
+                m_verifier.addRow(client, streamName, partitioned ? i : null, params);
+            }
+            client.callProcedure(cr -> {
+                latch.countDown();
+                if (cr.getStatus() != ClientResponse.SUCCESS) {
+                    synchronized (errors) {
+                        errors.add(cr.getStatusString());
+                    }
+                }
+            }, procName, i, i, 1);
         }
+        latch.await();
+        assertTrue(errors.toString(), errors.isEmpty());
     }
 }

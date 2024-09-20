@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -149,7 +149,7 @@ public:
         int tokenCount = htonl(100);
         int partitionId = htonl(0);
 
-        m_engine->initialize(1,1, 0, partitionCount, 0, "", 0, 1024, DEFAULT_TEMP_TABLE_MEMORY, false);
+        m_engine->initialize(1,1, 0, partitionCount, 0, "", 0, 1024, false, -1, false, DEFAULT_TEMP_TABLE_MEMORY, false);
         partitionCount = htonl(partitionCount);
         int data[3] = {partitionCount, tokenCount, partitionId};
         m_engine->updateHashinator((char*)data, NULL, 0);

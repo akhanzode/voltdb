@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -119,10 +119,31 @@ public class SQLPatternFactory
             return makeGroup(true, captureLabel, part);
         }
 
+        /**
+         * Create a new optional {@link SQLPatternPart} out of {@code parts}
+         *
+         * @param parts to construct the pattern out of
+         * @return Constructed optional {@link SQLPatternPart}
+         */
+        public static SQLPatternPart optional(SQLPatternPart... parts) {
+            return optional(clause(parts));
+        }
+
         public static SQLPatternPart optional(SQLPatternPart part)
         {
             part.m_flags |= SQLPatternFactory.OPTIONAL;
             return part;
+        }
+
+        /**
+         * Create a new {@link SQLPatternPart} for an optional group which is captured with {@code label}
+         *
+         * @param label of capture
+         * @param parts sql pattern parts to capture
+         * @return Constructed optional capture {@link SQLPatternPart}
+         */
+        public static SQLPatternPart optionalCapture(String label, SQLPatternPart... parts) {
+            return optional(capture(label, parts.length == 1 ? parts[0] : clause(parts)));
         }
 
         /// Unused/untested "one of" to support future OR-ing of multiple alternative clauses.
@@ -207,6 +228,11 @@ public class SQLPatternFactory
             return new SQLPatternPartElement("[\\w.$]+");
         }
 
+        public static SQLPatternPart databaseTrigger()
+        {
+            return new SQLPatternPartElement("[\\w.$]+");
+        }
+
         public static SQLPatternPart anythingOrNothing()
         {
             return new SQLPatternPartElement(".*");
@@ -217,7 +243,7 @@ public class SQLPatternFactory
             return new SQLPatternPartElement("\\d+");
         }
 
-        public static SQLPatternPart ifExisits() {
+        public static SQLPatternPart ifExists() {
             return SPF.optional(SPF.capture("ifExists", SPF.clause(SPF.token("if"), SPF.token("exists"))));
         }
 

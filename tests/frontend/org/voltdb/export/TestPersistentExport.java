@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -29,20 +29,16 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map.Entry;
-import java.util.concurrent.TimeUnit;
 
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.voltdb.BackendTarget;
-import org.voltdb.VoltTable;
 import org.voltdb.client.Client;
 import org.voltdb.compiler.VoltProjectBuilder;
 import org.voltdb.compiler.deploymentfile.ServerExportEnum;
 import org.voltdb.export.TestExportBaseSocketExport.ServerListener;
 import org.voltdb.regressionsuites.LocalCluster;
-import org.voltdb.utils.MiscUtils;
-import org.voltdb.utils.VoltFile;
 
 public class TestPersistentExport extends ExportLocalClusterBase {
     private LocalCluster m_cluster;
@@ -78,7 +74,6 @@ public class TestPersistentExport extends ExportLocalClusterBase {
     @Test
     public void testInsertDeleteUpdate() throws Exception {
         resetDir();
-        VoltFile.resetSubrootForThisProcess();
 
         VoltProjectBuilder builder = null;
         builder = new VoltProjectBuilder();
@@ -99,7 +94,6 @@ public class TestPersistentExport extends ExportLocalClusterBase {
         startListener();
 
         m_cluster = new LocalCluster("TestPersistentExport.jar", 4, 3, KFACTOR, BackendTarget.NATIVE_EE_JNI);
-        m_cluster.setNewCli(true);
         m_cluster.setHasLocalServer(false);
         m_cluster.overrideAnyRequestForValgrind();
         boolean success = m_cluster.compile(builder);
@@ -116,73 +110,70 @@ public class TestPersistentExport extends ExportLocalClusterBase {
         Arrays.fill(data, 1);
         insertToStream("T1", 0, 100, client, data);
         client.callProcedure("@AdHoc", "delete from T1 where a < 10000;");
-        client.drain();
-        TestExportBaseSocketExport.waitForExportAllRowsDelivered(client, streamNames);
-        checkTupleCount(client, "T1", 200, false);
-        m_verifier.verifyRows();
+        // Update verifier with delete tuples
+        for (int i = 0; i < 100; ++i) {
+            data[0] = 2;
+            data[1] = i;
+            data[2] = 1;
+            m_verifier.addRow(client, "T1", i, data);
+        }
+        m_verifier.waitForTuplesAndVerify(client);
 
         // test update on replicated table
         insertToStream("T3", 0, 100, client, data);
+        // Hack to get the verifier to not track the inserts
+        m_verifier.dropStream("T3");
         client.callProcedure("@AdHoc", "update T3 set b = 100 where a < 10000;");
-        client.drain();
-        TestExportBaseSocketExport.waitForExportAllRowsDelivered(client, streamNames);
-        checkTupleCount(client, "T3", 200, true);
+        // Populate verifier with update before and after tuples
+        for (int i = 0; i < 100; ++i) {
+            data[0] = 3;
+            data[1] = i;
+            data[2] = 1;
+            m_verifier.addRow(client, "T3", null, data);
+            data[0] = 4;
+            data[2] = 100;
+            m_verifier.addRow(client, "T3", null, data);
+        }
+        m_verifier.waitForTuplesAndVerify(client);
+
+        // Change trigger to update_old
+        client.callProcedure("@AdHoc", "ALTER TABLE T3 ALTER EXPORT TO TARGET FOO3 ON UPDATE_OLD,DELETE;");
+        client.callProcedure("@AdHoc", "update T3 set b = 200 where a < 10000;");
+        // Update verifier with update after tuples
+        for (int i = 0; i < 100; ++i) {
+            data[0] = 4;
+            data[1] = i;
+            data[2] = 100;
+            m_verifier.addRow(client, "T3", null, data);
+        }
+        m_verifier.waitForTuplesAndVerify(client);
 
         // Change trigger to update_new
         client.callProcedure("@AdHoc", "ALTER TABLE T3 ALTER EXPORT TO TARGET FOO3 ON UPDATE_NEW,DELETE;");
-        client.callProcedure("@AdHoc", "update T3 set b = 200 where a < 10000;");
-        client.drain();
-        TestExportBaseSocketExport.waitForExportAllRowsDelivered(client, streamNames);
-        checkTupleCount(client, "T3", 300, true);
+        client.callProcedure("@AdHoc", "update T3 set b = 300 where a < 10000;");
+        // Update verifier with update after tuples
+        for (int i = 0; i < 100; ++i) {
+            data[0] = 4;
+            data[1] = i;
+            data[2] = 300;
+            m_verifier.addRow(client, "T3", null, data);
+        }
+        m_verifier.waitForTuplesAndVerify(client);
 
         client.callProcedure("@AdHoc", "delete from T3 where a < 10000;");
-        client.drain();
-        TestExportBaseSocketExport.waitForExportAllRowsDelivered(client, streamNames);
-        checkTupleCount(client, "T3", 400, true);
+        // Update verifier with delete tuples
+        for (int i = 0; i < 100; ++i) {
+            data[0] = 2;
+            data[1] = i;
+            data[2] = 300;
+            m_verifier.addRow(client, "T3", null, data);
+        }
+        m_verifier.waitForTuplesAndVerify(client);
 
         //test alter table add column
         client.callProcedure("@AdHoc", "ALTER TABLE T3 ADD COLUMN tweaked SMALLINT DEFAULT 0;");
         client.callProcedure("@AdHoc", "ALTER TABLE T3 ALTER EXPORT TO TARGET FOO3 ON INSERT;");
-        insertToStreamWithNewColumn("T3", 600, 100, client, data);
-        client.drain();
-        TestExportBaseSocketExport.waitForExportAllRowsDelivered(client, streamNames);
-        checkTupleCount(client, "T3", 500, true);
-    }
-
-    private static void checkTupleCount(Client client, String tableName, long expectedCount, boolean replicated){
-
-        //allow time to get the stats
-        final long maxSleep = TimeUnit.MINUTES.toMillis(2);
-        boolean success = false;
-        long start = System.currentTimeMillis();
-        while (!success) {
-            try {
-                VoltTable vt = client.callProcedure("@Statistics", "EXPORT").getResults()[0];
-                long count = 0;
-                while (vt.advanceRow()) {
-                    if (tableName.equalsIgnoreCase(vt.getString("SOURCE"))
-                            && "TRUE".equalsIgnoreCase(vt.getString("ACTIVE"))) {
-                        if (replicated) {
-                            if (0 == vt.getLong("PARTITION_ID")) {
-                                count = vt.getLong("TUPLE_COUNT");
-                                break;
-                            }
-                        } else {
-                            count +=vt.getLong("TUPLE_COUNT");
-                        }
-                    }
-                }
-                if (count == expectedCount) {
-                    return;
-                }
-                if (maxSleep < (System.currentTimeMillis() - start)) {
-                    break;
-                }
-                try { Thread.sleep(5000); } catch (Exception ignored) { }
-
-            } catch (Exception e) {
-            }
-        }
-        assert(false);
+        insertToStreamWithNewColumn("T3", 600, 100, client, data, false);
+        m_verifier.waitForTuplesAndVerify(client);
     }
 }

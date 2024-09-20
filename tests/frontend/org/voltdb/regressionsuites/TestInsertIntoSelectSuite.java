@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -404,8 +404,6 @@ public class TestInsertIntoSelectSuite extends RegressionSuite {
                 "                 POINT   GEOGRAPHY_POINT, " +
                 "                 POLYGON GEOGRAPHY, " +
                 "                 PRIMARY KEY (ID, VCHAR, VARBIN), " +
-                "                 LIMIT PARTITION ROWS 6 EXECUTE " +
-                "                 (DELETE FROM ENG12834_R7 ORDER BY ID, VCHAR, VARBIN LIMIT 3) " +
                 "); " +
                 "CREATE TABLE ENG_13059_R1 ( " +
                 "        ID      INTEGER DEFAULT 0 NOT NULL PRIMARY KEY, " +

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -49,11 +49,12 @@ import org.voltdb.AuthSystem.AuthUser;
 import org.voltdb.VoltDB.Configuration;
 import org.voltdb.client.ClientAuthScheme;
 import org.voltdb.client.ClientResponse;
+import org.voltdb.client.Priority;
 import org.voltdb.client.ProcedureCallback;
 import org.voltdb.security.AuthenticationRequest;
 import org.voltdb.utils.Base64;
-import org.voltdb.utils.Encoder;
 import org.voltdb.utils.ClientResponseToJsonApiV2;
+import org.voltdb.utils.Encoder;
 
 import com.google_voltpatches.common.base.Supplier;
 import com.google_voltpatches.common.base.Suppliers;
@@ -192,8 +193,13 @@ public class HTTPClientInterface {
     }
 
     private final static void simpleJsonResponse(String jsonp, String message, HttpServletResponse rsp, int code) {
+        simpleJsonResponse(jsonp, message, rsp, code, ClientResponse.UNEXPECTED_FAILURE);
+    }
+
+    private final static void simpleJsonResponse(String jsonp, String message, HttpServletResponse rsp, int code,
+            byte status) {
         ClientResponseImpl rimpl = new ClientResponseImpl(
-                ClientResponse.UNEXPECTED_FAILURE, new VoltTable[0], message);
+                status, new VoltTable[0], message);
         String msg = rimpl.toJSONString();
         msg = asJsonp(jsonp, msg);
         rsp.setStatus(code);
@@ -202,6 +208,11 @@ public class HTTPClientInterface {
             rsp.getWriter().flush();
         } catch (IOException ignoreThisAsBrowserMustHaveClosed) {
         }
+    }
+
+    private final static void unavailable(String jsonp, String message, HttpServletResponse rsp) {
+        simpleJsonResponse(jsonp, message, rsp, HttpServletResponse.SC_NOT_FOUND,
+                ClientResponse.SERVER_UNAVAILABLE);
     }
 
     private final static void badRequest(String jsonp, String message, HttpServletResponse rsp) {
@@ -296,6 +307,7 @@ public class HTTPClientInterface {
             String procName = request.getParameter("Procedure");
             String params = request.getParameter("Parameters");
             String timeoutStr = request.getParameter(QUERY_TIMEOUT_PARAM);
+            String prioStr = request.getParameter("Priority");
 
             // null procs are bad news
             if (procName == null) {
@@ -307,10 +319,7 @@ public class HTTPClientInterface {
             int queryTimeout = -1;
             if (timeoutStr != null) {
                 try {
-                    queryTimeout = Integer.parseInt(timeoutStr);
-                    if (queryTimeout <= 0) {
-                        throw new NumberFormatException("negative query timeout");
-                    }
+                    queryTimeout = parseIntegerParam(timeoutStr, 1, Integer.MAX_VALUE);
                 } catch(NumberFormatException e) {
                     badRequest(jsonp, "invalid query timeout: " + timeoutStr, response);
                     request.setHandled(true);
@@ -318,9 +327,33 @@ public class HTTPClientInterface {
                 }
             }
 
+            int priority = Priority.DEFAULT_PRIORITY;
+            if (prioStr != null) {
+                try {
+                    priority = parseIntegerParam(prioStr, Priority.HIGHEST_PRIORITY, Priority.LOWEST_PRIORITY);
+                } catch(NumberFormatException e) {
+                    badRequest(jsonp, "invalid priority: " + prioStr, response);
+                    request.setHandled(true);
+                    return;
+                }
+            }
+
+            if (VoltDB.instance().getMode() == OperationMode.SHUTTINGDOWN) {
+                unavailable(jsonp, "database is shutting down.", response);
+                request.setHandled(true);
+                return;
+            }
+
             authResult = authenticate(request);
             if (!authResult.isAuthenticated()) {
                 unauthorized(jsonp, authResult.m_message, response);
+                request.setHandled(true);
+                return;
+            }
+
+            if (InvocationDispatcher.getProcedureFromName(procName, VoltDB.instance().getCatalogContext()) == null) {
+                String err = String.format("Unknown procedure name '%s'.", procName);
+                ok(jsonp, err, response); // HTTP status = ok, VoltDB status = failure
                 request.setHandled(true);
                 return;
             }
@@ -354,10 +387,10 @@ public class HTTPClientInterface {
                     continuation.complete();
                     return;
                 }
-                success = callProcedure(hostname, authResult, queryTimeout, cb, procName, paramSet.toArray());
+                success = callProcedure(hostname, authResult, queryTimeout, priority, cb, procName, paramSet.toArray());
             }
             else {
-                success = callProcedure(hostname, authResult, queryTimeout, cb, procName);
+                success = callProcedure(hostname, authResult, queryTimeout, priority, cb, procName);
             }
             if (!success) {
                 ok(jsonp, "Server is not accepting work at this time.", response);
@@ -380,13 +413,34 @@ public class HTTPClientInterface {
         }
     }
 
-    public boolean callProcedure(String hostname, final AuthenticationResult ar, int timeout, ProcedureCallback cb, String procName, Object...args) {
-        InternalConnectionHandler internal=m_invocationHandler.get();
-        return internal.callProcedure(hostname, ar.m_authUser, ar.m_adminMode, timeout, cb, false, null, procName, args);
+    private static int parseIntegerParam(String str, int low, int high) {
+        int val = Integer.parseInt(str); // may throw
+        if (val < low || val > high) {
+            throw new NumberFormatException(String.format("value %d out of range (%d, %d)",
+                                                          val, low, high));
+        }
+        return val;
     }
 
-    public boolean callProcedure(String hostname, final AuthUser user, boolean adminMode, int timeout, ProcedureCallback cb, String procName, Object...args) {
-        return m_invocationHandler.get().callProcedure(hostname, user, adminMode, timeout, cb, false, null, procName, args);
+    // With request priority, defaulted to Priority.DEFAULT_PRIORITY.
+    // Always resolved before we call InternalConnectionHandler since we do not want
+    // the priority to default to SYSTEM_PRIORITY as it's a user request.
+    private boolean callProcedure(String hostname, AuthenticationResult ar, int timeout, int priority, ProcedureCallback cb, String procName, Object...args) {
+        assert priority > 0;
+        InternalConnectionHandler internal = m_invocationHandler.get();
+        return internal.callProcedure(hostname, ar.m_authUser, ar.m_adminMode, timeout, priority, cb, false, null, procName, args);
+    }
+
+    // Called from utils/DeploymentRequestServlet for @UpdateApplicationCatalog
+    public boolean callProcedure(String hostname, AuthenticationResult ar, int timeout, ProcedureCallback cb, String procName, Object...args) {
+        InternalConnectionHandler internal = m_invocationHandler.get();
+        return internal.callProcedure(hostname, ar.m_authUser, ar.m_adminMode, timeout, Priority.DEFAULT_PRIORITY, cb, false, null, procName, args);
+    }
+
+    // TODO - Apparently unused
+    private boolean callProcedure(String hostname, AuthUser user, boolean adminMode, int timeout, ProcedureCallback cb, String procName, Object...args) {
+        InternalConnectionHandler internal = m_invocationHandler.get();
+        return internal.callProcedure(hostname, user, adminMode, timeout, cb, procName, args);
     }
 
     Configuration getVoltDBConfig() {
@@ -417,12 +471,17 @@ public class HTTPClientInterface {
                         validAuthHeader = true;
                     }
                 } else if (schemeAndHandle[0].equalsIgnoreCase("basic")) {
-                    String unpw = new String(Base64.decode(schemeAndHandle[1]));
-                    String up[] = unpw.split(":");
-                    if (up.length == 2) {
-                        username = up[0];
-                        password = up[1];
-                        validAuthHeader = true;
+                    try {
+                        String unpw = new String(Base64.decode(schemeAndHandle[1]));
+                        String up[] = unpw.split(":");
+                        if (up.length == 2) {
+                            username = up[0];
+                            password = up[1];
+                            validAuthHeader = true;
+                        }
+                    } catch (Exception ex) {
+                        m_rate_limited_log.log(EstTime.currentTimeMillis(), Level.WARN, null,
+                                               "Malformed base64 string in basic-auth header");
                     }
                 }
             }

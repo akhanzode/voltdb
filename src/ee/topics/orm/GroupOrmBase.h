@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2019 VoltDB Inc.
+ * Copyright (C) 2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -155,7 +155,7 @@ protected:
     virtual PersistentTable* getTable() const = 0;
 
     /**
-     * Read a string out of in. This does not copy the data but just refers to the data from in
+     * Read a string out of in. This copies the data from in
      */
     static inline NValue readString(SerializeInputBE& in) {
         int32_t length = in.readInt();
@@ -167,7 +167,7 @@ protected:
     }
 
     /**
-     * Read a byte array from in. This does not copy the data but just refers to the data from in
+     * Read a byte array from in. This copies the data from in
      */
     static inline NValue readBytes(SerializeInputBE& in) {
         int32_t length = in.readInt();

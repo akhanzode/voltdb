@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2019 VoltDB Inc.
+ * Copyright (C) 2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -57,6 +57,6 @@ public final class CronIntervalGenerator implements IntervalGenerator {
         ZonedDateTime barrier = now.plusYears(20);
         ZonedDateTime runAt = m_cronExpression.nextTimeAfter(now, barrier);
 
-        return ChronoUnit.NANOS.between(runAt, now);
+        return ChronoUnit.NANOS.between(now, runAt);
     }
 }

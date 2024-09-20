@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -116,7 +116,7 @@ public class TLSMessagingChannel extends MessagingChannel {
         ByteBuffer src;
         do {
             readbuf.clear();
-            if (!m_decrypter.readTLSFrame(m_socketChannel, readbuf)) {
+            if (!SSLBufferDecrypter.readTLSFrame(m_socketChannel, readbuf)) {
                 return null;
             }
             src = readbuf.nioBuffer();

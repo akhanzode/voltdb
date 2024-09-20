@@ -1,8 +1,8 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This file contains original code and/or modifications of original code.
- * Any modifications made by VoltDB Inc. are licensed under the following
+ * Any modifications made by Volt Active Data Inc. are licensed under the following
  * terms and conditions:
  *
  * This program is free software: you can redistribute it and/or modify
@@ -43,7 +43,7 @@
  */
 
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -430,10 +430,10 @@ class VoltNetwork implements Runnable, IOStatsIntf
                     e instanceof AsynchronousCloseException ||
                     e instanceof ClosedChannelException ||
                     e instanceof ClosedByInterruptException) {
-                m_logger.debug( "VoltPort died, probably of natural causes", e);
+                m_logger.debug( "Connection closed", e);
             } else {
                 e.printStackTrace();
-                networkLog.error( "VoltPort died due to an unexpected exception", e);
+                networkLog.warn( "Connection closed unexpectedly", e);
             }
         } finally {
             installInterests(port);

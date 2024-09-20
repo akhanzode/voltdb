@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2019 VoltDB Inc.
+ * Copyright (C) 2019-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -131,7 +131,8 @@ TEST_F(GroupOrmTest, GroupStandaloneInsert) {
 
     EXPECT_EQ(0, getGroupTable()->activeTupleCount());
 
-    upsertGroup(groupId, 1, 2, ValueFactory::getNullStringValue(), ValueFactory::getNullStringValue());
+    // For standalone group use an empty protocol (not null)
+    upsertGroup(groupId, 1, 2, ValueFactory::getNullStringValue(), ValueFactory::getTempStringValue(""));
     EXPECT_EQ(1, getGroupTable()->activeTupleCount());
     ASSERT_EQ(1, getGroupTable()->index(GroupTable::standaloneGroupIndexName)->getSize());
 
@@ -181,7 +182,7 @@ TEST_F(GroupOrmTest, GroupUpdate) {
 
     // Convert to standalone group and back
     EXPECT_EQ(0, getGroupTable()->index(GroupTable::standaloneGroupIndexName)->getSize());
-    upsertGroup(groupId, timestamp, generationId, leader, ValueFactory::getNullStringValue());
+    upsertGroup(groupId, timestamp, generationId, leader, ValueFactory::getTempStringValue(""));
     EXPECT_EQ(1, getGroupTable()->activeTupleCount());
     EXPECT_EQ(1, getGroupTable()->index(GroupTable::standaloneGroupIndexName)->getSize());
 
@@ -203,7 +204,7 @@ TEST_F(GroupOrmTest, GroupDelete) {
 
     upsertGroup(groupId1, 1, 2, leader, protocol);
     // Create standalone group
-    upsertGroup(groupId2, 1, 2, ValueFactory::getNullStringValue(), ValueFactory::getNullStringValue());
+    upsertGroup(groupId2, 1, 2, ValueFactory::getNullStringValue(), ValueFactory::getTempStringValue(""));
 
     // Delete standalone group
     EXPECT_EQ(1, getGroupTable()->index(GroupTable::standaloneGroupIndexName)->getSize());
@@ -261,7 +262,8 @@ TEST_F(GroupOrmTest, AddMembers) {
     {
         RandomData scratch(128);
         Group group(*this, groupId);
-        group.getOrCreateMember(generateGroupMemberid()).update(1000, 2000, ValueFactory::getNullStringValue(),
+        group.getOrCreateMember(generateGroupMemberid()).update(ValueFactory::getTempStringValue("truc"),
+                ValueFactory::getTempStringValue("bidule"), 1000, 2000, ValueFactory::getNullStringValue(),
                 ValueFactory::getTempBinaryValue(&scratch, 64), ValueFactory::getTempBinaryValue(&scratch[64], 64));
         upsertGroup(group);
         EXPECT_EQ(1, getGroupMemberTable()->activeTupleCount());
@@ -272,7 +274,8 @@ TEST_F(GroupOrmTest, AddMembers) {
         RandomData scratch(128);
         NValue instanceId = ValueFactory::getTempStringValue("instanceId");
         Group group(*this, groupId);
-        group.getOrCreateMember(generateGroupMemberid()).update(1000, 2000, instanceId,
+        group.getOrCreateMember(generateGroupMemberid()).update(ValueFactory::getTempStringValue("truc"),
+                ValueFactory::getTempStringValue("bidule"), 1000, 2000, instanceId,
                 ValueFactory::getTempBinaryValue(&scratch, 64), ValueFactory::getTempBinaryValue(&scratch[64], 64));
         upsertGroup(group);
         EXPECT_EQ(2, getGroupMemberTable()->activeTupleCount());
@@ -291,10 +294,12 @@ TEST_F(GroupOrmTest, UpdateMembers) {
     Group group(*this, groupId, 1, 2, leader, protocol);
     RandomData scratch(128);
     GroupMember& member1 = group.getOrCreateMember(generateGroupMemberid());
-    member1.update(1000, 2000, ValueFactory::getNullStringValue(), ValueFactory::getTempBinaryValue(&scratch, 64),
+    member1.update(ValueFactory::getTempStringValue("truc"),
+            ValueFactory::getTempStringValue("bidule"), 1000, 2000, ValueFactory::getNullStringValue(), ValueFactory::getTempBinaryValue(&scratch, 64),
             ValueFactory::getTempBinaryValue(&scratch[64], 64));
     GroupMember &member2 = group.getOrCreateMember(generateGroupMemberid());
-    member2.update(1000, 2000, instanceId, ValueFactory::getTempBinaryValue(&scratch, 64),
+    member2.update(ValueFactory::getTempStringValue("truc"),
+            ValueFactory::getTempStringValue("bidule"), 1000, 2000, instanceId, ValueFactory::getTempBinaryValue(&scratch, 64),
             ValueFactory::getTempBinaryValue(&scratch[64], 64));
     EXPECT_NE(member1, member2);
 
@@ -302,9 +307,13 @@ TEST_F(GroupOrmTest, UpdateMembers) {
 
     // Update timeouts
     {
-        member1.update(5000, 2000, ValueFactory::getNullStringValue(), ValueFactory::getTempBinaryValue(&scratch, 64),
+        member1.update(ValueFactory::getTempStringValue("truc"),
+                ValueFactory::getTempStringValue("bidule"), 5000, 2000, ValueFactory::getNullStringValue(),
+                ValueFactory::getTempBinaryValue(&scratch, 64),
                 ValueFactory::getTempBinaryValue(&scratch[64], 64));
-        member2.update(1000, 10000, instanceId, ValueFactory::getTempBinaryValue(&scratch, 64),
+        member2.update(ValueFactory::getTempStringValue("truc"),
+                ValueFactory::getTempStringValue("bidule"), 1000, 10000, instanceId,
+                ValueFactory::getTempBinaryValue(&scratch, 64),
                 ValueFactory::getTempBinaryValue(&scratch[64], 64));
     }
 
@@ -320,9 +329,13 @@ TEST_F(GroupOrmTest, UpdateMembers) {
     // Update protocol metadata and assignments
     {
         RandomData scratch2(128);
-        member1.update(5000, 2000, ValueFactory::getNullStringValue(), ValueFactory::getTempBinaryValue(&scratch2, 128),
+        member1.update(ValueFactory::getTempStringValue("truc"),
+                ValueFactory::getTempStringValue("bidule"), 5000, 2000, ValueFactory::getNullStringValue(),
+                ValueFactory::getTempBinaryValue(&scratch2, 128),
                 ValueFactory::getTempBinaryValue(&scratch[64], 64));
-        member2.update(1000, 10000, instanceId, ValueFactory::getTempBinaryValue(&scratch, 64),
+        member2.update(ValueFactory::getTempStringValue("truc"),
+                ValueFactory::getTempStringValue("bidule"), 1000, 10000, instanceId,
+                ValueFactory::getTempBinaryValue(&scratch, 64),
                 ValueFactory::getTempBinaryValue(&scratch2, 128));
     }
 
@@ -348,10 +361,12 @@ TEST_F(GroupOrmTest, DeleteMembers) {
     Group group(*this, groupId, 1, 2, leader, protocol);
     RandomData scratch(128);
     GroupMember& member1 = group.getOrCreateMember(generateGroupMemberid());
-    member1.update(1000, 2000, ValueFactory::getNullStringValue(), ValueFactory::getTempBinaryValue(&scratch, 64),
+    member1.update(ValueFactory::getTempStringValue("truc"), ValueFactory::getTempStringValue("bidule"),
+            1000, 2000, ValueFactory::getNullStringValue(), ValueFactory::getTempBinaryValue(&scratch, 64),
             ValueFactory::getTempBinaryValue(&scratch[64], 64));
     GroupMember &member2 = group.getOrCreateMember(generateGroupMemberid());
-    member2.update(1000, 2000, instanceId, ValueFactory::getTempBinaryValue(&scratch, 64),
+    member2.update(ValueFactory::getTempStringValue("truc"), ValueFactory::getTempStringValue("bidule"),
+            1000, 2000, instanceId, ValueFactory::getTempBinaryValue(&scratch, 64),
             ValueFactory::getTempBinaryValue(&scratch[64], 64));
 
     upsertGroup(group);

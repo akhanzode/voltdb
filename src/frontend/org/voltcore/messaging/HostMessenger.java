@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -54,7 +54,6 @@ import org.apache.zookeeper_voltpatches.CreateMode;
 import org.apache.zookeeper_voltpatches.KeeperException;
 import org.apache.zookeeper_voltpatches.ZooDefs.Ids;
 import org.apache.zookeeper_voltpatches.ZooKeeper;
-import org.json_voltpatches.JSONArray;
 import org.json_voltpatches.JSONException;
 import org.json_voltpatches.JSONObject;
 import org.json_voltpatches.JSONStringer;
@@ -62,7 +61,13 @@ import org.voltcore.agreement.AgreementSite;
 import org.voltcore.agreement.InterfaceToMessenger;
 import org.voltcore.common.Constants;
 import org.voltcore.logging.VoltLogger;
+import org.voltcore.messaging.messages.RequestJoinResponse;
+import org.voltcore.messaging.messages.HostInformation;
+import org.voltcore.messaging.messages.PublishHostIdRequest;
+import org.voltcore.messaging.messages.RequestForConnectionRequest;
+import org.voltcore.messaging.messages.RequestHostIdRequest;
 import org.voltcore.network.CipherExecutor;
+import org.voltcore.network.LoopbackAddress;
 import org.voltcore.network.PicoNetwork;
 import org.voltcore.network.TLSPicoNetwork;
 import org.voltcore.network.VoltNetworkPool;
@@ -82,6 +87,7 @@ import com.google_voltpatches.common.base.Preconditions;
 import com.google_voltpatches.common.base.Predicate;
 import com.google_voltpatches.common.collect.ImmutableList;
 import com.google_voltpatches.common.collect.ImmutableMap;
+import com.google_voltpatches.common.collect.ImmutableSet;
 import com.google_voltpatches.common.collect.Maps;
 import com.google_voltpatches.common.collect.Sets;
 import com.google_voltpatches.common.net.HostAndPort;
@@ -102,7 +108,7 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
     private static final VoltLogger tmLog = new VoltLogger("TM");
 
     //VERBOTEN_THREADS is a set of threads that are not allowed to use ZK client.
-    public static final CopyOnWriteArraySet<Long> VERBOTEN_THREADS = new CopyOnWriteArraySet<Long>();
+    public static final CopyOnWriteArraySet<Long> VERBOTEN_THREADS = new CopyOnWriteArraySet<>();
 
     /**
      * Callback for watching for host failures.
@@ -132,13 +138,15 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
         private static final String DEAD_HOST_TIMEOUT = "deadhosttimeout";
         private static final String INTERNAL_PORT = "internalport";
         private static final String INTERNAL_INTERFACE = "internalinterface";
+        private static final String ZK_PORT = "zkport";
         private static final String ZK_INTERFACE = "zkinterface";
         private static final String COORDINATOR_IP = "coordinatorip";
         private static final String GROUP = "group";
         private static final String LOCAL_SITES_COUNT = "localSitesCount";
 
         public InetSocketAddress coordinatorIp;
-        public String zkInterface = "127.0.0.1:7181";
+        public String zkInterface = LoopbackAddress.get();
+        public int zkPort = 7181;
         public String internalInterface = "";
         public int internalPort = 3021;
         public int deadHostTimeout = Constants.DEFAULT_HEARTBEAT_TIMEOUT_SECONDS * 1000;
@@ -151,6 +159,9 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
         public int localSitesCount;
         public final boolean startPause;
         public String recoveredPartitions;
+        // site IDs that when they are the destination and there is no registered mailbox respond with unknown site
+        public Set<Integer> respondUnknownSite = ImmutableSet.of();
+
         public Config(String coordIp, int coordPort, boolean paused) {
             startPause = paused;
             if (coordIp == null || coordIp.length() == 0) {
@@ -173,7 +184,7 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
          * This is for testing only. It aides test suites in the generation of
          * configurations that share the same coordinators
          * @param ports a port generator
-         * @param hostCount
+         * @param hostCount a count of nodes in cluster
          * @return a list of {@link Config} that share the same coordinators
          */
         public static List<Config> generate(PortGenerator ports, int hostCount) {
@@ -185,9 +196,10 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
 
             for (int i = 0; i < hostCount; ++i) {
                 Config cnf = new Config(null, org.voltcore.common.Constants.DEFAULT_INTERNAL_PORT, false);
-                cnf.zkInterface = "127.0.0.1:" + ports.next();
+                cnf.zkInterface = LoopbackAddress.get();
+                cnf.zkPort = ports.next();
                 cnf.internalPort = ports.next();
-                coordinators[i] = ":" + cnf.internalPort;
+                coordinators[i] = ":" + cnf.internalPort; // TODO IPv6 ?
                 lbld.add(cnf);
             }
 
@@ -206,8 +218,11 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
         }
 
         public int getZKPort() {
-            return HostAndPort.fromString(zkInterface)
-                    .getPortOrDefault(org.voltcore.common.Constants.DEFAULT_ZK_PORT);
+            return zkPort;
+        }
+
+        public String getZKHost() {
+            return zkInterface;
         }
 
         private void initNetworkThreads() {
@@ -232,6 +247,7 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
                 js.keySymbolValuePair(GROUP, group);
                 js.keySymbolValuePair(COORDINATOR_IP, coordinatorIp.toString());
                 js.keySymbolValuePair(ZK_INTERFACE, zkInterface);
+                js.keySymbolValuePair(ZK_PORT, zkPort);
                 js.keySymbolValuePair(INTERNAL_INTERFACE, internalInterface);
                 js.keySymbolValuePair(INTERNAL_PORT, internalPort);
                 js.keySymbolValuePair(DEAD_HOST_TIMEOUT, deadHostTimeout);
@@ -303,7 +319,7 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
             if (StringUtils.isEmpty(m_recoveredPartitions)) {
                 return partitionSet;
             }
-            String partitions[] = m_recoveredPartitions.split(",");
+            String[] partitions = m_recoveredPartitions.split(",");
             for (String partition : partitions) {
                 try {
                     partitionSet.add(Integer.valueOf(partition));
@@ -336,6 +352,7 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
     public static final int SNAPSHOT_IO_AGENT_ID = -11;
     public static final int DR_CONSUMER_MP_COORDINATOR_ID = -12;
     public static final int TRACE_SITE_ID = -13;
+    public static final int CLOCK_SKEW_COLLECTOR_ID = -14;
 
     // we should never hand out this site ID.  Use it as an empty message destination
     public static final int VALHALLA = Integer.MIN_VALUE;
@@ -349,13 +366,15 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
     private InstanceId m_instanceId = null;
     private boolean m_shuttingDown = false;
     // default to false for PD, so hopefully this gets set to true very quickly
-    private AtomicBoolean m_partitionDetectionEnabled = new AtomicBoolean(false);
+    private final AtomicBoolean m_partitionDetectionEnabled = new AtomicBoolean(false);
     private boolean m_partitionDetected = false;
 
     private final HostWatcher m_hostWatcher;
-    private Set<Integer> m_stopNodeNotice = new HashSet<Integer>();
+    private final Set<Integer> m_stopNodeNotice = new HashSet<>();
 
     private final Object m_mapLock = new Object();
+
+    private final String m_hostDisplayName;
 
     /*
      * References to other hosts in the mesh.
@@ -401,43 +420,47 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
         return m_siteMailboxes.get(hsId);
     }
 
-    public HostMessenger(Config config, HostWatcher hostWatcher) {
-        this(config, hostWatcher, null, null);
+    public HostMessenger(Config config, HostWatcher hostWatcher, String hostDisplayName) {
+        this(config, hostWatcher, null, null, hostDisplayName);
     }
 
-    public HostMessenger(Config config, HostWatcher hostWatcher, SslContext sslServerContext,
-            SslContext sslClientContext) {
+    public HostMessenger(Config config,
+                         HostWatcher hostWatcher,
+                         SslContext sslServerContext,
+                         SslContext sslClientContext,
+                         String hostDisplayName) {
+        checkArgument(!HostAndPort.fromString(config.zkInterface).hasPort(),
+                "zkInterface '%s' should not contain port", config.zkInterface);
         m_config = config;
         m_hostWatcher = hostWatcher;
         m_network = new VoltNetworkPool(m_config.networkThreads, 0, m_config.coreBindIds, "Server");
         m_acceptor = config.acceptor;
         //This ref is updated after the mesh decision is made.
         m_paused.set(m_config.startPause);
+        m_hostDisplayName = hostDisplayName;
         m_joiner = new SocketJoiner(
                 m_config.internalInterface,
                 m_config.internalPort,
+                m_hostDisplayName,
                 m_paused,
                 m_acceptor,
                 this,
                 sslServerContext,
-                sslClientContext);
+                sslClientContext
+        );
 
         // Register a clean shutdown hook for the network threads.  This gets cranky
         // when crashLocalVoltDB() is called because System.exit() can get called from
         // a random network thread which is already shutting down and we'll get delicious
         // deadlocks.  Take the coward's way out and just don't do this if we're already
         // crashing (read as: I refuse to hunt for more shutdown deadlocks).
-        ShutdownHooks.registerShutdownHook(ShutdownHooks.MIDDLE, false, new Runnable() {
-            @Override
-            public void run()
+        ShutdownHooks.registerShutdownHook(ShutdownHooks.MIDDLE, false, () -> {
+            for (ForeignHost host : m_foreignHosts.values())
             {
-                for (ForeignHost host : m_foreignHosts.values())
+                // null is OK. It means this host never saw this host id up
+                if (host != null)
                 {
-                    // null is OK. It means this host never saw this host id up
-                    if (host != null)
-                    {
-                        host.close();
-                    }
+                    host.close();
                 }
             }
         });
@@ -542,6 +565,8 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
         if (makePPDDecision(m_localHostId, previousHosts, currentHosts, m_partitionDetectionEnabled.get())) {
             // record here so we can ensure this only happens once for this node
             m_partitionDetected = true;
+
+            // TODO PK this has to be changed - either decide to throw inside this method or return non-null exception
             org.voltdb.VoltDB.crashLocalVoltDB("Partition detection logic will stop this process to ensure against split brains.",
                         false, null);
         }
@@ -555,7 +580,7 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
                 // Then decide if we should shut down to ensure that at a MAXIMUM, only
                 // one viable cluster is running.
                 // This feature is called "Partition Detection" in the docs.
-                Set<Integer> checkThoseNodes = new HashSet<Integer>(failedHostIds);
+                Set<Integer> checkThoseNodes = new HashSet<>(failedHostIds);
                 checkThoseNodes.removeAll(m_stopNodeNotice);
                 doPartitionDetectionActivities(checkThoseNodes);
                 addFailedHosts(failedHostIds);
@@ -587,27 +612,27 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
         }
     };
 
-    private final void addFailedHosts(Set<Integer> failedHosts) {
+    private void addFailedHosts(Set<Integer> failedHosts) {
         synchronized (m_mapLock) {
             ImmutableMap.Builder<Integer, String> bldr = ImmutableMap.<Integer,String>builder()
                     .putAll(Maps.filterKeys(m_knownFailedHosts, not(in(failedHosts))));
             for (int hostId: failedHosts) {
                 ForeignHost fh = m_foreignHosts.get(hostId);
 
-                String hostname = fh != null ? fh.hostnameAndIPAndPort() : "UNKNOWN";
+                String hostname = fh != null ? fh.hostname() : "UNKNOWN";
                 bldr.put(hostId, hostname);
             }
             m_knownFailedHosts = bldr.build();
         }
     }
 
-    private final void addFailedHost(int hostId) {
+    private void addFailedHost(int hostId) {
         if (!m_knownFailedHosts.containsKey(hostId)) {
             synchronized (m_mapLock) {
                 ImmutableMap.Builder<Integer, String> bldr = ImmutableMap.<Integer,String>builder()
                         .putAll(Maps.filterKeys(m_knownFailedHosts, not(equalTo(hostId))));
                 ForeignHost fhs = m_foreignHosts.get(hostId);
-                String hostname = fhs != null ? fhs.hostnameAndIPAndPort() : "UNKNOWN";
+                String hostname = fhs != null ? fhs.hostname() : "UNKNOWN";
                 bldr.put(hostId, hostname);
                 m_knownFailedHosts = bldr.build();
             }
@@ -649,12 +674,6 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
     /**
      * Start the host messenger and connect to the leader, or become the leader
      * if necessary.
-     *
-     * @param request The requested action to send to other nodes when joining
-     * the mesh. This is opaque to the HostMessenger, it can be any
-     * string. HostMessenger will encode this in the request to join mesh to the
-     * live hosts. The live hosts can use this request string to make further
-     * decision on whether or not to accept the request.
      */
     public void start() throws Exception {
         /*
@@ -678,34 +697,17 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
             /*
              * A set containing just the leader (this node)
              */
-            HashSet<Long> agreementSites = new HashSet<Long>();
+            HashSet<Long> agreementSites = new HashSet<>();
             agreementSites.add(agreementHSId);
 
             /*
              * A basic site mailbox for the agreement site
              */
-            SiteMailbox sm = new SiteMailbox(this, agreementHSId);
-            createMailbox(agreementHSId, sm);
+            commonStartSetup(agreementHSId, agreementSites);
 
-
-            /*
-             * Construct the site with just this node
-             */
-            m_agreementSite =
-                new AgreementSite(
-                        agreementHSId,
-                        agreementSites,
-                        0,
-                        sm,
-                        new InetSocketAddress(
-                                m_config.zkInterface.split(":")[0],
-                                Integer.parseInt(m_config.zkInterface.split(":")[1])),
-                        m_config.backwardsTimeForgivenessWindow,
-                        m_failedHostsCallback);
             m_agreementSite.start();
             m_agreementSite.waitForRecovery();
-            m_zk = org.voltcore.zk.ZKUtil.getClient(
-                    m_config.zkInterface, 60 * 1000, VERBOTEN_THREADS);
+            m_zk = org.voltcore.zk.ZKUtil.getClient(m_config.zkInterface, m_config.zkPort, 60 * 1000, VERBOTEN_THREADS);
             if (m_zk == null) {
                 throw new Exception("Timed out trying to connect local ZooKeeper instance");
             }
@@ -732,7 +734,7 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
                     ByteBuffer.wrap(m_config.coordinatorIp.getAddress().getAddress()).getInt());
             instance_id.put("timestamp", System.currentTimeMillis());
             hostLog.debug("Cluster will have instance ID:\n" + instance_id.toString(4));
-            byte[] payload = instance_id.toString(4).getBytes("UTF-8");
+            byte[] payload = instance_id.toString(4).getBytes(StandardCharsets.UTF_8);
             m_zk.create(CoreZK.instance_id, payload, Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
 
             /*
@@ -760,7 +762,7 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
 
     /**
      * Get a unique ID for this cluster
-     * @return
+     * @return instance id
      */
     public InstanceId getInstanceId()
     {
@@ -770,7 +772,7 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
             {
                 byte[] data =
                     m_zk.getData(CoreZK.instance_id, false, null);
-                JSONObject idJSON = new JSONObject(new String(data, "UTF-8"));
+                JSONObject idJSON = new JSONObject(new String(data, StandardCharsets.UTF_8));
                 m_instanceId = new InstanceId(idJSON.getInt("coord"),
                         idJSON.getLong("timestamp"));
 
@@ -791,31 +793,37 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
      */
     @Override
     public void notifyOfJoin(
-            int hostId, SocketChannel socket,
+            SocketChannel socket,
             SSLEngine sslEngine,
             InetSocketAddress listeningAddress,
-            JSONObject jo) {
+            PublishHostIdRequest publishHostIdRequest) throws Exception {
+        int hostId = publishHostIdRequest.getHostId();
         networkLog.info(getHostId() + " notified of " + hostId);
         prepSocketChannel(socket);
-        ForeignHost fhost = null;
         try {
-            fhost = new ForeignHost(this, hostId, socket, m_config.deadHostTimeout,
+            ForeignHost fhost = new ForeignHost(
+                    this,
+                    hostId,
+                    publishHostIdRequest.getHostDisplayName(),
+                    socket,
+                    m_config.deadHostTimeout,
                     listeningAddress,
-                    createPicoNetwork(sslEngine, socket));
+                    createPicoNetwork(sslEngine, socket, publishHostIdRequest.getHostDisplayName())
+            );
             putForeignHost(hostId, fhost);
             fhost.enableRead(VERBOTEN_THREADS);
         } catch (java.io.IOException e) {
             org.voltdb.VoltDB.crashLocalVoltDB("", true, e);
         }
-        m_acceptor.accrue(hostId, jo);
+        m_acceptor.accrue(hostId, publishHostIdRequest.getJsonObject());
     }
 
-    private PicoNetwork createPicoNetwork(SSLEngine sslEngine, SocketChannel socket) {
+    private PicoNetwork createPicoNetwork(SSLEngine sslEngine, SocketChannel socket, String hostDisplayName) {
         if (sslEngine == null) {
-            return new PicoNetwork(socket);
+            return new PicoNetwork(socket, hostDisplayName);
         } else {
             //TODO: Share the same cipher executor threads as the ones used for client connections?
-            return new TLSPicoNetwork(socket, sslEngine, CipherExecutor.SERVER);
+            return new TLSPicoNetwork(socket, sslEngine, CipherExecutor.SERVER, hostDisplayName);
         }
     }
 
@@ -843,13 +851,8 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
         }
     }
 
-    static final Predicate<Integer> in(final Set<Integer> set) {
-        return new Predicate<Integer>() {
-            @Override
-            public boolean apply(Integer input) {
-                return set.contains(input);
-            }
-        };
+    static Predicate<Integer> in(final Set<Integer> set) {
+        return set::contains;
     }
 
     /*
@@ -895,25 +898,21 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
     /**
      * Any node can serve a request to join. The coordination of generating a new host id
      * is done via ZK
-     *
-     * @param request The requested action from the rejoining host. This is
-     * opaque to the HostMessenger, it can be any string. The request string can
-     * be used to make further decision on whether or not to accept the request
-     * in the MembershipAcceptor.
      */
     @Override
     public void requestJoin(SocketChannel socket, SSLEngine sslEngine,
                             MessagingChannel messagingChannel,
-                            InetSocketAddress listeningAddress, JSONObject jo) throws Exception {
+                            InetSocketAddress listeningAddress,
+                            RequestHostIdRequest requestHostIdRequest) throws Exception {
         /*
          * Generate the host id via creating an ephemeral sequential node
          */
-        Integer hostId = selectNewHostId(socket.socket().getInetAddress().getHostAddress());
+        int hostId = selectNewHostId(socket.socket().getInetAddress().getHostAddress());
         prepSocketChannel(socket);
-        ForeignHost fhost = null;
+        ForeignHost fhost;
         try {
             try {
-                JoinAcceptor.PleaDecision decision = m_acceptor.considerMeshPlea(m_zk, hostId, jo);
+                JoinAcceptor.PleaDecision decision = m_acceptor.considerMeshPlea(m_zk, hostId, requestHostIdRequest.getJsonObject());
 
                 /*
                  * Write the response that advertises the cluster topology
@@ -948,12 +947,12 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
                 /*
                  * Now add the host to the mailbox system
                  */
-                PicoNetwork picoNetwork = createPicoNetwork(sslEngine, socket);
-                fhost = new ForeignHost(this, hostId, socket, m_config.deadHostTimeout, listeningAddress, picoNetwork);
+                PicoNetwork picoNetwork = createPicoNetwork(sslEngine, socket, requestHostIdRequest.getHostDisplayName());
+                fhost = new ForeignHost(this, hostId, requestHostIdRequest.getHostDisplayName(), socket, m_config.deadHostTimeout, listeningAddress, picoNetwork);
                 putForeignHost(hostId, fhost);
                 fhost.enableRead(VERBOTEN_THREADS);
 
-                m_acceptor.accrue(hostId, jo);
+                m_acceptor.accrue(hostId, requestHostIdRequest.getJsonObject());
             } catch (Exception e) {
                 networkLog.error("Error joining new node", e);
                 addFailedHost(hostId);
@@ -985,7 +984,7 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
     private Integer selectNewHostId(String address) throws Exception {
         String node =
             m_zk.create(CoreZK.hostids_host,
-                    address.getBytes("UTF-8"), Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT_SEQUENTIAL);
+                    address.getBytes(StandardCharsets.UTF_8), Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT_SEQUENTIAL);
 
         return Integer.valueOf(node.substring(node.length() - 10));
     }
@@ -1000,55 +999,43 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
             SocketChannel socket,
             MessagingChannel messagingChannel) throws Exception {
 
-        JSONObject jsObj = new JSONObject();
-
-        jsObj.put(SocketJoiner.ACCEPTED, decision.accepted);
+        RequestJoinResponse requestJoinResponse;
         if (decision.accepted) {
-            /*
-             * Tell the new node what its host id is
-             */
-            jsObj.put(SocketJoiner.NEW_HOST_ID, hostId);
-
-            /*
-             * Echo back the address that the node connected from
-             */
-            jsObj.put(SocketJoiner.REPORTED_ADDRESS,
-                      ((InetSocketAddress) socket.socket().getRemoteSocketAddress()).getAddress().getHostAddress());
-
-            /*
-             * Create an array containing an id for every node including this one
-             * even though the connection has already been made
-             */
-            JSONArray jsArray = new JSONArray();
-            JSONObject hostObj = new JSONObject();
-            hostObj.put(SocketJoiner.HOST_ID, getHostId());
-            hostObj.put(SocketJoiner.ADDRESS,
-                        m_config.internalInterface.isEmpty() ?
-                        socket.socket().getLocalAddress().getHostAddress() :
-                        m_config.internalInterface);
-            hostObj.put(SocketJoiner.PORT, m_config.internalPort);
-            jsArray.put(hostObj);
+            List<HostInformation> hosts = new ArrayList<>();
             for (Entry<Integer, ForeignHost> entry : m_foreignHosts.entrySet()) {
                 if (entry.getValue() == null) {
                     continue;
                 }
                 int hsId = entry.getKey();
                 ForeignHost fh = entry.getValue();
-                hostObj = new JSONObject();
-                hostObj.put(SocketJoiner.HOST_ID, hsId);
-                hostObj.put(SocketJoiner.ADDRESS,
-                        fh.m_listeningAddress.getAddress().getHostAddress());
-                hostObj.put(SocketJoiner.PORT, fh.m_listeningAddress.getPort());
-                jsArray.put(hostObj);
+                HostInformation hostInformation = HostInformation.create(
+                        hsId,
+                        fh.m_listeningAddress.getAddress().getHostAddress(),
+                        fh.m_listeningAddress.getPort(),
+                        fh.hostDisplayName()
+                );
+                hosts.add(hostInformation);
             }
-            jsObj.put(SocketJoiner.HOSTS, jsArray);
+
+            requestJoinResponse = RequestJoinResponse.createAccepted(
+                    hostId, // Tell the new node what its host id is
+                    ((InetSocketAddress) socket.socket().getRemoteSocketAddress()).getAddress().getHostAddress(), // Echo back the address that the node connected from
+                    getHostId(),
+                    m_config.internalInterface.isEmpty() ? socket.socket().getLocalAddress().getHostAddress() : m_config.internalInterface,
+                    m_config.internalPort,
+                    m_hostDisplayName,
+                    hosts
+            );
         }
         else {
-            jsObj.put(SocketJoiner.REASON, decision.errMsg);
-            jsObj.put(SocketJoiner.MAY_RETRY, decision.mayRetry);
+            requestJoinResponse = RequestJoinResponse.createNotAccepted(
+                    decision.errMsg,
+                    decision.mayRetry
+            );
         }
 
-        byte messageBytes[] = jsObj.toString(4).getBytes("UTF-8");
+        JSONObject jsObj = requestJoinResponse.getJsonObject();
+        byte[] messageBytes = jsObj.toString(4).getBytes(StandardCharsets.UTF_8);
         ByteBuffer message = ByteBuffer.allocate(4 + messageBytes.length);
         message.putInt(messageBytes.length);
         message.put(messageBytes).flip();
@@ -1060,33 +1047,41 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
      * This method constructs all the hosts and puts them in the map
      */
     @Override
-    public void notifyOfHosts(
-            int yourHostId,
-            int[] hosts,
-            SocketChannel[] sockets,
-            SSLEngine[] sslEngines,
-            InetSocketAddress listeningAddresses[],
-            Map<Integer, JSONObject> jos) throws Exception {
-        m_localHostId = yourHostId;
+    public void notifyOfHosts(int thisHostId,
+                              Map<Integer, JSONObject> jos,
+                              List<ConnectedHostInformation> connectedHostInformations) throws Exception {
+        m_localHostId = thisHostId;
         long agreementHSId = getHSIdForLocalSite(AGREEMENT_SITE_ID);
 
         /*
          * Construct the set of agreement sites based on all the hosts that are connected
          */
-        HashSet<Long> agreementSites = new HashSet<Long>();
+        HashSet<Long> agreementSites = new HashSet<>();
         agreementSites.add(agreementHSId);
 
         m_network.start();//network must be running for register to work
 
-        for (int ii = 0; ii < hosts.length; ii++) {
-            networkLog.info(yourHostId + " notified of host " + hosts[ii]);
-            agreementSites.add(CoreUtils.getHSIdFromHostAndSite(hosts[ii], AGREEMENT_SITE_ID));
-            prepSocketChannel(sockets[ii]);
-            ForeignHost fhost = null;
+        for (int ii = 0; ii < connectedHostInformations.size(); ii++) {
+            ConnectedHostInformation hostInfo = connectedHostInformations.get(ii);
+            networkLog.info(thisHostId + " notified of host " + hostInfo.getHostId());
+            agreementSites.add(CoreUtils.getHSIdFromHostAndSite(hostInfo.getHostId(), AGREEMENT_SITE_ID));
+            prepSocketChannel(hostInfo.getSocket());
             try {
-                fhost = new ForeignHost(this, hosts[ii], sockets[ii], m_config.deadHostTimeout,
-                        listeningAddresses[ii], createPicoNetwork(sslEngines[ii], sockets[ii]));
-                putForeignHost(hosts[ii], fhost);
+                // todo pk why do we recreate map every iteration
+                ForeignHost fhost = new ForeignHost(
+                        this,
+                        hostInfo.getHostId(),
+                        hostInfo.getHostDisplayName(),
+                        hostInfo.getSocket(),
+                        m_config.deadHostTimeout,
+                        hostInfo.getListeningAddress(),
+                        createPicoNetwork(
+                                hostInfo.getSslEngine(),
+                                hostInfo.getSocket(),
+                                hostInfo.getHostDisplayName()
+                        )
+                );
+                putForeignHost(hostInfo.getHostId(), fhost);
             } catch (java.io.IOException e) {
                 org.voltdb.VoltDB.crashLocalVoltDB("Failed to instantiate foreign host", true, e);
             }
@@ -1094,23 +1089,8 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
 
         m_acceptor.accrue(jos);
 
-        /*
-         * Create the local agreement site. It knows that it is recovering because the number of
-         * prexisting sites is > 0
-         */
-        SiteMailbox sm = new SiteMailbox(this, agreementHSId);
-        createMailbox(agreementHSId, sm);
-        m_agreementSite =
-            new AgreementSite(
-                    agreementHSId,
-                    agreementSites,
-                    yourHostId,
-                    sm,
-                    new InetSocketAddress(
-                            m_config.zkInterface.split(":")[0],
-                            Integer.parseInt(m_config.zkInterface.split(":")[1])),
-                   m_config.backwardsTimeForgivenessWindow,
-                   m_failedHostsCallback);
+        // Create the local agreement site. It knows that it is recovering because the number of prexisting sites is > 0
+        commonStartSetup(agreementHSId, agreementSites);
 
         /*
          * Now that the agreement site mailbox has been created it is safe
@@ -1128,8 +1108,7 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
         VERBOTEN_THREADS.addAll(m_network.getThreadIds());
         VERBOTEN_THREADS.addAll(m_agreementSite.getThreadIds());
         m_agreementSite.waitForRecovery();
-        m_zk = org.voltcore.zk.ZKUtil.getClient(
-                m_config.zkInterface, 60 * 1000, VERBOTEN_THREADS);
+        m_zk = org.voltcore.zk.ZKUtil.getClient(m_config.zkInterface, m_config.zkPort, 60 * 1000, VERBOTEN_THREADS);
         if (m_zk == null) {
             throw new Exception("Timed out trying to connect local ZooKeeper instance");
         }
@@ -1151,28 +1130,71 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
     }
 
     /**
+     * Create all of the initial mailboxes and the agreement site.
+     *
+     * @param agreementHSId  Host and SiteId for this hosts agreement site
+     * @param agreementSites Set of all known agreement sites including this one
+     * @throws IOException exception
+     */
+    private void commonStartSetup(long agreementHSId, Set<Long> agreementSites) throws IOException {
+        SiteMailbox sm = new SiteMailbox(this, agreementHSId);
+
+        synchronized (m_mapLock) {
+            assert m_siteMailboxes.isEmpty() : m_siteMailboxes;
+            ImmutableMap.Builder<Long, Mailbox> builder = ImmutableMap.<Long, Mailbox>builder().put(agreementHSId, sm);
+            // Create dummy mailboxes for all sites which want unknown site ID responses sent
+            m_config.respondUnknownSite.forEach(s -> {
+                long hsId = getHSIdForLocalSite(s);
+                builder.put(hsId, new DummyMailbox(agreementHSId, true));
+            });
+            m_siteMailboxes = builder.build();
+        }
+
+        m_agreementSite = new AgreementSite(
+            agreementHSId,
+            agreementSites,
+            getHostId(),
+            sm,
+            new InetSocketAddress(m_config.getZKHost(), m_config.getZKPort()),
+            m_config.backwardsTimeForgivenessWindow,
+            m_failedHostsCallback);
+    }
+
+    /**
      * SocketJoiner receives the request of creating a new connection from given host id,
      * create a new ForeignHost for this connection.
      */
     @Override
     public void notifyOfConnection(
-            int hostId,
             SocketChannel socket,
             SSLEngine sslEngine,
-            InetSocketAddress listeningAddress) throws Exception
+            InetSocketAddress listeningAddress,
+            RequestForConnectionRequest requestForConnectionMessage) throws Exception
     {
+        int hostId = requestForConnectionMessage.getHostId();
         networkLog.info("Host " + getHostId() + " receives a new connection request from host " + hostId);
         prepSocketChannel(socket);
         ForeignHost fh = m_foreignHosts.get(hostId);
         if (fh == null) {
             // highly unlikely
-            fh = new ForeignHost(this, hostId, socket, m_config.deadHostTimeout,
-                        listeningAddress, createPicoNetwork(sslEngine, socket));
+            fh = new ForeignHost(
+                    this,
+                    hostId,
+                    requestForConnectionMessage.getHostDisplayName(),
+                    socket,
+                    m_config.deadHostTimeout,
+                    listeningAddress,
+                    createPicoNetwork(sslEngine, socket, requestForConnectionMessage.getHostDisplayName())
+            );
             putForeignHost(hostId, fh);
             fh.enableRead(VERBOTEN_THREADS);
             networkLog.info("Host " + getHostId() + " creates a new connection from host " + hostId);
         } else {
-            fh.createAndEnableNewConnection(socket, createPicoNetwork(sslEngine, socket), VERBOTEN_THREADS);
+            fh.createAndEnableNewConnection(
+                    socket,
+                    createPicoNetwork(sslEngine, socket, requestForConnectionMessage.getHostDisplayName()),
+                    VERBOTEN_THREADS
+            );
         }
         // Allow to use the new connections
         if (fh.connectionNumber() == m_secondaryConnections + 1) {
@@ -1234,13 +1256,12 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
         return hostInfos;
     }
 
+    // TODO pk do we need it? can we remove it?
     public Map<Integer, String> getHostGroupsFromZK()
             throws KeeperException, InterruptedException, JSONException {
         Map<Integer, String> hostGroups = Maps.newHashMap();
         Map<Integer, HostInfo> hostInfos = getHostInfoMapFromZK();
-        hostInfos.forEach((k, v) -> {
-            hostGroups.put(k, v.m_group);
-        });
+        hostInfos.forEach((k, v) -> hostGroups.put(k, v.m_group));
         return hostGroups;
     }
 
@@ -1248,16 +1269,14 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
             throws KeeperException, InterruptedException, JSONException {
         Map<Integer, Integer> sphMap = Maps.newHashMap();
         Map<Integer, HostInfo> hostInfos = getHostInfoMapFromZK();
-        hostInfos.forEach((k, v) -> {
-            sphMap.put(k, v.m_localSitesCount);
-        });
+        hostInfos.forEach((k, v) -> sphMap.put(k, v.m_localSitesCount));
         return sphMap;
     }
 
     public Map<Integer, HostInfo> getHostInfoMapFromZK() throws KeeperException, InterruptedException, JSONException {
         Map<Integer, HostInfo> hostInfoMap = Maps.newHashMap();
         List<String> children = m_zk.getChildren(CoreZK.hosts, false);
-        Queue<ZKUtil.ByteArrayCallback> callbacks = new ArrayDeque<ZKUtil.ByteArrayCallback>();
+        Queue<ZKUtil.ByteArrayCallback> callbacks = new ArrayDeque<>();
         // issue all callbacks except the last one
         for (int i = 0; i < children.size() - 1; i++) {
             ZKUtil.ByteArrayCallback cb = new ZKUtil.ByteArrayCallback();
@@ -1306,8 +1325,7 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
     }
 
     public String getHostname() {
-        String hostname = org.voltcore.utils.CoreUtils.getHostnameOrAddress();
-        return hostname;
+        return CoreUtils.getHostnameOrAddress();
     }
 
     public Set<Integer> getLiveHostIds()
@@ -1328,17 +1346,29 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
         }
         ForeignHost fh = m_foreignHosts.get(hostId);
         if (fh == null) {
-            return m_knownFailedHosts.get(hostId) != null ?
-                        m_knownFailedHosts.get(hostId) : "UNKNOWN";
+            String failedHost = m_knownFailedHosts.get(hostId);
+            return failedHost != null
+                    ? failedHost
+                    : "UNKNOWN";
+        } else {
+            return fh.hostname();
         }
-        return fh.hostname();
+    }
+
+    public String getHostDisplayNameForHostId(int hostId) {
+        if (hostId == m_localHostId) {
+            return m_hostDisplayName;
+        }
+
+        ForeignHost fh = m_foreignHosts.get(hostId);
+        if (fh == null) {
+            return "UNKNOWN";
+        } else {
+            return fh.hostDisplayName();
+        }
     }
 
     /**
-     *
-     * @param siteId
-     * @param mailboxId
-     * @param message
      * @return null if message was delivered locally or a ForeignHost
      * reference if a message is read to be delivered remotely.
      */
@@ -1351,11 +1381,10 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
             Mailbox mbox = m_siteMailboxes.get(hsId);
             if (mbox != null) {
                 mbox.deliver(message);
-                return null;
             } else {
                 networkLog.info("Mailbox is not registered for site id " + CoreUtils.getSiteIdFromHSId(hsId));
-                return null;
             }
+            return null;
         }
 
         // the foreign machine case
@@ -1379,19 +1408,16 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
     }
 
     public void registerMailbox(Mailbox mailbox) {
-        if (!m_siteMailboxes.containsKey(mailbox.getHSId())) {
-                throw new RuntimeException("Can only register a mailbox with an hsid alreadly generated");
-        }
-
         synchronized (m_mapLock) {
-            ImmutableMap.Builder<Long, Mailbox> b = ImmutableMap.builder();
-            for (Map.Entry<Long, Mailbox> e : m_siteMailboxes.entrySet()) {
-                if (e.getKey().equals(mailbox.getHSId())) {
-                    b.put(e.getKey(), mailbox);
-                } else {
-                    b.put(e.getKey(), e.getValue());
-                }
+            Long hsId = mailbox.getHSId();
+            if (!(m_siteMailboxes.get(hsId) instanceof DummyMailbox)) {
+                throw new RuntimeException(
+                        "Can only register a mailbox with a generated hsid and no mailbox already registered");
             }
+
+            ImmutableMap.Builder<Long, Mailbox> b = ImmutableMap.builder();
+            m_siteMailboxes.entrySet().stream().filter(e -> !hsId.equals(e.getKey())).forEach(b::put);
+            b.put(hsId, mailbox);
             m_siteMailboxes = b.build();
         }
     }
@@ -1402,64 +1428,7 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
      */
     public long generateMailboxId(Long mailboxId) {
         final long hsId = mailboxId == null ? getHSIdForLocalSite(m_nextSiteId.getAndIncrement()) : mailboxId;
-        addMailbox(hsId, new Mailbox() {
-            @Override
-            public void send(long hsId, VoltMessage message) {
-            }
-
-            @Override
-            public void send(long[] hsIds, VoltMessage message) {
-            }
-
-            @Override
-            public void deliver(VoltMessage message) {
-                networkLog.info("No-op mailbox(" + CoreUtils.hsIdToString(hsId) + ") dropped message " + message);
-            }
-
-            @Override
-            public void deliverFront(VoltMessage message) {
-            }
-
-            @Override
-            public VoltMessage recv() {
-                return null;
-            }
-
-            @Override
-            public VoltMessage recvBlocking() {
-                return null;
-            }
-
-            @Override
-            public VoltMessage recvBlocking(long timeout) {
-                return null;
-            }
-
-            @Override
-            public VoltMessage recv(Subject[] s) {
-                return null;
-            }
-
-            @Override
-            public VoltMessage recvBlocking(Subject[] s) {
-                return null;
-            }
-
-            @Override
-            public VoltMessage recvBlocking(Subject[] s, long timeout) {
-                return null;
-            }
-
-            @Override
-            public long getHSId() {
-                return 0L;
-            }
-
-            @Override
-            public void setHSId(long hsId) {
-            }
-
-        });
+        addMailbox(hsId, new DummyMailbox(hsId));
         return hsId;
     }
 
@@ -1494,10 +1463,13 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
         synchronized (m_mapLock) {
             ImmutableMap.Builder<Long, Mailbox> b = ImmutableMap.builder();
             for (Map.Entry<Long, Mailbox> e : m_siteMailboxes.entrySet()) {
-                if (e.getKey().equals(hsId)) {
-                    continue;
+                if (hsId == e.getKey()) {
+                    if (m_config.respondUnknownSite.contains(CoreUtils.getSiteIdFromHSId(hsId))) {
+                        b.put(e.getKey(), new DummyMailbox(e.getKey(), true));
+                    }
+                } else {
+                    b.put(e.getKey(), e.getValue());
                 }
-                b.put(e.getKey(), e.getValue());
             }
             m_siteMailboxes = b.build();
         }
@@ -1534,19 +1506,13 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
         assert(message != null);
         assert(destinationHSIds != null);
         // FIXME: performance impact if sites-per-host is higher than 32
-        final HashMap<ForeignHost, ArrayList<Long>> foreignHosts =
-            new HashMap<ForeignHost, ArrayList<Long>>(32);
+        final HashMap<ForeignHost, ArrayList<Long>> foreignHosts = new HashMap<>(32);
         for (long hsId : destinationHSIds) {
             ForeignHost host = presend(hsId, message);
             if (host == null) {
                 continue;
             }
-            ArrayList<Long> bundle = foreignHosts.get(host);
-            if (bundle == null) {
-                bundle = new ArrayList<Long>();
-                foreignHosts.put(host, bundle);
-            }
-            bundle.add(hsId);
+            foreignHosts.computeIfAbsent(host, k -> new ArrayList<>()).add(hsId);
         }
 
         if (foreignHosts.size() == 0) {
@@ -1624,7 +1590,7 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
      * Register a custom mailbox, optionally specifying what the hsid should be.
      */
     public void createMailbox(Long proposedHSId, Mailbox mailbox) {
-        long hsId = 0;
+        final long hsId;
         if (proposedHSId != null) {
             if (m_siteMailboxes.containsKey(proposedHSId)) {
                 org.voltdb.VoltDB.crashLocalVoltDB(
@@ -1708,7 +1674,7 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
         addStopNodeNotice(targetHostId);
 
         // Then contact other peers
-        List<FutureTask<Void>> tasks = new ArrayList<FutureTask<Void>>();
+        List<FutureTask<Void>> tasks = new ArrayList<>();
         for (int hostId : m_foreignHosts.keySet()) {
             if (hostId == m_localHostId) {
                 continue; /* skip local host */
@@ -1746,7 +1712,7 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
     public Map<Long, Pair<String, long[]>> getIOStats(final boolean interval)
             throws InterruptedException, ExecutionException {
         final ImmutableMap<Integer, ForeignHost> fhosts = m_foreignHosts;
-        ArrayList<IOStatsIntf> picoNetworks = new ArrayList<IOStatsIntf>();
+        ArrayList<IOStatsIntf> picoNetworks = new ArrayList<>();
 
         for (ForeignHost fh : fhosts.values()) {
             picoNetworks.addAll(fh.getPicoNetworks());
@@ -1778,11 +1744,9 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
         if (partitionGroupPeers.size() > 1) {
             StringBuilder strBuilder = new StringBuilder();
             strBuilder.append("< ");
-            partitionGroupPeers.forEach((h) -> {
-                strBuilder.append(h).append(" ");
-            });
+            partitionGroupPeers.forEach((h) -> strBuilder.append(h).append(" "));
             strBuilder.append(">");
-            hostLog.info("Host " + strBuilder.toString() + " belongs to the same partition group.");
+            hostLog.info("Host " + strBuilder + " belongs to the same partition group.");
         }
         partitionGroupPeers.remove(m_localHostId);
         m_peers = partitionGroupPeers;
@@ -1854,11 +1818,12 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
                 InetSocketAddress listeningAddress = fh.m_listeningAddress;
                 for (int ii = 0; ii < m_secondaryConnections; ii++) {
                     try {
-                        SocketJoiner.SocketInfo socketInfo = m_joiner.requestForConnection(listeningAddress, hostId);
+                        SocketJoiner.SocketInfo socketInfo = m_joiner.requestForConnection(listeningAddress);
                         fh.createAndEnableNewConnection(
                                 socketInfo.m_socket,
-                                createPicoNetwork(socketInfo.m_sslEngine, socketInfo.m_socket),
-                                VERBOTEN_THREADS);
+                                createPicoNetwork(socketInfo.m_sslEngine, socketInfo.m_socket, fh.hostDisplayName()),
+                                VERBOTEN_THREADS
+                        );
                     } catch (IOException | JSONException e) {
                         hostLog.error("Failed to connect to peer nodes.", e);
                         throw new RuntimeException("Failed to establish socket connection with " +
@@ -1889,6 +1854,95 @@ public class HostMessenger implements SocketJoiner.JoinHandler, InterfaceToMesse
         ForeignHost fh = m_foreignHosts.get(failedHostId);
         if (fh != null) {
             fh.updateDeadReportCount();
+        }
+    }
+
+    /**
+     * Dummy mailbox which either drops the message if a response isn't expected or responds with {@link UnknownSiteId}
+     */
+    private final class DummyMailbox implements Mailbox {
+        private final boolean m_respond;
+        private final long m_hsId;
+
+        DummyMailbox(long hsId, boolean respond) {
+            m_respond = respond;
+            m_hsId = hsId;
+        }
+
+        DummyMailbox(long hsId) {
+            this(hsId, m_config.respondUnknownSite.contains(CoreUtils.getSiteIdFromHSId(hsId)));
+        }
+
+        @Override
+        public void send(long hsId, VoltMessage message) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void send(long[] hsIds, VoltMessage message) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deliver(VoltMessage message) {
+            if (m_respond) {
+                if (networkLog.isDebugEnabled()) {
+                    networkLog.debug(
+                            String.format("Message %s was sent to a site which has not been registered: %s from %s",
+                                    message.getClass().getSimpleName(), CoreUtils.hsIdToString(m_hsId),
+                                    CoreUtils.hsIdToString(message.m_sourceHSId)));
+                }
+                UnknownSiteId response = new UnknownSiteId(message);
+                response.m_sourceHSId = m_hsId;
+                HostMessenger.this.send(message.m_sourceHSId, response);
+            } else {
+                networkLog.info("No-op mailbox(" + CoreUtils.hsIdToString(m_hsId) + ") dropped message " + message);
+            }
+        }
+
+        @Override
+        public void deliverFront(VoltMessage message) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public VoltMessage recv() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public VoltMessage recvBlocking() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public VoltMessage recvBlocking(long timeout) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public VoltMessage recv(Subject[] s) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public VoltMessage recvBlocking(Subject[] s) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public VoltMessage recvBlocking(Subject[] s, long timeout) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public long getHSId() {
+            return m_hsId;
+        }
+
+        @Override
+        public void setHSId(long hsId) {
+            throw new UnsupportedOperationException();
         }
     }
 }

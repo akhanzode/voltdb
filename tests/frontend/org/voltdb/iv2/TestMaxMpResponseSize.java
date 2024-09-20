@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -106,7 +106,6 @@ public class TestMaxMpResponseSize extends JUnit4LocalClusterTest {
 
             ClientConfig config = new ClientConfig();
             config.setTopologyChangeAware(true);
-            config.setClientAffinity(true);
             client = cluster.createClient(config);
 
             AtomicInteger failures = new AtomicInteger();

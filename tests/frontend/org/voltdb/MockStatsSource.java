@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -72,7 +72,7 @@ public class MockStatsSource extends StatsSource{
     }
 
     @Override
-    protected void updateStatsRow(Object rowKey, Object rowValues[]) {
+    protected int updateStatsRow(Object rowKey, Object rowValues[]) {
         try {
             Thread.sleep(delay);
         } catch (InterruptedException e) {
@@ -82,5 +82,6 @@ public class MockStatsSource extends StatsSource{
         for (int ii = 0; ii < retvals[index].length; ii++) {
             rowValues[columnNameToIndex.get(instanceColumns.get(ii).name)] = retvals[index][ii];
         }
+        return instanceColumns.size();
     }
 }

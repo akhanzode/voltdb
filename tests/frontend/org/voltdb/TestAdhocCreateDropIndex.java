@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -495,7 +495,7 @@ public class TestAdhocCreateDropIndex extends AdhocDDLTestBase {
             Stream.of(
                     Pair.of("DROP VIEW VR6;", true),
                     Pair.of("TRUNCATE TABLE R1;", true),                            // roll back
-                    Pair.of("PARTITION TABLE R1 ON COLUMN ID;", true),              // paritioned table
+                    Pair.of("PARTITION TABLE R1 ON COLUMN ID;", true),              // partitioned table
                     Pair.of("CREATE VIEW VR6 (TINY, ID) AS SELECT TINY, MIN(ID) FROM R1 GROUP BY TINY;", true),
                     Pair.of("INSERT INTO R1(ID, TINY) VALUES(1, 11);", true),
                     Pair.of("CREATE ASSUMEUNIQUE INDEX DIDX2 ON R1 (ID);", false))  // "ASSUMEUNIQUE is not valid for an index that includes the partitioning column. Please use UNIQUE instead"

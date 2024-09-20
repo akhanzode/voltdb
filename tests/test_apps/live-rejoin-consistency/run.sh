@@ -54,8 +54,9 @@ function jars-ifneeded() {
 
 # run the voltdb server locally
 function server() {
-    # note: "create --force" will delete any existing data
-    voltdb create --force -H $STARTUPLEADERHOST
+    # note: "init --force" will delete any existing data
+    voltdb init --force
+    voltdb start -H $STARTUPLEADERHOST
 }
 
 # load schema and procedures
@@ -84,8 +85,6 @@ function async-benchmark() {
         --duration=${DURATION:-300} \
         --servers=$SERVERS \
         --ratelimit=${RATE:-100000} \
-        --autotune=false \
-        --latencytarget=1 \
         --testcase=ADHOCSINGLEPARTPTN
         #--testcase=UPDATEAPPLICATIONCATALOG
         #--testcase=LOADSINGLEPARTITIONTABLEPTN   # this case fails

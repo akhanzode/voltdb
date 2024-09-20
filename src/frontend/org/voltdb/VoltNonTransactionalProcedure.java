@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -81,7 +81,7 @@ public class VoltNonTransactionalProcedure {
     }
 
     /**
-     * Set the string that will be turned to the client. This is not the same as the status string
+     * Set the string that will be returned to the client. This is not the same as the status string
      * returned by the server. If a procedure sets the status string and then rolls back or causes an error
      * the status string will still be propagated back to the client so it is always necessary to check
      * the server status code first.

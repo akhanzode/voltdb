@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -18,8 +18,6 @@
 #ifndef CATALOGUTIL_H
 #define CATALOGUTIL_H
 
-#include "catalog/connector.h"
-#include "catalog/connectortableinfo.h"
 #include "catalog/database.h"
 #include "catalog/table.h"
 #include "common/types.h"

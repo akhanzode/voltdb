@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -52,6 +52,7 @@ import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -111,12 +112,15 @@ import org.voltdb.catalog.Group;
 import org.voltdb.catalog.GroupRef;
 import org.voltdb.catalog.Index;
 import org.voltdb.catalog.PlanFragment;
+import org.voltdb.catalog.Priorities;
 import org.voltdb.catalog.Procedure;
+import org.voltdb.catalog.Property;
 import org.voltdb.catalog.SnapshotSchedule;
 import org.voltdb.catalog.Statement;
 import org.voltdb.catalog.Systemsettings;
 import org.voltdb.catalog.Table;
 import org.voltdb.catalog.ThreadPool;
+import org.voltdb.catalog.Topic;
 import org.voltdb.client.ClientAuthScheme;
 import org.voltdb.common.Constants;
 import org.voltdb.compiler.VoltCompiler;
@@ -137,6 +141,7 @@ import org.voltdb.compiler.deploymentfile.ImportConfigurationType;
 import org.voltdb.compiler.deploymentfile.ImportType;
 import org.voltdb.compiler.deploymentfile.PartitionDetectionType;
 import org.voltdb.compiler.deploymentfile.PathsType;
+import org.voltdb.compiler.deploymentfile.PriorityPolicyType;
 import org.voltdb.compiler.deploymentfile.PropertyType;
 import org.voltdb.compiler.deploymentfile.ResourceMonitorType;
 import org.voltdb.compiler.deploymentfile.SchemaType;
@@ -148,10 +153,11 @@ import org.voltdb.compiler.deploymentfile.SnmpType;
 import org.voltdb.compiler.deploymentfile.SslType;
 import org.voltdb.compiler.deploymentfile.SystemSettingsType;
 import org.voltdb.compiler.deploymentfile.ThreadPoolsType;
-import org.voltdb.compiler.deploymentfile.TopicProfileType;
-import org.voltdb.compiler.deploymentfile.TopicRetentionType;
+import org.voltdb.compiler.deploymentfile.TopicType;
 import org.voltdb.compiler.deploymentfile.TopicsType;
 import org.voltdb.compiler.deploymentfile.UsersType;
+import org.voltdb.e3.topics.TopicProperties;
+import org.voltdb.e3.topics.TopicRetention;
 import org.voltdb.export.ExportDataProcessor;
 import org.voltdb.export.ExportManager;
 import org.voltdb.expressions.AbstractExpression;
@@ -159,11 +165,11 @@ import org.voltdb.importer.ImportDataProcessor;
 import org.voltdb.importer.formatter.AbstractFormatterFactory;
 import org.voltdb.importer.formatter.FormatterBuilder;
 import org.voltdb.iv2.DeterminismHash;
+import org.voltdb.iv2.PriorityPolicy;
 import org.voltdb.planner.ActivePlanRepository;
 import org.voltdb.planner.parseinfo.StmtTableScan;
 import org.voltdb.planner.parseinfo.StmtTargetTableScan;
 import org.voltdb.plannodes.AbstractPlanNode;
-import org.voltdb.serdes.EncodeFormat;
 import org.voltdb.settings.ClusterSettings;
 import org.voltdb.settings.DbSettings;
 import org.voltdb.settings.NodeSettings;
@@ -226,6 +232,10 @@ public abstract class CatalogUtil {
     public static final VoltTable.ColumnInfo MIGRATE_HIDDEN_COLUMN_INFO =
             new VoltTable.ColumnInfo(MIGRATE_HIDDEN_COLUMN_NAME, VoltType.BIGINT);
 
+    // Map of all of the hidden columns from column name to type
+    public static final Map<String, VoltType> HIDDEN_COLUMNS = ImmutableMap.of(DR_HIDDEN_COLUMN_NAME, VoltType.BIGINT,
+            VIEW_HIDDEN_COLUMN_NAME, VoltType.BIGINT, MIGRATE_HIDDEN_COLUMN_NAME, VoltType.BIGINT);
+
     public static final String ROW_LENGTH_LIMIT = "row.length.limit";
     public static final int EXPORT_INTERNAL_FIELD_Length = 41; // 8 * 5 + 1;
 
@@ -242,8 +252,8 @@ public abstract class CatalogUtil {
     public static final String STAGED_CATALOG_PATH = Constants.CONFIG_DIR + File.separator + "staged-catalog.jar";
     public static final String VOLTDB_BUNDLE_LOCATION_PROPERTY_NAME = "voltdbbundlelocation";
 
-    private static JAXBContext m_jc;
-    private static Schema m_schema;
+    public static JAXBContext m_jc;
+    public static Schema m_schema;
     // 52mb - 4k, leave space for zookeeper header
     public static final int MAX_CATALOG_CHUNK_SIZE = VoltPort.MAX_MESSAGE_LENGTH - 4 * 1024;
     public static final int CATALOG_BUFFER_HEADER = 4 +  // version number
@@ -697,11 +707,12 @@ public abstract class CatalogUtil {
     public static boolean isExportTable(Database db, String name) {
         Table table = db.getTables().get(name);
         if (table != null) {
+            boolean isTopic = isTopic(db, name);
             int type = table.getTabletype();
             if (TableType.isInvalidType(type)) {
-                return isStream(db, table);
+                return isStream(db, table) && !isTopic;
             }
-            return TableType.PERSISTENT.get() != type && !table.getIstopic();
+            return TableType.PERSISTENT.get() != type && !isTopic;
         }
         return false;
     }
@@ -714,11 +725,8 @@ public abstract class CatalogUtil {
      * @return      {@code true} if a table with {@code name} is a topic
      */
     public static boolean isTopic(Database db, String name) {
-        Table table = db.getTables().get(name);
-        if (table != null) {
-            return table.getIstopic();
-        }
-        return false;
+        Topic topic = db.getTopics().get(name);
+        return topic != null;
     }
 
     /**
@@ -899,7 +907,6 @@ public abstract class CatalogUtil {
         try {
             validateDeployment(catalog, deployment);
             validateAvro(deployment);
-            validateTopics(catalog, deployment);
             validateThreadPoolsConfiguration(deployment.getThreadpools());
             Cluster catCluster = getCluster(catalog);
 
@@ -953,6 +960,7 @@ public abstract class CatalogUtil {
             }
             if (!isPlaceHolderCatalog) {
                 setExportInfo(catalog, deployment.getExport(), deployment.getThreadpools());
+                setTopics(catalog, deployment.getTopics());
                 setImportInfo(catalog, deployment.getImport());
                 setSnmpInfo(deployment.getSnmp());
             }
@@ -964,8 +972,7 @@ public abstract class CatalogUtil {
 
             setupPaths(deployment.getPaths());
             validateResourceMonitorInfo(deployment);
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             // Anything that goes wrong anywhere in trying to handle the deployment file
             // should return an error, and let the caller decide what to do (crash or not, for
             // example)
@@ -1071,11 +1078,7 @@ public abstract class CatalogUtil {
             if (m_jc == null || m_schema == null) {
                 throw new RuntimeException("Error schema validation.");
             }
-            Unmarshaller unmarshaller = m_jc.createUnmarshaller();
-            unmarshaller.setSchema(m_schema);
-            JAXBElement<DeploymentType> result =
-                (JAXBElement<DeploymentType>) unmarshaller.unmarshal(deployIS);
-            DeploymentType deployment = result.getValue();
+            DeploymentType deployment = unmarshalDeployment(deployIS);
             populateDefaultDeployment(deployment);
             return deployment;
         } catch (JAXBException e) {
@@ -1090,6 +1093,20 @@ public abstract class CatalogUtil {
                 throw new RuntimeException(e);
             }
         }
+    }
+
+    /**
+     * Get a reference to the root <deployment> element from the deployment.xml file.
+     * @param deployIS
+     * @return Returns a reference to the root <deployment> element.
+     */
+    public static DeploymentType unmarshalDeployment(InputStream deployIS) throws JAXBException {
+            Unmarshaller unmarshaller = m_jc.createUnmarshaller();
+            unmarshaller.setSchema(m_schema);
+            JAXBElement<DeploymentType> result =
+                (JAXBElement<DeploymentType>) unmarshaller.unmarshal(deployIS);
+            DeploymentType deployment = result.getValue();
+            return deployment;
     }
 
     public static void populateDefaultDeployment(DeploymentType deployment) {
@@ -1221,6 +1238,9 @@ public abstract class CatalogUtil {
         if (tt == null) {
             tt = new SystemSettingsType.Temptables();
             ss.setTemptables(tt);
+        }
+        if (ss.getClockskew() == null) {
+            ss.setClockskew(new SystemSettingsType.Clockskew());
         }
         ResourceMonitorType rm = ss.getResourcemonitor();
         if (rm == null) {
@@ -1359,144 +1379,6 @@ public abstract class CatalogUtil {
         }
     }
 
-    private static void validateTopics(Catalog catalog, DeploymentType deployment) {
-        CompoundErrors errors = new CompoundErrors();
-
-        // If topics have a threadpool name, validate it exists
-        TopicsType topicsType = deployment.getTopics();
-        if (topicsType != null) {
-            String thPoolName = topicsType.getThreadpool();
-            if (!StringUtils.isEmpty(thPoolName)) {
-                ThreadPoolsType tp = deployment.getThreadpools();
-                if (tp == null) {
-                    errors.addErrorMessage(String.format(
-                            "Topics use a thread pool %s and no thread pools are configured in deployment.",
-                            thPoolName));
-                }
-                else {
-                    boolean exists = tp.getPool().stream().anyMatch(i -> i.getName().equals(thPoolName));
-                    if (!exists) {
-                        errors.addErrorMessage(String.format(
-                                "Topics use a thread pool %s that is not configured in deployment.",
-                                thPoolName));
-                    }
-                }
-            }
-        }
-
-        // Validate topics in deployment file
-        Map<String, TopicProfileType> profileMap = getDeploymentTopics(topicsType, errors);
-        if (profileMap != null) {
-            Pattern profilePattern = Pattern.compile("^\\p{Alnum}[\\w]*$");
-            for(TopicProfileType profile : profileMap.values()) {
-                String profName = profile.getName();
-                if (StringUtils.isBlank(profName)) {
-                    errors.addErrorMessage("A topic profile cannot have a blank name");
-                } else if (!profilePattern.matcher(profName).matches()) {
-                    errors.addErrorMessage(
-                            "A topic profile name must be alphanumeric and can contain but not start with underscores (_)");
-                }
-                String what = "topic profile " + profile.getName();
-                validateRetention(what, profile.getRetention(), errors);
-            }
-        }
-
-        // Verify that every topic that refers to a profile refers to an existing profile,
-        // and that if a topic uses avro, the <avro> element is defined
-        CatalogMap<Table> tables = CatalogUtil.getDatabase(catalog).getTables();
-        for (Table t : tables) {
-            if (!t.getIstopic()) {
-                continue;
-            }
-            String profileName = t.getTopicprofile();
-            if (StringUtils.isEmpty(profileName)) {
-                continue;
-            }
-            else if (profileMap.get(profileName) == null) {
-                // Missing profile only generates warning
-                hostLog.warn(String.format(
-                        "Topic %s refers to profile %s which is not defined in deployment, "
-                        + "topic data will persist forever.",
-                        t.getTypeName(), profileName));
-            }
-
-            EncodeFormat topicFormat = StringUtils.isBlank(t.getTopicformat()) ? null
-                    : EncodeFormat.checkedValueOf(t.getTopicformat());
-
-            if (topicFormat == EncodeFormat.AVRO && deployment.getAvro() == null) {
-                errors.addErrorMessage(String.format(
-                        "Topic %s uses AVRO encoding and requires that <avro> be defined in deployment.",
-                        t.getTypeName(), profileName));
-            }
-        }
-        if (errors.hasErrors()) {
-            throw new RuntimeException(errors.getErrorMessage());
-        }
-    }
-
-    /**
-     * Get the topics defined in deployment file: defaults, and map of profiles, keyed CASE INSENSITIVE
-     *
-     * @param   deployment
-     * @param   errors
-     * @return case insensitive map of profile name to {@link TopicProfileType}
-     */
-    public final static Map<String, TopicProfileType> getDeployedTopicProfiles(
-            DeploymentType deployment, CompoundErrors errors) {
-
-        TopicsType topics = deployment.getTopics();
-        if (topics == null) {
-            return null;
-        }
-        return getDeploymentTopics(topics, errors);
-    }
-
-    public final static Map<String, TopicProfileType> getDeploymentTopics(
-            TopicsType topics, CompoundErrors errors) {
-
-        if (topics == null || topics.getProfiles() == null) {
-            return null;
-        }
-
-        List<TopicProfileType> profiles = topics.getProfiles().getProfile();
-        if (profiles == null) {
-            if (hostLog.isDebugEnabled()) {
-                hostLog.debug("No topic profiles in deployment");
-            }
-            return null;
-        }
-
-        Map<String, TopicProfileType> profileMap = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-        for (TopicProfileType profile : profiles) {
-            if (profileMap.put(profile.getName(), profile) != null) {
-                errors.addErrorMessage("Profile " + profile.getName() + " is defined multiple times");
-            }
-        }
-        return profileMap;
-    }
-
-    private final static void validateRetention(String what, TopicRetentionType retention,
-            CompoundErrors errors) {
-        if (retention == null) {
-            return;
-        }
-        try {
-            switch(retention.getPolicy()) {
-            case TIME:
-                RetentionPolicyMgr.parseTimeLimit(retention.getLimit());
-                break;
-            case SIZE:
-                RetentionPolicyMgr.parseByteLimit(retention.getLimit());
-                break;
-            default:
-                errors.addErrorMessage("Unsupported retention policy \"" + retention.getPolicy() + "\"");
-            }
-        }
-        catch (Exception ex) {
-            errors.addErrorMessage("Failed to validate retention policy in " + what + ": " + ex.getMessage());
-        }
-    }
-
     public final static Map<String, String> asClusterSettingsMap(DeploymentType depl) {
         return ImmutableMap.<String,String>builder()
                 .put(ClusterSettings.HOST_COUNT, Integer.toString(depl.getCluster().getHostcount()))
@@ -1510,7 +1392,7 @@ public abstract class CatalogUtil {
                 .put(NodeSettings.VOLTDBROOT_PATH_KEY, paths.getVoltdbroot().getPath())
                 .put(NodeSettings.CL_PATH_KEY, paths.getCommandlog().getPath())
                 .put(NodeSettings.CL_SNAPSHOT_PATH_KEY, paths.getCommandlogsnapshot().getPath())
-                .put(NodeSettings.SNAPTHOT_PATH_KEY, paths.getSnapshots().getPath())
+                .put(NodeSettings.SNAPSHOT_PATH_KEY, paths.getSnapshots().getPath())
                 .put(NodeSettings.EXPORT_OVERFLOW_PATH_KEY, paths.getExportoverflow().getPath())
                 .put(NodeSettings.DR_OVERFLOW_PATH_KEY, paths.getDroverflow().getPath())
                 .put(NodeSettings.LARGE_QUERY_SWAP_PATH_KEY, paths.getLargequeryswap().getPath())
@@ -1583,6 +1465,20 @@ public abstract class CatalogUtil {
         syssettings.setElasticduration(deployment.getSystemsettings().getElastic().getDuration());
         syssettings.setElasticthroughput(deployment.getSystemsettings().getElastic().getThroughput());
         syssettings.setQuerytimeout(deployment.getSystemsettings().getQuery().getTimeout());
+
+        // Set the priorities
+        Priorities priorities = syssettings.getPriorities().get("priorities");
+        if (priorities == null) {
+            priorities = syssettings.getPriorities().add("priorities");
+        }
+        PriorityPolicyType pp = PriorityPolicy.getPolicyFromDeployment(deployment);
+        if (pp.isEnabled()) {
+            priorities.setEnabled(true);
+            priorities.setMaxwait(pp.getMaxwait());
+            priorities.setBatchsize(pp.getBatchsize());
+            priorities.setDrpriority(pp.getDr().getPriority());
+            priorities.setSnapshotpriority(pp.getSnapshot().getPriority());
+        }
     }
 
     private static void setThreadPools(DeploymentType deployment, Deployment catDeployment) {
@@ -1633,7 +1529,6 @@ public abstract class CatalogUtil {
             case FILE: exportClientClassName = "org.voltdb.exportclient.ExportToFileClient"; break;
             case JDBC: exportClientClassName = "org.voltdb.exportclient.JDBCExportClient"; break;
             case KAFKA: exportClientClassName = "org.voltdb.exportclient.kafka.KafkaExportClient"; break;
-            case RABBITMQ: exportClientClassName = "org.voltdb.exportclient.RabbitMQExportClient"; break;
             case HTTP: exportClientClassName = "org.voltdb.exportclient.HttpExportClient"; break;
             case ELASTICSEARCH: exportClientClassName = "org.voltdb.exportclient.ElasticSearchHttpExportClient"; break;
             // Validate that we can load the class.
@@ -1707,6 +1602,10 @@ public abstract class CatalogUtil {
             processorProperties.put(ExportManager.CONFIG_CHECK_ONLY, "true");
             processor.checkProcessorConfig(processorProperties);
             processor.shutdown();
+        } catch (IllegalArgumentException iae) {
+            // don't print a stack trace for expected IllegalArgumentExceptions
+            hostLog.error("Export processor failed its configuration check: " + iae.getMessage());
+            throw new DeploymentCheckException("Export processor failed its configuration check: " + iae.getMessage(), iae);
         } catch (Exception e) {
             hostLog.error("Export processor failed its configuration check", e);
             throw new DeploymentCheckException("Export processor failed its configuration check: " + e.getMessage(), e);
@@ -1719,10 +1618,12 @@ public abstract class CatalogUtil {
     }
 
     public static class ImportConfiguration {
+        private final int m_priority;
         private final Properties m_moduleProps;
         private final FormatterBuilder m_formatterBuilder;
 
-        public ImportConfiguration(String formatName, Properties moduleProps, Properties formatterProps) {
+        public ImportConfiguration(String formatName, int priority, Properties moduleProps, Properties formatterProps) {
+            m_priority = priority;
             m_moduleProps = moduleProps;
             m_formatterBuilder = new FormatterBuilder(formatName, formatterProps);
 
@@ -1751,6 +1652,10 @@ public abstract class CatalogUtil {
                     }
                 }
             }
+        }
+
+        public int getPriority() {
+            return m_priority;
         }
 
         public Properties getmoduleProperties() {
@@ -1783,7 +1688,7 @@ public abstract class CatalogUtil {
 
         @Override
         public int hashCode() {
-            return Objects.hash(m_moduleProps, m_formatterBuilder);
+            return Objects.hash(m_priority, m_moduleProps, m_formatterBuilder);
         }
 
         @Override
@@ -1795,6 +1700,9 @@ public abstract class CatalogUtil {
                 return false;
             }
             ImportConfiguration other = (ImportConfiguration) o;
+            if (this.m_priority != other.m_priority) {
+                return false;
+            }
             return m_moduleProps.equals(other.m_moduleProps);
         }
 
@@ -1996,7 +1904,7 @@ public abstract class CatalogUtil {
             }
         }
 
-        return new ImportConfiguration(formatName, moduleProps, formatterProps);
+        return new ImportConfiguration(formatName, importConfiguration.getPriority(), moduleProps, formatterProps);
     }
 
     /**
@@ -2010,7 +1918,8 @@ public abstract class CatalogUtil {
         Database db = cluster.getDatabases().get("database");
         if (DrRoleType.XDCR.value().equals(cluster.getDrrole())) {
             // add default export configuration to DR conflict table
-            exportType = addExportConfigToDRConflictsTable(exportType);
+            String retention = cluster.getConflictretention();
+            exportType = addExportConfigToDRConflictsTable(exportType, retention);
         }
 
         if (exportType == null) {
@@ -2041,7 +1950,7 @@ public abstract class CatalogUtil {
             if (catconn == null) {
                 if (connectorEnabled) {
                     hostLog.info("Export configuration enabled and provided for export target " + targetName
-                            + " in deployment file however no export tables are assigned to the this target. "
+                            + " in deployment file however no export tables are assigned to this target. "
                             + "Export target " + targetName + " will be disabled.");
                 }
                 continue;
@@ -2113,9 +2022,7 @@ public abstract class CatalogUtil {
         if (importType == null) {
             return;
         }
-        List<String> streamList = new ArrayList<>();
         List<ImportConfigurationType> kafkaConfigs = new ArrayList<>();
-
         for (ImportConfigurationType importConfiguration : importType.getConfiguration()) {
 
             boolean connectorEnabled = importConfiguration.isEnabled();
@@ -2126,11 +2033,6 @@ public abstract class CatalogUtil {
             if (importConfiguration.getType().equals(ServerImportEnum.KAFKA)) {
                 kafkaConfigs.add(importConfiguration);
             }
-
-            if (!streamList.contains(importConfiguration.getModule())) {
-                streamList.add(importConfiguration.getModule());
-            }
-
             buildImportProcessorConfiguration(importConfiguration, true);
         }
         validateKafkaConfig(kafkaConfigs);
@@ -2176,6 +2078,154 @@ public abstract class CatalogUtil {
             } else {
                 groupidToTopics.put(groupid, topics);
             }
+        }
+    }
+
+    /**
+     * Set {@code Topic} instances in catalog, and connect their streams or tables.
+     * <p>
+     * Historically topics were created by a CREATE TOPIC DDL command, which
+     * has been replaced by deployment file specification. However, inline encoding
+     * requires sending {@code Topic} instances to the EE.
+     * <p>
+     * Note: on @UpdateClasses this is called with deployment already compiled in the
+     * catalog. Overwrite the existing objects (FIXME: not efficient).
+     * <p>
+     * Note: STREAM objects are kept 'connector-less' in order to defer creating
+     * {@link E3ExportDataSource} instances until they are associated with a topic.
+     * This is because STREAM topics can be stored encoded (topic.store.encoded = true)
+     * and it is not possible to change this property on the fly. This behavior does not
+     * apply to tables since tables exporting to topic cannot be stored encoded.
+     *
+     * @param catalog {@code Catalog} being built
+     * @param topicsType {@code TopicsType} from deployment
+     */
+    private static void setTopics(Catalog catalog, TopicsType topicsType) {
+        final Cluster cluster = getCluster(catalog);
+        Database db = cluster.getDatabases().get("database");
+
+        if (topicsType == null) {
+            return;
+        }
+
+        // Build a map of streams/tables referring to topics - multiple streams/tables to same topic is caught here,
+        // not in validation. Since catalog rejects homonyms differing by case, perform case-insensitive checks.
+        Map<String, Table> topicStreams = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        for (Table table : db.getTables()) {
+            if (!StringUtils.isBlank(table.getTopicname())) {
+                Table curTable = topicStreams.put(table.getTopicname(), table);
+                if (curTable != null) {
+                    throw new RuntimeException(String.format("Streams %s and %s refer to the same topic %s",
+                            curTable.getTypeName(), table.getTypeName(), table.getTopicname()));
+                }
+            }
+        }
+
+        // Detect topic duplicates here since we have an update logic below: note case-insensitive check
+        HashSet<String> topics = new HashSet<>();
+
+        // Create topics, connecting them to streams or tables as we go
+        CatalogMap<Topic> cataTopics = db.getTopics();
+        cataTopics.clear();
+        for (TopicType topic : topicsType.getTopic()) {
+            if (!topics.add(topic.getName().toUpperCase())) {
+                throw new RuntimeException(String.format("Topic %s conflicts with other homonym topics in deployment", topic.getName()));
+            }
+            Topic cataTopic = cataTopics.add(topic.getName());
+            String procName = topic.getProcedure();
+            if (!StringUtils.isBlank(procName)) {
+                cataTopic.setProcedurename(procName);
+                cataTopic.setPriority(topic.getPriority());
+            }
+            if (topic.isOpaque()) {
+                /*
+                 * The opaque topic will be partitioned only if the OPAQUE_PARTITIONED property
+                 * is true.
+                 */
+                cataTopic.setIsopaque(true);
+                cataTopic.setIssingle(true);
+            }
+            String roles = topic.getAllow();
+            if (!StringUtils.isBlank(roles)) {
+                cataTopic.setRoles(roles);
+            }
+            TopicRetention retention = TopicRetention.parse(topic.getRetention());
+            retention.toTopic(cataTopic);
+
+            /*
+             * Copy the properties: note special processing for single-partition opaque
+             * topics, caching the "single" property in the catalog object. This was required
+             * when transitioning from DDL to deployment. It was decided to make the "single"
+             * a property but existing code relied heavily on Topic.getIssingle().
+             */
+            CatalogMap<Property> cataProps = cataTopic.getProperties();
+            for (PropertyType prop : topic.getProperty()) {
+                if (TopicProperties.Key.OPAQUE_PARTITIONED.name().equals(prop.getName()) && cataTopic.getIsopaque()) {
+                    cataTopic.setIssingle(!Boolean.parseBoolean(prop.getValue()));
+                }
+                cataProps.add(prop.getName()).setValue(prop.getValue());
+            }
+
+            // Historical: topic format is a property
+            String formatName = topic.getFormat();
+            if (!StringUtils.isBlank(formatName)) {
+                cataProps.add(TopicProperties.Key.TOPIC_FORMAT.name()).setValue(formatName);
+            }
+
+            // Connect stream/tables to topic
+            String streamName = null;
+            Table table = topicStreams.get(cataTopic.getTypeName());
+            if (table != null) {
+                streamName = table.getTypeName();
+
+                // On DDL update, streams exporting to topics are set to connectorless.
+                // If stream exports to topic, change stream type: this will enable creating
+                // the data sources for this STREAM.
+                //
+                // Note that on LOAD CLASSES the table type is already set
+                if (TableType.isConnectorLessStream(table.getTabletype())) {
+                    table.setTabletype(TableType.STREAM.get());
+                }
+
+                // Transfer stream column info to topic as properties (historical from previous topic DDL)
+                String keyColumns = table.getTopickeycolumnnames();
+                if (!StringUtils.isBlank(keyColumns)) {
+                    cataProps.add(TopicProperties.Key.CONSUMER_KEY.name()).setValue(keyColumns);
+                }
+                String valColumns = table.getTopicvaluecolumnnames();
+                if (!StringUtils.isBlank(valColumns)) {
+                    cataProps.add(TopicProperties.Key.CONSUMER_VALUE.name()).setValue(valColumns);
+                }
+            }
+            else if (topic.isOpaque()) {
+                // Streams are automatically created for opaque topics
+                streamName = topic.getName().toUpperCase();
+            }
+            cataTopic.setStreamname(streamName);
+        }
+
+        // Handle the cases where the topic does not exist in deployment:
+        // - Any STREAM referring to it must be converted to connectorless in order to drop
+        //   the data sources.
+        // - Reject any persistent TABLE referring to a non-existent topic.
+        Set<String> orphanTables = new HashSet<>();
+        for (Table table : topicStreams.values()) {
+            int tableType = table.getTabletype();
+            if (cataTopics.get(table.getTopicname()) != null || TableType.isConnectorLessStream(tableType)) {
+                continue;
+            }
+
+            if (TableType.isStream(tableType)) {
+                table.setTabletype(TableType.CONNECTOR_LESS_STREAM.get());
+            }
+            else {
+                orphanTables.add(table.getTypeName());
+            }
+        }
+
+        if (!orphanTables.isEmpty()) {
+            throw new RuntimeException(String.format(
+                    "The following tables export to topics that are missing in deployment: %s", orphanTables));
         }
     }
 
@@ -2307,27 +2357,18 @@ public abstract class CatalogUtil {
             schedule = db.getSnapshotschedule().add("default");
         }
         schedule.setEnabled(snapshotSettings.isEnabled());
-        String frequency = snapshotSettings.getFrequency();
-        if (!frequency.endsWith("s") &&
-                !frequency.endsWith("m") &&
-                !frequency.endsWith("h")) {
-            hostLog.error(
-                    "Snapshot frequency " + frequency +
-                    " needs to end with time unit specified" +
-                    " that is one of [s, m, h] (seconds, minutes, hours)" +
-                    " Defaulting snapshot frequency to 10m.");
-            frequency = "10m";
-        }
 
-        int frequencyInt = 0;
-        String frequencySubstring = frequency.substring(0, frequency.length() - 1);
+        int frequencyInt = 10;
+        char frequencyUnit = 'm';
+        String frequency = snapshotSettings.getFrequency();
         try {
-            frequencyInt = Integer.parseInt(frequencySubstring);
-        } catch (Exception e) {
-            hostLog.error("Frequency " + frequencySubstring +
-                    " is not an integer. Defaulting frequency to 10m.");
-            frequency = "10m";
-            frequencyInt = 10;
+            TimeUtils.TimeAndUnit tu = TimeUtils.parseTimeAndUnit(frequency, TimeUnit.SECONDS, null);
+            frequencyInt = Math.toIntExact(tu.number);
+            frequencyUnit = tu.flag;
+        } catch (TimeUtils.InvalidTimeException | ArithmeticException ex) {
+            hostLog.error("Snapshot frequency '" + frequency + "' is not valid. It should be" +
+                          " an integer followed by one of [s, m, h] for seconds, minutes, hours." +
+                          " Defaulting snapshot frequency to 10m.");
         }
 
         String prefix = snapshotSettings.getPrefix();
@@ -2353,8 +2394,7 @@ public abstract class CatalogUtil {
             retain = 1;
         }
 
-        schedule.setFrequencyunit(
-                frequency.substring(frequency.length() - 1, frequency.length()));
+        schedule.setFrequencyunit(String.valueOf(frequencyUnit));
         schedule.setFrequencyvalue(frequencyInt);
         schedule.setPrefix(prefix);
         schedule.setRetain(retain);
@@ -2392,7 +2432,7 @@ public abstract class CatalogUtil {
         File voltDbRoot;
         if (paths == null || paths.getVoltdbroot() == null ||
                 VoltDB.instance().getVoltDBRootPath(paths.getVoltdbroot()) == null) {
-            voltDbRoot = new VoltFile(VoltDB.DBROOT);
+            voltDbRoot = new File(VoltDB.DBROOT);
             if (!voltDbRoot.exists()) {
                 hostLog.info("Creating voltdbroot directory: " + voltDbRoot.getAbsolutePath());
                 if (!voltDbRoot.mkdirs()) {
@@ -2400,7 +2440,7 @@ public abstract class CatalogUtil {
                 }
             }
         } else {
-            voltDbRoot = new VoltFile(VoltDB.instance().getVoltDBRootPath(paths.getVoltdbroot()));
+            voltDbRoot = new File(VoltDB.instance().getVoltDBRootPath(paths.getVoltdbroot()));
             if (!voltDbRoot.exists()) {
                 hostLog.info("Creating voltdbroot directory: " + voltDbRoot.getAbsolutePath());
                 if (!voltDbRoot.mkdirs()) {
@@ -2418,7 +2458,7 @@ public abstract class CatalogUtil {
         snapshotPath = new File(VoltDB.instance().getSnapshotPath(paths));
         if (!snapshotPath.isAbsolute())
         {
-            snapshotPath = new VoltFile(voltDbRoot, VoltDB.instance().getSnapshotPath(paths));
+            snapshotPath = new File(voltDbRoot, VoltDB.instance().getSnapshotPath(paths));
         }
 
         if (!snapshotPath.exists()) {
@@ -2441,7 +2481,7 @@ public abstract class CatalogUtil {
         commandlogPath = new File(VoltDB.instance().getCommandLogPath(paths));
         if (!commandlogPath.isAbsolute())
         {
-            commandlogPath = new VoltFile(voltDbRoot, VoltDB.instance().getCommandLogPath(paths));
+            commandlogPath = new File(voltDbRoot, VoltDB.instance().getCommandLogPath(paths));
         }
 
         if (!commandlogPath.exists()) {
@@ -2458,7 +2498,7 @@ public abstract class CatalogUtil {
     public static void setupCommandLogSnapshot(PathsType.Commandlogsnapshot paths, File voltDbRoot) {
         if (!VoltDB.instance().getConfig().m_isEnterprise) {
             // dumb defaults if you ask for logging in community version
-            new VoltFile(voltDbRoot, "command_log_snapshot");
+            new File(voltDbRoot, "command_log_snapshot"); // TODO: this does nothing?
             return;
         }
 
@@ -2466,7 +2506,7 @@ public abstract class CatalogUtil {
         commandlogSnapshotPath = new File(VoltDB.instance().getCommandLogSnapshotPath(paths));
         if (!commandlogSnapshotPath.isAbsolute())
         {
-            commandlogSnapshotPath = new VoltFile(voltDbRoot, VoltDB.instance().getCommandLogSnapshotPath(paths));
+            commandlogSnapshotPath = new File(voltDbRoot, VoltDB.instance().getCommandLogSnapshotPath(paths));
         }
 
         if (!commandlogSnapshotPath.exists()) {
@@ -2485,7 +2525,7 @@ public abstract class CatalogUtil {
         exportOverflowPath = new File(VoltDB.instance().getExportOverflowPath(paths));
         if (!exportOverflowPath.isAbsolute())
         {
-            exportOverflowPath = new VoltFile(voltDbRoot, VoltDB.instance().getExportOverflowPath(paths));
+            exportOverflowPath = new File(voltDbRoot, VoltDB.instance().getExportOverflowPath(paths));
         }
 
         if (!exportOverflowPath.exists()) {
@@ -2504,7 +2544,7 @@ public abstract class CatalogUtil {
         drOverflowPath = new File(VoltDB.instance().getDROverflowPath(paths));
         if (!drOverflowPath.isAbsolute())
         {
-            drOverflowPath = new VoltFile(voltDbRoot, VoltDB.instance().getDROverflowPath(paths));
+            drOverflowPath = new File(voltDbRoot, VoltDB.instance().getDROverflowPath(paths));
         }
 
         if (!drOverflowPath.exists()) {
@@ -2525,7 +2565,7 @@ public abstract class CatalogUtil {
         largeQuerySwap = new File(VoltDB.instance().getLargeQuerySwapPath(paths));
         if (!largeQuerySwap.isAbsolute())
         {
-            largeQuerySwap = new VoltFile(voltDbRoot, VoltDB.instance().getLargeQuerySwapPath(paths));
+            largeQuerySwap = new File(voltDbRoot, VoltDB.instance().getLargeQuerySwapPath(paths));
         }
 
         if (!largeQuerySwap.exists()) {
@@ -2543,7 +2583,7 @@ public abstract class CatalogUtil {
     public static File setupTopicData(File voltDbRoot) {
         File topicsDataDir = VoltDB.instance().getTopicsDataPath();
         if (!topicsDataDir.isAbsolute()) {
-            topicsDataDir = new VoltFile(voltDbRoot, topicsDataDir.getPath());
+            topicsDataDir = new File(voltDbRoot, topicsDataDir.getPath());
         }
         if (!topicsDataDir.exists()) {
             hostLog.info("Creating topics data directory: " + topicsDataDir.getAbsolutePath());
@@ -2724,16 +2764,11 @@ public abstract class CatalogUtil {
                 cluster.setDrconsumerenabled(true);
                 cluster.setPreferredsource(-1); // reset to -1, if this is an update catalog
             }
-            if (!isPlaceHolderCatalog && dr.getRole() == DrRoleType.XDCR) {
-                CatalogMap<Table> tables = db.getTables();
-                if (tables.get(DR_CONFLICTS_PARTITIONED_EXPORT_TABLE) == null
-                        || tables.get(DR_CONFLICTS_REPLICATED_EXPORT_TABLE) == null) {
-                    throw new RuntimeException("The XDCR role cannot be changed on an existing database. "
-                            + "Save the contents, initialize a new instance with the desired role, "
-                            + "and restore the contents.");
-                }
-            }
-        } else {
+
+            // conflict retention for default xdcr conflicts export
+            cluster.setConflictretention(checkDrRetention(dr));
+
+        } else { // dr == null
             cluster.setDrrole(DrRoleType.NONE.value());
             if (clusterType.getId() != null) {
                 clusterId = clusterType.getId();
@@ -2742,6 +2777,25 @@ public abstract class CatalogUtil {
             }
         }
         cluster.setDrclusterid(clusterId);
+    }
+
+    public static String checkDrRetention(DrType dr) {
+        String result = "";
+        DrRoleType role = dr.getRole();
+        String retention = dr.getConflictretention();
+        if (role == DrRoleType.XDCR && retention != null && !retention.isEmpty()) {
+            try {
+                TimeUtils.TimeAndUnit tu = TimeUtils.parseTimeAndUnit(retention, TimeUnit.SECONDS, null);
+                hostLog.infoFmt("Retention for XDCR conflict files set to %s %s", tu.number, tu.unit.name().toLowerCase());
+                result = retention;
+            } catch (TimeUtils.InvalidTimeException | ArithmeticException ex) {
+                String mess = String.format("XDCR conflict retention '%s' is not valid. It should be an integer" +
+                                           " followed by one of [s, m, h, d] for seconds, minutes, hours, days.",
+                                            retention);
+                throw new IllegalArgumentException(mess);
+            }
+        }
+        return result;
     }
 
     /** Read a hashed password from password.
@@ -2753,7 +2807,7 @@ public abstract class CatalogUtil {
         try {
             md = MessageDigest.getInstance(ClientAuthScheme.getDigestScheme(scheme));
         } catch (final NoSuchAlgorithmException e) {
-            hostLog.l7dlog(Level.FATAL, LogKeys.compiler_VoltCompiler_NoSuchAlgorithm.name(), e);
+            hostLog.fatal("Password hashing algorithm not found", e);
             System.exit(-1);
         }
         final byte passwordHash[] = md.digest(password.getBytes(Charsets.UTF_8));
@@ -2765,7 +2819,7 @@ public abstract class CatalogUtil {
      * or deployment file, do the irritating exception crash test, jam the bytes in,
      * and get the SHA-1 hash.
      */
-    public static byte[] makeDeploymentHash(byte[] inbytes)
+    public static byte[] makeHash(byte[] inbytes)
     {
         MessageDigest md = null;
         try {
@@ -3430,24 +3484,13 @@ public abstract class CatalogUtil {
 
     }
 
-    /** Given a table, return the DELETE statement that can be executed
-     * by a LIMIT PARTITION ROWS constraint, or NULL if there isn't one. */
-    public static String getLimitPartitionRowsDeleteStmt(Table table) {
-        CatalogMap<Statement> map = table.getTuplelimitdeletestmt();
-        if (map.isEmpty()) {
-            return null;
-        }
-
-        assert (map.size() == 1);
-        return map.iterator().next().getSqltext();
-    }
-
     /**
      * Add default configuration to DR conflicts export target if deployment file doesn't have the configuration
      *
      * @param export   list of export configuration
+     * @param retention   conflict retention string
      */
-    public static ExportType addExportConfigToDRConflictsTable(ExportType export) {
+    public static ExportType addExportConfigToDRConflictsTable(ExportType export, String retention) {
         if (export == null) {
             export = new ExportType();
         }
@@ -3464,39 +3507,32 @@ public abstract class CatalogUtil {
             defaultConfiguration.setTarget(DR_CONFLICTS_TABLE_EXPORT_GROUP);
             defaultConfiguration.setType(ServerExportEnum.FILE);
 
-            // type
-            PropertyType type = new PropertyType();
-            type.setName("type");
-            type.setValue(DEFAULT_DR_CONFLICTS_EXPORT_TYPE);
-            defaultConfiguration.getProperty().add(type);
+            setExportProperty(defaultConfiguration, "type", DEFAULT_DR_CONFLICTS_EXPORT_TYPE);
+            setExportProperty(defaultConfiguration, "nonce", DEFAULT_DR_CONFLICTS_NONCE);
+            setExportProperty(defaultConfiguration, "outdir", DEFAULT_DR_CONFLICTS_DIR);
+            setExportProperty(defaultConfiguration, "replicated", "true");
+            setExportProperty(defaultConfiguration, "skipinternals", "true");
 
-            // nonce
-            PropertyType nonce = new PropertyType();
-            nonce.setName("nonce");
-            nonce.setValue(DEFAULT_DR_CONFLICTS_NONCE);
-            defaultConfiguration.getProperty().add(nonce);
-
-            // outdir
-            PropertyType outdir = new PropertyType();
-            outdir.setName("outdir");
-            outdir.setValue(DEFAULT_DR_CONFLICTS_DIR);
-            defaultConfiguration.getProperty().add(outdir);
-
-            // k-safe file export
-            PropertyType ksafe = new PropertyType();
-            ksafe.setName("replicated");
-            ksafe.setValue("true");
-            defaultConfiguration.getProperty().add(ksafe);
-
-            // skip internal export columns
-            PropertyType skipinternal = new PropertyType();
-            skipinternal.setName("skipinternals");
-            skipinternal.setValue("true");
-            defaultConfiguration.getProperty().add(skipinternal);
+            if (retention != null && !retention.isEmpty()) {
+                long retentionSecs = TimeUtils.convertTimeAndUnit(retention, TimeUnit.SECONDS, null);
+                long period = 60; // same as export default
+                if (retentionSecs <= 60) { // short retention needs shorter period
+                    period = (retentionSecs + 1) / 2;
+                }
+                setExportProperty(defaultConfiguration, "retention", retention);
+                setExportProperty(defaultConfiguration, "period", period + "s");
+            }
 
             export.getConfiguration().add(defaultConfiguration);
         }
         return export;
+    }
+
+    private static void setExportProperty(ExportConfigurationType config, String name, String value) {
+        PropertyType prop = new PropertyType();
+        prop.setName(name);
+        prop.setValue(value);
+        config.getProperty().add(prop);
     }
 
     /*
@@ -3612,10 +3648,10 @@ public abstract class CatalogUtil {
         //snapshot
         if (paths.getSnapshots() == null) {
             PathsType.Snapshots snap = new PathsType.Snapshots();
-            snap.setPath(pathSettings.getSnapshoth().toString());
+            snap.setPath(pathSettings.getSnapshot().toString());
             paths.setSnapshots(snap);
         } else {
-            paths.getSnapshots().setPath(pathSettings.getSnapshoth().toString());
+            paths.getSnapshots().setPath(pathSettings.getSnapshot().toString());
         }
         if (paths.getCommandlog() == null) {
             //cl
@@ -3761,6 +3797,21 @@ public abstract class CatalogUtil {
         return proc.getSinglepartition() || proc.getPartitioncolumn2() != null;
     }
 
+    /**
+     * Return if this a compound procedure, i.e. a Java non-transactional, non-system, non-default procedure
+     * <p>
+     * See {@link org.voltdb.compiler.ProcedureCompiler.compileNTProcedure(VoltCompiler, Class<?>, Procedure, InMemoryJarfile)}
+     *
+     * @param proc {@link Procedure}
+     * @return {@code true} if procedure is a compound procedure
+     */
+    public static boolean isCompoundProcedure(Procedure proc) {
+        return !proc.getTransactional()
+                && !proc.getSystemproc()
+                && !proc.getDefaultproc()
+                && proc.getHasjava();
+    }
+
     public static Map<String, Table> getTimeToLiveTables(Database db) {
         Map<String, Table> ttls = Maps.newHashMap();
         for (Table t : db.getTables()) {
@@ -3769,17 +3820,6 @@ public abstract class CatalogUtil {
             }
         }
         return ttls;
-    }
-
-    public static boolean isColumnIndexed(Table table, Column column) {
-        for (Index index : table.getIndexes()) {
-            for (ColumnRef colRef : index.getColumns()) {
-                if(column.equals(colRef.getColumn())){
-                 return true;
-                }
-            }
-        }
-        return false;
     }
 
     public static boolean getIsreplicated(String tableName) {
@@ -3872,5 +3912,17 @@ public abstract class CatalogUtil {
      */
     public static Iterable<String> splitOnCommas(String input) {
         return Splitter.on(',').trimResults().split(input);
+    }
+
+    /**
+     * Test if this is an opaque topic for the partition, also checks for single partition topics
+     *
+     * @param topic {@link Topic} from catalog
+     * @param partitionId the partition id
+     * @return {@code true} if this is an opaque topic for the partition
+     *      {@code false} if not opaque or nonzero partition for single partition topic
+     */
+    public static boolean isOpaqueTopicForPartition(Topic topic, int partitionId) {
+        return topic.getIsopaque() && (!topic.getIssingle() || partitionId == 0);
     }
 }

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -122,8 +122,9 @@ public class JDBC4ClientConnection implements Closeable {
                     throws UnknownHostException, IOException
     {
         this(clientConnectionKeyBase, clientConnectionKey, servers, user, password, isHeavyWeight,
-             maxOutstandingTxns, reconnectOnConnectionLoss, null, null);
+             maxOutstandingTxns, reconnectOnConnectionLoss, null, null, false, -1);
     }
+
     /**
      * Creates a new native client wrapper from the given parameters (internal use only).
      *
@@ -170,7 +171,65 @@ public class JDBC4ClientConnection implements Closeable {
             String[] servers, String user, String password, boolean isHeavyWeight,
             int maxOutstandingTxns, boolean reconnectOnConnectionLoss,
             SSLConfiguration.SslConfig sslConfig, String kerberosConfig)
-                    throws UnknownHostException, IOException
+                    throws UnknownHostException, IOException {
+        this(clientConnectionKeyBase, clientConnectionKey, servers, user, password, isHeavyWeight,
+             maxOutstandingTxns, reconnectOnConnectionLoss, sslConfig, kerberosConfig, false, -1);
+
+    }
+
+    /**
+     * Creates a new native client wrapper from the given parameters (internal use only).
+     *
+     * @param clientConnectionKeyBase
+     *            the base hash/key for this connection, as defined by the pool.
+     * @param clientConnectionKey
+     *            the actual hash/key for this connection, as defined by the pool (may contain a
+     *            trailing index when the pool decides a new client needs to be created based on the
+     *            number of clients).
+     * @param servers
+     *            the list of VoltDB servers to connect to in hostname[:port] format.
+     * @param user
+     *            the user name to use when connecting to the server(s).
+     * @param password
+     *            the password to use when connecting to the server(s).
+     * @param isHeavyWeight
+     *            the flag indicating callback processes on this connection will be heavy (long
+     *            running callbacks). By default the connection only allocates one background
+     *            processing thread to process callbacks. If those callbacks run for a long time,
+     *            the network stack can get clogged with pending responses that have yet to be
+     *            processed, at which point the server will disconnect the application, thinking it
+     *            died and is not reading responses as fast as it is pushing requests. When the flag
+     *            is set to 'true', an additional 2 processing thread will deal with processing
+     *            callbacks, thus mitigating the issue.
+     * @param maxOutstandingTxns
+     *            the number of transactions the client application may push against a specific
+     *            connection before getting blocked on back-pressure. By default the connection
+     *            allows 3,000 open transactions before preventing the client from posting more
+     *            work, thus preventing server fire-hosing. In some cases however, with very fast,
+     *            small transactions, this limit can be raised.
+     * @param reconnectOnConnectionLoss
+     *            Attempts to reconnect to a node with retry after connection loss
+     * @param sslConfig
+     *            Contains properties - trust store path and password, key store path and password,
+     *            used for connecting with server over SSL. For unencrypted connection, passed in ssl
+     *            config is null
+     * @param kerberosConfig
+     *            Uses specified JAAS file entry id for kerberos authentication if set.
+     * @param topologyChangeAware
+     *            make client aware of changes in topology.
+     * @param priority
+     *            request priority if > 0, or any value <= 0 for not specified
+     *
+     * @throws IOException
+     * @throws UnknownHostException
+     */
+    protected JDBC4ClientConnection(
+            String clientConnectionKeyBase, String clientConnectionKey,
+            String[] servers, String user, String password, boolean isHeavyWeight,
+            int maxOutstandingTxns, boolean reconnectOnConnectionLoss,
+            SSLConfiguration.SslConfig sslConfig, String kerberosConfig,
+            boolean topologyChangeAware, int priority)
+            throws UnknownHostException, IOException
     {
         // Save the list of trimmed non-empty server names.
         this.servers = new ArrayList<String>(servers.length);
@@ -190,12 +249,15 @@ public class JDBC4ClientConnection implements Closeable {
         boolean enableSSL = (sslConfig != null) ? true : false;
 
         // Create configuration
-        this.config = new ClientConfig(user, password);
+        config = new ClientConfig(user, password);
         config.setHeavyweight(isHeavyWeight);
-        if (maxOutstandingTxns > 0)
-            config.setMaxOutstandingTxns(maxOutstandingTxns);
+        config.setMaxOutstandingTxns(maxOutstandingTxns);
+        config.setReconnectOnConnectionLoss(reconnectOnConnectionLoss);
+        config.setTopologyChangeAware(topologyChangeAware);
 
-        this.config.setReconnectOnConnectionLoss(reconnectOnConnectionLoss);
+        if (priority > 0) {
+            config.setRequestPriority(priority);
+        }
 
         if (enableSSL) {
             if (sslConfig.trustStorePath != null && sslConfig.trustStorePath.trim().length() > 0) {
@@ -523,32 +585,5 @@ public class JDBC4ClientConnection implements Closeable {
             throw new IOException("Client is unavailable for backpressureBarrier().");
         }
         currentClient.backpressureBarrier();
-    }
-
-    /**
-     * Synchronously invokes UpdateApplicationCatalog procedure. Blocks until a result is available.
-     * A {@link ProcCallException} is thrown if the response is anything other then success.
-     *
-     * @param catalogPath
-     *            Path to the catalog jar file.
-     * @param deploymentPath
-     *            Path to the deployment file
-     * @return array of VoltTable results
-     * @throws IOException
-     *             If the files cannot be serialized
-     * @throws NoConnectionException
-     * @throws ProcCallException
-     */
-    public ClientResponse updateApplicationCatalog(File catalogPath, File deploymentPath)
-            throws IOException, NoConnectionsException, ProcCallException
-    {
-        ClientImpl currentClient = this.getClient();
-        try {
-            return currentClient.updateApplicationCatalog(catalogPath, deploymentPath);
-        }
-        catch (NoConnectionsException e) {
-            this.dropClient(currentClient);
-            throw e;
-        }
     }
 }

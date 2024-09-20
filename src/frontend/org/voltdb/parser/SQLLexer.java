@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -85,11 +85,14 @@ public class SQLLexer extends SQLPatternFactory
         new ObjectToken("procedure", false),
         new ObjectToken("role", false),
         new ObjectToken("function", false),
-        new ObjectToken("task", false)
+        new ObjectToken("task", false),
+        new ObjectToken("topic", false),
+        new ObjectToken("opaque", false)
     };
 
     private final static String[] MODIFIER_TOKENS = {
-        "assumeunique", "unique", "migrating", "aggregate"
+        "assumeunique", "unique", "migrating", "aggregate",
+        "directed", "compound"
     };
 
     static final char BLOCK_DELIMITER_CHAR = '#';

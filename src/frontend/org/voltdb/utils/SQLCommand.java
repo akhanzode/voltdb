@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -51,8 +51,11 @@ import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.json_voltpatches.JSONException;
+import org.json_voltpatches.JSONObject;
 import org.voltdb.CLIConfig;
 import org.voltdb.VoltTable;
+import org.voltdb.VoltTable.ColumnInfo;
 import org.voltdb.VoltType;
 import org.voltdb.client.BatchTimeoutOverrideType;
 import org.voltdb.client.Client;
@@ -60,6 +63,7 @@ import org.voltdb.client.ClientConfig;
 import org.voltdb.client.ClientFactory;
 import org.voltdb.client.ClientResponse;
 import org.voltdb.client.ProcCallException;
+import org.voltdb.client.UpdateApplicationCatalog;
 import org.voltdb.compiler.DDLParserCallback;
 import org.voltdb.parser.SQLLexer;
 import org.voltdb.parser.SQLParser;
@@ -152,7 +156,7 @@ public class SQLCommand {
             // Assert the current DDL AdHoc batch call behavior
             assert(response.getResults().length == 1);
             System.out.println("Batch command succeeded.");
-            loadStoredProcedures(Procedures, Classlist);
+            loadStoredProcedures();
         } catch (ProcCallException ex) {
             String fixedMessage = patchErrorMessageWithFile(batchFileName, ex.getMessage());
             stopOrContinue(new Exception(fixedMessage));
@@ -359,7 +363,8 @@ public class SQLCommand {
         // SHOW or LIST <blah> statement
         String subcommand = SQLParser.parseShowStatementSubcommand(line);
         if (subcommand != null) {
-            switch (subcommand.toLowerCase()) {
+            String[] modifiers = subcommand.split(" ", 2);
+            switch (modifiers[0].toLowerCase()) {
                 case "proc":
                 case "procedures":
                     execListProcedures();
@@ -368,7 +373,17 @@ public class SQLCommand {
                     execListFunctions();
                     break;
                 case "tables":
-                    execListTables();
+                    String filter = null;
+                    if (modifiers.length > 1) {
+                        filter = modifiers[1];
+                        if (filter.endsWith(";")) {
+                            filter = filter.substring(0, filter.length() - 1);
+                        }
+                    }
+                    execListTables(filter);
+                    break;
+                case "streams":
+                    execListStreams();
                     break;
                 case "classes":
                     execListClasses();
@@ -384,15 +399,18 @@ public class SQLCommand {
                     break;
                 */
 
-            case "tasks":
+                case "tasks":
                     executeListTasks();
                     break;
+                case "topics":
+                    executeListTopics();
+                    break;
                 default:
-                    String errorCase = (subcommand.equals("") || subcommand.equals(";")) ?
+                    String errorCase = (modifiers[0].equals("") || modifiers[0].equals(";")) ?
                             ("Incomplete SHOW command.\n") :
-                            ("Invalid SHOW command completion: '" + subcommand + "'.\n");
+                            ("Invalid SHOW command completion: '" + modifiers[0] + "'.\n");
                     System.out.println(errorCase +
-                            "The valid SHOW command completions are classes, procedures, tables, or tasks.");
+                            "The valid SHOW command completions are classes, procedures, streams, tables, or tasks.");
                     break;
             }
             // Consider it handled here, whether or not it was a good SHOW statement.
@@ -437,6 +455,10 @@ public class SQLCommand {
                 if (t.equalsIgnoreCase(describeArgs)) {
                     tableName = t;
                     type = tableData.getString(3);
+                    String remarks = tableData.getString(4);
+                    if (isDRTable(remarks)) {
+                        type = "DR TABLE";
+                    }
                     break;
                 }
             }
@@ -567,19 +589,35 @@ public class SQLCommand {
         return false;
     }
 
-    private static void execListConfigurations() throws Exception {
-        VoltTable configData = m_client.callProcedure("@SystemCatalog", "CONFIG").getResults()[0];
-        if (configData.getRowCount() != 0) {
-            printConfig(configData);
-        }
-    }
-
     private static void executeListTasks() throws Exception {
         VoltTable schedules = m_client.callProcedure("@SystemCatalog", "TASKS").getResults()[0];
         System.out.println("--- Tasks ----------------------------------------------------");
         while (schedules.advanceRow()) {
             System.out.println(schedules.getString(0));
         }
+    }
+
+    private static void executeListTopics() throws Exception {
+        ColumnInfo[] schema = new ColumnInfo[] {
+                new ColumnInfo("TOPIC_NAME", VoltType.STRING),
+                new ColumnInfo("STREAM_NAME", VoltType.STRING),
+                new ColumnInfo("PROCEDURE_NAME", VoltType.STRING)
+        };
+        VoltTable topicsTable = new VoltTable(schema);
+        StringBuffer opaque = new StringBuffer("\n--- Opaque Topics ----------------------------------------------");
+        VoltTable topics = m_client.callProcedure("@SystemCatalog", "TOPICS").getResults()[0];
+        while (topics.advanceRow()) {
+            if ("true".equalsIgnoreCase(topics.getString("IS_OPAQUE"))) {
+                opaque.append("\n" + topics.getString("TOPIC_NAME"));
+            } else {
+                topicsTable.addRow(topics.getString("TOPIC_NAME"), topics.getString("STREAM_NAME"), topics.getString("PROCEDURE_NAME"));
+            }
+        }
+        System.out.println("--- Topics ----------------------------------------------------");
+        if (topicsTable.getRowCount() > 0) {
+            System.out.println(topicsTable.toFormattedString());
+        }
+        System.out.println(opaque);
     }
 
     private static void execListClasses() {
@@ -626,16 +664,39 @@ public class SQLCommand {
         System.out.println();
     }
 
-    private static void execListTables() throws Exception {
+    private static void execListTables(String typeFilter) throws Exception {
         //TODO: since sqlcmd makes no intrinsic use of the tables list, it would be more
         // efficient to load the list only "on demand" from here and to cache a
         // complete formatted String result rather than the multiple lists.
         // This would save churn on startup and on DDL update.
+
+        // list all tables
         Tables tables = getTables();
-        printTables("User Tables", tables.tables);
-        printTables("User Views", tables.views);
-        printTables("User Export Streams", tables.exports);
+        if (typeFilter != null) {
+            switch (typeFilter) {
+            case "dr":
+                printTables("DR Tables", tables.drs);
+                break;
+            case "view":
+                printTables("Views", tables.views);
+                break;
+            default:
+                System.out.println("Unrecognized table type. The valid types are \"dr\" and \"view\".");
+            }
+            // Handled all type filer
+            return;
+        }
+        printTables("Tables", tables.tables);
+        printTables("DR Tables", tables.drs);
+        printTables("Streams", tables.exports);
+        printTables("Views", tables.views);
         System.out.println();
+    }
+
+    private static void execListStreams() throws Exception {
+        // list all tables
+        Tables tables = getTables();
+        printTables("Streams", tables.exports);
     }
 
     private static void execListFunctions() throws Exception {
@@ -683,23 +744,35 @@ public class SQLCommand {
                 }
             }
             else {
+                if (CompoundProcedures.contains(procedure)) {
+                    continue;
+                }
                 if (firstUserProc) {
                     firstUserProc = false;
                     System.out.println();
                     printCatalogHeader("User Procedures");
                 }
             }
-            for (List<String> parameterSet : Procedures.get(procedure).values()) {
-                System.out.printf(format, procedure);
-                String sep = "\t";
-                for (String paramType : parameterSet) {
-                    System.out.print(sep + paramType);
-                    sep = ", ";
-                }
-                System.out.println();
-            }
+            printProcedure(format, procedure);
+        }
+        if (!CompoundProcedures.isEmpty()) {
+            System.out.println();
+            printCatalogHeader("User Compound Procedures");
+            CompoundProcedures.forEach(p -> printProcedure(format, p));
         }
         System.out.println();
+    }
+
+    private static void printProcedure(String format, String procedure) {
+        for (List<String> parameterSet : Procedures.get(procedure).values()) {
+            System.out.printf(format, procedure);
+            String sep = "\t";
+            for (String paramType : parameterSet) {
+                System.out.print(sep + paramType);
+                sep = ", ";
+            }
+            System.out.println();
+        }
     }
 
     private static void printConfig(VoltTable configData) {
@@ -1023,10 +1096,10 @@ public class SQLCommand {
                     if (objectParams[1] != null) {
                         depfile = new File((String)objectParams[1]);
                     }
-                    printDdlResponse(m_client.updateApplicationCatalog(catfile, depfile));
+                    printDdlResponse(UpdateApplicationCatalog.update(m_client, catfile, depfile));
 
                     // Need to update the stored procedures after a catalog change (could have added/removed SPs!).  ENG-3726
-                    loadStoredProcedures(Procedures, Classlist);
+                    loadStoredProcedures();
                 } else if (procName.equals("@UpdateClasses")) {
                     File jarfile = null;
                     if (objectParams[0] != null) {
@@ -1034,7 +1107,7 @@ public class SQLCommand {
                     }
                     printDdlResponse(m_client.updateClasses(jarfile, (String)objectParams[1]));
                     // Need to reload the procedures and classes
-                    loadStoredProcedures(Procedures, Classlist);
+                    loadStoredProcedures();
                 } else {
                     // @SnapshotDelete needs array parameters.
                     if (procName.equals("@SnapshotDelete")) {
@@ -1089,7 +1162,7 @@ public class SQLCommand {
             if (loadPath != null) {
                 File jarfile = new File(loadPath);
                 printDdlResponse(m_client.updateClasses(jarfile, null));
-                loadStoredProcedures(Procedures, Classlist);
+                loadStoredProcedures();
                 return;
             }
 
@@ -1097,7 +1170,7 @@ public class SQLCommand {
             String classSelector = SQLParser.parseRemoveClasses(statement);
             if (classSelector != null) {
                 printDdlResponse(m_client.updateClasses(null, classSelector));
-                loadStoredProcedures(Procedures, Classlist);
+                loadStoredProcedures();
                 return;
             }
 
@@ -1106,7 +1179,7 @@ public class SQLCommand {
             if (SQLParser.queryIsDDL(statement)) {
                 // if the query is DDL, reload the stored procedures.
                 printDdlResponse(m_client.callProcedure("@AdHoc", statement));
-                loadStoredProcedures(Procedures, Classlist);
+                loadStoredProcedures();
                 return;
             }
             // All other commands get forwarded to @AdHoc
@@ -1184,6 +1257,8 @@ public class SQLCommand {
     // Default visibility is for test purposes.
     static Map<String,Map<Integer, List<String>>> Procedures = Collections.synchronizedMap(new HashMap<>());
     private static Map<String, List<Boolean>> Classlist = Collections.synchronizedMap(new HashMap<>());
+    private static Set<String> CompoundProcedures = Collections.synchronizedSet(new HashSet<>());
+
     private static void loadSystemProcedures() {
         Procedures.put("@Pause",
                 ImmutableMap.<Integer, List<String>>builder().put( 0, new ArrayList<>()).build());
@@ -1210,7 +1285,10 @@ public class SQLCommand {
         Procedures.put("@SnapshotScan",
                 ImmutableMap.<Integer, List<String>>builder().put( 1, Arrays.asList("varchar")).build());
         Procedures.put("@Statistics",
-                ImmutableMap.<Integer, List<String>>builder().put( 2, Arrays.asList("statisticscomponent", "bit")).build());
+                ImmutableMap.<Integer, List<String>>builder()
+                       .put( 1, Arrays.asList("statisticscomponent"))
+                       .put( 2, Arrays.asList("statisticscomponent", "bit"))
+                       .build());
         Procedures.put("@SystemCatalog",
                 ImmutableMap.<Integer, List<String>>builder().put( 1,Arrays.asList("metadataselector")).build());
         Procedures.put("@SystemInformation",
@@ -1226,8 +1304,6 @@ public class SQLCommand {
         Procedures.put("@Ping",
                 ImmutableMap.<Integer, List<String>>builder().put( 0, new ArrayList<>()).build());
         Procedures.put("@Promote",
-                ImmutableMap.<Integer, List<String>>builder().put( 0, new ArrayList<>()).build());
-        Procedures.put("@SnapshotStatus",
                 ImmutableMap.<Integer, List<String>>builder().put( 0, new ArrayList<>()).build());
         Procedures.put("@Explain",
                 ImmutableMap.<Integer, List<String>>builder().put( 1, Arrays.asList("varchar")).build());
@@ -1253,6 +1329,8 @@ public class SQLCommand {
                 ImmutableMap.<Integer, List<String>>builder().put( 0, new ArrayList<>())
                         .put(1, Arrays.asList("varchar"))
                         .put(2, Arrays.asList("varchar", "varchar")).build());
+        Procedures.put("@Note",
+                ImmutableMap.<Integer, List<String>>builder().put( 1, Arrays.asList("varchar")).build());
     }
 
     private static Client getClient(ClientConfig config, String[] servers, int port) throws Exception {
@@ -1376,6 +1454,7 @@ public class SQLCommand {
     private static class Tables {
         TreeSet<String> tables = new TreeSet<>();
         TreeSet<String> exports = new TreeSet<>();
+        TreeSet<String> drs = new TreeSet<>();
         TreeSet<String> views = new TreeSet<>();
     }
 
@@ -1385,10 +1464,13 @@ public class SQLCommand {
         while (tableData.advanceRow()) {
             String tableName = tableData.getString("TABLE_NAME");
             String tableType = tableData.getString("TABLE_TYPE");
+            String tableRemark = tableData.getString("REMARKS");
             if (tableType.equalsIgnoreCase("EXPORT")) {
                 tables.exports.add(tableName);
             } else if (tableType.equalsIgnoreCase("VIEW")) {
                 tables.views.add(tableName);
+            } else if (isDRTable(tableRemark)) {
+                tables.drs.add(tableName);
             } else {
                 tables.tables.add(tableName);
             }
@@ -1396,8 +1478,8 @@ public class SQLCommand {
         return tables;
     }
 
-    private static void loadStoredProcedures(Map<String,Map<Integer, List<String>>> procedures,
-            Map<String, List<Boolean>> classlist) {
+    // Load stored procedures and update globals Procedures, Classlist, CompoundProcedures
+    private static void loadStoredProcedures() {
         VoltTable procs = null;
         VoltTable params = null;
         VoltTable classes = null;
@@ -1422,6 +1504,7 @@ public class SQLCommand {
         }
         params.resetRowPosition();
         Set<String> userProcs = new HashSet<>();
+        CompoundProcedures.clear();
         while (procs.advanceRow()) {
             String proc_name = procs.getString("PROCEDURE_NAME");
             userProcs.add(proc_name);
@@ -1437,23 +1520,28 @@ public class SQLCommand {
             }
             HashMap<Integer, List<String>> argLists = new HashMap<>();
             argLists.put(param_count, this_params);
-            procedures.put(proc_name, argLists);
-        }
-        for (String proc_name : new ArrayList<>(procedures.keySet())) {
-            if (!proc_name.startsWith("@") && !userProcs.contains(proc_name)) {
-                procedures.remove(proc_name);
+            Procedures.put(proc_name, argLists);
+            // Detect compound procedures
+            String remarks = procs.getString("REMARKS");
+            if (isCompound(remarks)) {
+                CompoundProcedures.add(proc_name);
             }
         }
-        classlist.clear();
+        for (String proc_name : new ArrayList<>(Procedures.keySet())) {
+            if (!proc_name.startsWith("@") && !userProcs.contains(proc_name)) {
+                Procedures.remove(proc_name);
+            }
+        }
+        Classlist.clear();
         while (classes.advanceRow()) {
             String classname = classes.getString("CLASS_NAME");
             boolean isProc = (classes.getLong("VOLT_PROCEDURE") == 1L);
             boolean isActive = (classes.getLong("ACTIVE_PROC") == 1L);
-            if (!classlist.containsKey(classname)) {
+            if (!Classlist.containsKey(classname)) {
                 List<Boolean> stuff = Collections.synchronizedList(new ArrayList<Boolean>());
                 stuff.add(isProc);
                 stuff.add(isActive);
-                classlist.put(classname, stuff);
+                Classlist.put(classname, stuff);
             }
         }
 
@@ -1461,7 +1549,7 @@ public class SQLCommand {
         // for array types.  ENG-3101
         params.resetRowPosition();
         while (params.advanceRow()) {
-            Map<Integer, List<String>> argLists = procedures.get(params.getString("PROCEDURE_NAME"));
+            Map<Integer, List<String>> argLists = Procedures.get(params.getString("PROCEDURE_NAME"));
             assert(argLists.size() == 1);
             List<String> this_params = argLists.values().iterator().next();
             int idx = (int)params.getLong("ORDINAL_POSITION") - 1;
@@ -1474,6 +1562,17 @@ public class SQLCommand {
             }
             this_params.set(idx, param_type);
         }
+    }
+
+    private static boolean isCompound(String remarks) {
+        boolean ret = false;
+        try {
+            JSONObject json = new JSONObject(remarks);
+            ret = json.optBoolean("compound");
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return ret;
     }
 
     /// Parser unit test entry point
@@ -1716,7 +1815,7 @@ public class SQLCommand {
             loadSystemProcedures();
 
             // Load user stored procs
-            loadStoredProcedures(Procedures, Classlist);
+            loadStoredProcedures();
 
             // Removed code to prevent Ctrl-C from exiting. The original code is visible
             // in Git history hash 837df236c059b5b4362ffca7e7a5426fba1b7f20.
@@ -1803,5 +1902,17 @@ public class SQLCommand {
                 }
             }
         } catch (Throwable ignored) { }
+    }
+
+    private static boolean isDRTable(String remark) {
+        if (remark != null) {
+            try {
+                JSONObject json = new JSONObject(remark);
+                if (json != null && Boolean.valueOf((String)json.get("drEnabled"))) {
+                    return true;
+                }
+            } catch (JSONException e) {/* swallow it */}
+        }
+        return false;
     }
 }

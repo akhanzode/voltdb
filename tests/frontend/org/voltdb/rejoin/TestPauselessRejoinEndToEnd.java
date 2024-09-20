@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -53,7 +53,7 @@ import org.voltdb.client.ProcCallException;
 import org.voltdb.client.ProcedureCallback;
 import org.voltdb.compiler.VoltProjectBuilder;
 import org.voltdb.compiler.VoltProjectBuilder.ProcedureInfo;
-import org.voltdb.iv2.KSafetyStats;
+import org.voltdb.iv2.KSafetyStats.KSafety;
 import org.voltdb.regressionsuites.LocalCluster;
 import org.voltdb.utils.MiscUtils;
 
@@ -88,8 +88,6 @@ public class TestPauselessRejoinEndToEnd extends RejoinTestBase {
 
     @Test
     public void testRejoin() throws Exception {
-        //Reset the VoltFile prefix that may have been set by previous tests in this suite
-        org.voltdb.utils.VoltFile.resetSubrootForThisProcess();
         VoltProjectBuilder builder = getBuilderForTest();
         builder.setSecurityEnabled(true, true);
 
@@ -124,24 +122,20 @@ public class TestPauselessRejoinEndToEnd extends RejoinTestBase {
         assertNotNull(ksafetyProbe);
         long missingReplicaSum = 0;
         while (ksafetyProbe.advanceRow()) {
-            missingReplicaSum += ksafetyProbe.getLong(KSafetyStats.Constants.MISSING_REPLICA);
+            missingReplicaSum += ksafetyProbe.getLong(KSafety.MISSING_REPLICA.name());
         }
         assertTrue(missingReplicaSum > 0);
 
         client.close();
 
         VoltDB.Configuration config = new VoltDB.Configuration(LocalCluster.portGenerator);
-        config.m_startAction = cluster.isNewCli() ? StartAction.PROBE : StartAction.LIVE_REJOIN;
+        config.m_startAction = StartAction.PROBE;
         config.m_pathToCatalog = Configuration.getPathToCatalogForTest("rejoin.jar");
         config.m_leader = ":" + cluster.internalPort(1);
         config.m_coordinators = cluster.coordinators(1);
-        if (cluster.isNewCli()) {
-            config.m_voltdbRoot = new File(cluster.getServerSpecificRoot("0"));
-            config.m_forceVoltdbCreate = false;
-            config.m_hostCount = 2;
-        } else {
-            config.m_pathToDeployment = Configuration.getPathToCatalogForTest("rejoin.xml");
-        }
+        config.m_voltdbRoot = new File(cluster.getServerSpecificRoot("0"));
+        config.m_forceVoltdbCreate = false;
+        config.m_hostCount = 2;
         cluster.setPortsFromConfig(0, config);
         localServer = new ServerThread(config);
 
@@ -157,7 +151,7 @@ public class TestPauselessRejoinEndToEnd extends RejoinTestBase {
         assertNotNull(ksafetyProbe);
         missingReplicaSum = 0;
         while (ksafetyProbe.advanceRow()) {
-            missingReplicaSum += ksafetyProbe.getLong(KSafetyStats.Constants.MISSING_REPLICA);
+            missingReplicaSum += ksafetyProbe.getLong(KSafety.MISSING_REPLICA.name());
         }
         assertEquals(0L,missingReplicaSum);
 
@@ -200,17 +194,13 @@ public class TestPauselessRejoinEndToEnd extends RejoinTestBase {
         Thread.sleep(1000);
 
         VoltDB.Configuration config = new VoltDB.Configuration(LocalCluster.portGenerator);
-        config.m_startAction = cluster.isNewCli() ? StartAction.PROBE : StartAction.LIVE_REJOIN;
+        config.m_startAction = StartAction.PROBE;
         config.m_pathToCatalog = Configuration.getPathToCatalogForTest("rejoin.jar");
         config.m_leader = ":" + cluster.internalPort(1);
         config.m_coordinators = cluster.coordinators(1);
-        if (cluster.isNewCli()) {
-            config.m_voltdbRoot = new File(cluster.getServerSpecificRoot("0"));
-            config.m_forceVoltdbCreate = false;
-            config.m_hostCount = 4;
-        } else {
-            config.m_pathToDeployment = Configuration.getPathToCatalogForTest("rejoin.xml");
-        }
+        config.m_voltdbRoot = new File(cluster.getServerSpecificRoot("0"));
+        config.m_forceVoltdbCreate = false;
+        config.m_hostCount = 4;
 
         cluster.setPortsFromConfig(0, config);
         localServer = new ServerThread(config);
@@ -268,8 +258,6 @@ public class TestPauselessRejoinEndToEnd extends RejoinTestBase {
 
     @Test
     public void testRejoinWithMultipartLoad() throws Exception {
-        //Reset the VoltFile prefix that may have been set by previous tests in this suite
-        org.voltdb.utils.VoltFile.resetSubrootForThisProcess();
 
         System.out.println("testRejoinWithMultipartLoad");
         VoltProjectBuilder builder = getBuilderForTest();
@@ -354,16 +342,13 @@ public class TestPauselessRejoinEndToEnd extends RejoinTestBase {
         localServer = null;
         try {
             VoltDB.Configuration config = new VoltDB.Configuration(LocalCluster.portGenerator);
-            config.m_startAction = cluster.isNewCli() ? StartAction.PROBE : StartAction.LIVE_REJOIN;            config.m_pathToCatalog = Configuration.getPathToCatalogForTest("rejoin.jar");
+            config.m_startAction = StartAction.PROBE;
+            config.m_pathToCatalog = Configuration.getPathToCatalogForTest("rejoin.jar");
             config.m_leader = ":" + cluster.internalPort(1);
             config.m_coordinators = cluster.coordinators(1);
-            if (cluster.isNewCli()) {
-                config.m_voltdbRoot = new File(cluster.getServerSpecificRoot("0"));
-                config.m_forceVoltdbCreate = false;
-                config.m_hostCount = 2;
-            } else {
-                config.m_pathToDeployment = Configuration.getPathToCatalogForTest("rejoin.xml");
-            }
+            config.m_voltdbRoot = new File(cluster.getServerSpecificRoot("0"));
+            config.m_forceVoltdbCreate = false;
+            config.m_hostCount = 2;
             cluster.setPortsFromConfig(0, config);
             localServer = new ServerThread(config);
 
@@ -449,8 +434,6 @@ public class TestPauselessRejoinEndToEnd extends RejoinTestBase {
     }
 
     public void testRejoinWithMultipartUpdateFirehoseWorkload() throws Exception {
-        //Reset the VoltFile prefix that may have been set by previous tests in this suite
-        org.voltdb.utils.VoltFile.resetSubrootForThisProcess();
 
         final AtomicLong mpTxnsRun = new AtomicLong(0);
         final AtomicLong spTxnsRun = new AtomicLong(0);
@@ -618,16 +601,13 @@ public class TestPauselessRejoinEndToEnd extends RejoinTestBase {
             assertFalse(adhocThreadHasFailed.get());
 
             VoltDB.Configuration config = new VoltDB.Configuration(LocalCluster.portGenerator);
-            config.m_startAction = cluster.isNewCli() ? StartAction.PROBE : StartAction.LIVE_REJOIN;            config.m_pathToCatalog = Configuration.getPathToCatalogForTest("rejoin.jar");
+            config.m_startAction = StartAction.PROBE;
+            config.m_pathToCatalog = Configuration.getPathToCatalogForTest("rejoin.jar");
             config.m_leader = ":" + cluster.internalPort(1);
             config.m_coordinators = cluster.coordinators(1);
-            if (cluster.isNewCli()) {
-                config.m_voltdbRoot = new File(cluster.getServerSpecificRoot("0"));
-                config.m_forceVoltdbCreate = false;
-                config.m_hostCount = 2;
-            } else {
-                config.m_pathToDeployment = Configuration.getPathToCatalogForTest("rejoin.xml");
-            }
+            config.m_voltdbRoot = new File(cluster.getServerSpecificRoot("0"));
+            config.m_forceVoltdbCreate = false;
+            config.m_hostCount = 2;
             cluster.setPortsFromConfig(0, config);
             localServer = new ServerThread(config);
 

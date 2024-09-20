@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -26,6 +26,7 @@ import com.google_voltpatches.common.collect.ImmutableList;
 
 /**
  * Enum representing state of the node
+ * WAITINGFORLEADER, SHUTTINGDOWN, STOPPED appear to be unused [dp]
  */
 public enum NodeState {
 

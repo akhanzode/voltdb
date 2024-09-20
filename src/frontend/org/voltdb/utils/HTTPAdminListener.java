@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -177,7 +177,7 @@ public class HTTPAdminListener {
         /*
          * Don't force us to look at a huge pile of threads
          */
-        final QueuedThreadPool qtp = new QueuedThreadPool(
+        final HTTPQueuedThreadPool qtp = new HTTPQueuedThreadPool(
                 poolsize,
                 1, // minimum threads
                 timeout * 1000,
@@ -191,7 +191,7 @@ public class HTTPAdminListener {
                 new Integer(HTTPClientInterface.MAX_QUERY_PARAM_SIZE)
                 );
 
-        //Keep inactive session only for 10 seconds VMC will ping every 5 second and thus keep session alive.
+        // Inactivity timeout defaults to 30 secs, but can be overridden by environment variable
         m_sessionHandler.setMaxInactiveInterval(HTTPClientInterface.MAX_SESSION_INACTIVITY_SECONDS);
         m_idmanager = new HttpSessionIdManager(m_server);
         m_server.setSessionIdManager(m_idmanager);
@@ -233,7 +233,10 @@ public class HTTPAdminListener {
             }
 
             ServletContextHandler rootContext = new ServletContextHandler(ServletContextHandler.SESSIONS);
+
             ServletHandler servlets = rootContext.getServletHandler();
+            // make the JSESSIONID context-specific by adding port number
+            rootContext.getSessionHandler().getSessionCookieConfig().setName("JSESSIONID_" + Integer.toString(port));
             // the default is 200k which well short of out 2M row size limit
             rootContext.setMaxFormContentSize(HTTPClientInterface.MAX_QUERY_PARAM_SIZE);
             // close another attack vector where potentially one may send a large number of keys
@@ -323,6 +326,7 @@ public class HTTPAdminListener {
     }
 
     public void start() throws Exception {
+        System.setProperty("org.eclipse.jetty.server.LEVEL", "ERROR");
         try {
             m_server.start();
         } catch (Exception e) {

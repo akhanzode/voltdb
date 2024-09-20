@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -65,12 +65,26 @@ public interface BinaryDequeReader<M> {
      * Read and return the full entry at the current read position of this reader. The entry will be removed once all
      * active readers have read the entry.
      *
+     * @param ocf     Factory used to create {@link DBBPool.BBContainer} as destinations for the entry data
+     * @param maxSize maximum entry size to return. If the next entry exceeds that value {@code null} will be returned
+     * @return {@link Entry} containing data entry and any extra header associated with it or {@code null} if there is
+     *         no entry or next entry is larger than {@code maxSize}
+     * @throws IOException
+     */
+    public Entry<M> pollEntry(OutputContainerFactory ocf, int maxSize) throws IOException;
+
+    /**
+     * Read and return the full entry at the current read position of this reader. The entry will be removed once all
+     * active readers have read the entry.
+     *
      * @param ocf Factory used to create {@link DBBPool.BBContainer} as destinations for the entry data
      * @return {@link Entry} containing data entry and any extra header associated with it or {@code null} if there is
      *         no entry
      * @throws IOException
      */
-    public Entry<M> pollEntry(OutputContainerFactory ocf) throws IOException;
+    default Entry<M> pollEntry(OutputContainerFactory ocf) throws IOException {
+        return pollEntry(ocf, Integer.MAX_VALUE);
+    }
 
     /**
      * Use this to position the reader to the beginning of the segment that contains the given entry id.
@@ -110,7 +124,7 @@ public interface BinaryDequeReader<M> {
      * @return number of objects left to read for this reader
      * @throws IOException
      */
-    public int getNumObjects() throws IOException;
+    public long getNumObjects() throws IOException;
 
     /**
      * Returns true if this reader still has entries to read. False otherwise

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -164,7 +164,8 @@ class ExecutorContext {
     }
 
     static VoltDBEngine* getEngine() {
-        return getExecutorContext()->m_engine;
+        auto ctx = getExecutorContext();
+        return ctx == nullptr ? nullptr : ctx->m_engine;
     }
 
     static UndoQuantum *currentUndoQuantum() {

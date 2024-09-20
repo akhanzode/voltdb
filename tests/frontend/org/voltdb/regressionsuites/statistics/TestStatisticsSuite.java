@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -33,6 +33,8 @@ import java.util.concurrent.TimeUnit;
 
 import org.HdrHistogram_voltpatches.AbstractHistogram;
 import org.HdrHistogram_voltpatches.Histogram;
+import org.assertj.core.api.Assertions;
+import org.awaitility.Awaitility;
 import org.voltcore.utils.CompressionStrategySnappy;
 import org.voltdb.VoltTable;
 import org.voltdb.VoltTable.ColumnInfo;
@@ -41,17 +43,15 @@ import org.voltdb.client.Client;
 import org.voltdb.client.ProcCallException;
 import org.voltdb.dtxn.LatencyStats;
 import org.voltdb.iv2.MpInitiator;
+import org.voltdb.regressionsuites.LocalCluster;
 import org.voltdb.regressionsuites.StatisticsTestSuiteBase;
-import org.voltdb_testprocs.regressionsuites.malicious.GoSleep;
 
 import junit.framework.Test;
 
-public class TestStatisticsSuite extends StatisticsTestSuiteBase {
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
-    private static final Class<?>[] PROCEDURES =
-    {
-        GoSleep.class
-    };
+public class TestStatisticsSuite extends StatisticsTestSuiteBase {
 
     public TestStatisticsSuite(String name) {
         super(name);
@@ -77,10 +77,9 @@ public class TestStatisticsSuite extends StatisticsTestSuiteBase {
     }
 
     private int countHostsProvidingRows(VoltTable result, Map<String, String> columnTargets,
-            boolean enforceUnique)
-    {
+                                        boolean enforceUnique) {
         result.resetRowPosition();
-        Set<Long> hostsSeen = new HashSet<Long>();
+        Set<Long> hostsSeen = new HashSet<>();
         while (result.advanceRow()) {
             if (checkRowForMultipleTargets(result, columnTargets)) {
                 Long thisHostId = result.getLong("HOST_ID");
@@ -136,30 +135,28 @@ public class TestStatisticsSuite extends StatisticsTestSuiteBase {
             // No selector at all.
             client.callProcedure("@Statistics");
             fail();
-        }
-        catch (ProcCallException ex) {
+        } catch (ProcCallException ex) {
             // All badness gets turned into ProcCallExceptions, so we need
             // to check specifically for this error, otherwise things that
             // crash the cluster also turn into ProcCallExceptions and don't
             // trigger failure (ENG-2347)
             assertEquals("Incorrect number of arguments to @Statistics (expects 2, received 0)",
-                         ex.getMessage());
+                    ex.getMessage());
         }
         try {
             // extra stuff
             client.callProcedure("@Statistics", "table", 0, "OHHAI");
             fail();
-        }
-        catch (ProcCallException ex) {
+        } catch (ProcCallException ex) {
             assertEquals("Incorrect number of arguments to @Statistics (expects 2, received 3)",
-                         ex.getMessage());
+                    ex.getMessage());
         }
         try {
             // Invalid selector
             client.callProcedure("@Statistics", "garbage", 0);
             fail();
+        } catch (ProcCallException ex) {
         }
-        catch (ProcCallException ex) {}
 
     }
 
@@ -167,23 +164,23 @@ public class TestStatisticsSuite extends StatisticsTestSuiteBase {
     //
     public void testLatencyValidity() throws Exception {
         System.out.println("\n\nTESTING LATENCY STATS VALIDITY\n\n\n");
-        Client client  = getFullyConnectedClient();
+        Client client = getFullyConnectedClient();
 
         // Validate column names, types and ordering.
         ColumnInfo[] expectedSchema = new ColumnInfo[13];
-        expectedSchema[0]  = new ColumnInfo("TIMESTAMP", VoltType.BIGINT);  // milliseconds
-        expectedSchema[1]  = new ColumnInfo("HOST_ID",   VoltType.INTEGER);
-        expectedSchema[2]  = new ColumnInfo("HOSTNAME",  VoltType.STRING);
-        expectedSchema[3]  = new ColumnInfo("INTERVAL",  VoltType.INTEGER); // milliseconds
-        expectedSchema[4]  = new ColumnInfo("COUNT",     VoltType.INTEGER); // samples
-        expectedSchema[5]  = new ColumnInfo("TPS",       VoltType.INTEGER); // samples per second
-        expectedSchema[6]  = new ColumnInfo("P50",       VoltType.BIGINT);  // microseconds
-        expectedSchema[7]  = new ColumnInfo("P95",       VoltType.BIGINT);  // microseconds
-        expectedSchema[8]  = new ColumnInfo("P99",       VoltType.BIGINT);  // microseconds
-        expectedSchema[9]  = new ColumnInfo("P99.9",     VoltType.BIGINT);  // microseconds
-        expectedSchema[10] = new ColumnInfo("P99.99",    VoltType.BIGINT);  // microseconds
-        expectedSchema[11] = new ColumnInfo("P99.999",   VoltType.BIGINT);  // microseconds
-        expectedSchema[12] = new ColumnInfo("MAX",       VoltType.BIGINT);  // microseconds
+        expectedSchema[0] = new ColumnInfo("TIMESTAMP", VoltType.BIGINT);  // milliseconds
+        expectedSchema[1] = new ColumnInfo("HOST_ID", VoltType.INTEGER);
+        expectedSchema[2] = new ColumnInfo("HOSTNAME", VoltType.STRING);
+        expectedSchema[3] = new ColumnInfo("INTERVAL", VoltType.INTEGER); // milliseconds
+        expectedSchema[4] = new ColumnInfo("COUNT", VoltType.INTEGER); // samples
+        expectedSchema[5] = new ColumnInfo("TPS", VoltType.INTEGER); // samples per second
+        expectedSchema[6] = new ColumnInfo("P50", VoltType.BIGINT);  // microseconds
+        expectedSchema[7] = new ColumnInfo("P95", VoltType.BIGINT);  // microseconds
+        expectedSchema[8] = new ColumnInfo("P99", VoltType.BIGINT);  // microseconds
+        expectedSchema[9] = new ColumnInfo("P99.9", VoltType.BIGINT);  // microseconds
+        expectedSchema[10] = new ColumnInfo("P99.99", VoltType.BIGINT);  // microseconds
+        expectedSchema[11] = new ColumnInfo("P99.999", VoltType.BIGINT);  // microseconds
+        expectedSchema[12] = new ColumnInfo("MAX", VoltType.BIGINT);  // microseconds
         VoltTable expectedTable = new VoltTable(expectedSchema);
 
         VoltTable[] results = null;
@@ -223,15 +220,15 @@ public class TestStatisticsSuite extends StatisticsTestSuiteBase {
             samplesFound = 0;
             while (results[0].advanceRow()) {
                 final long interval = results[0].getLong("INTERVAL"); // milliseconds
-                final long count    = results[0].getLong("COUNT");    // samples
-                final long tps      = results[0].getLong("TPS");      // samples per second
-                final long p50      = results[0].getLong("P50");      // microseconds
-                final long p95      = results[0].getLong("P95");      // microseconds
-                final long p99      = results[0].getLong("P99");      // microseconds
-                final long p39      = results[0].getLong("P99.9");    // microseconds
-                final long p49      = results[0].getLong("P99.99");   // microseconds
-                final long p59      = results[0].getLong("P99.999");  // microseconds
-                final long max      = results[0].getLong("MAX");      // microseconds
+                final long count = results[0].getLong("COUNT");    // samples
+                final long tps = results[0].getLong("TPS");      // samples per second
+                final long p50 = results[0].getLong("P50");      // microseconds
+                final long p95 = results[0].getLong("P95");      // microseconds
+                final long p99 = results[0].getLong("P99");      // microseconds
+                final long p39 = results[0].getLong("P99.9");    // microseconds
+                final long p49 = results[0].getLong("P99.99");   // microseconds
+                final long p59 = results[0].getLong("P99.999");  // microseconds
+                final long max = results[0].getLong("MAX");      // microseconds
 
                 // Run sanity checks on the data
                 assertEquals(interval, LatencyStats.INTERVAL_MS);
@@ -264,13 +261,14 @@ public class TestStatisticsSuite extends StatisticsTestSuiteBase {
         return results[0];
     }
 
-    /** Verify that the timestamp from "@Statistics LATENCY"
+    /**
+     * Verify that the timestamp from "@Statistics LATENCY"
      * is associated with the data window, not the procedure call.
-     *
+     * <p>
      * We do this by checking:
      * 1. Consecutive calls return the same timestamp (since they represent the same bin).
      * 2. Calls separated by more than a full time window return different timestamps.
-     *
+     * <p>
      * There are a lot of reasons two consecutive calls would not return the same timestamp.
      * Notably, histogram bin rollovers and sluggishness that cause the test to not execute.
      * Keep trying until identical timestamps are observed -
@@ -296,19 +294,19 @@ public class TestStatisticsSuite extends StatisticsTestSuiteBase {
         assertTrue("Unable to use timestamps to verify that data comes from the same window.", numAttempts < maxAttempts);
 
         // Verify that matching timestamps implies matching data
-        assertEquals(previous.getLong("TIMESTAMP"),  current.getLong("TIMESTAMP"));
-        assertEquals(previous.getLong("HOST_ID"),    current.getLong("HOST_ID"));
+        assertEquals(previous.getLong("TIMESTAMP"), current.getLong("TIMESTAMP"));
+        assertEquals(previous.getLong("HOST_ID"), current.getLong("HOST_ID"));
         assertEquals(previous.getString("HOSTNAME"), current.getString("HOSTNAME"));
-        assertEquals(previous.getLong("INTERVAL"),   current.getLong("INTERVAL"));
-        assertEquals(previous.getLong("COUNT"),      current.getLong("COUNT"));
-        assertEquals(previous.getLong("TPS"),        current.getLong("TPS"));
-        assertEquals(previous.getLong("P50"),        current.getLong("P50"));
-        assertEquals(previous.getLong("P95"),        current.getLong("P95"));
-        assertEquals(previous.getLong("P99"),        current.getLong("P99"));
-        assertEquals(previous.getLong("P99.9"),      current.getLong("P99.9"));
-        assertEquals(previous.getLong("P99.99"),     current.getLong("P99.99"));
-        assertEquals(previous.getLong("P99.999"),    current.getLong("P99.999"));
-        assertEquals(previous.getLong("MAX"),        current.getLong("MAX"));
+        assertEquals(previous.getLong("INTERVAL"), current.getLong("INTERVAL"));
+        assertEquals(previous.getLong("COUNT"), current.getLong("COUNT"));
+        assertEquals(previous.getLong("TPS"), current.getLong("TPS"));
+        assertEquals(previous.getLong("P50"), current.getLong("P50"));
+        assertEquals(previous.getLong("P95"), current.getLong("P95"));
+        assertEquals(previous.getLong("P99"), current.getLong("P99"));
+        assertEquals(previous.getLong("P99.9"), current.getLong("P99.9"));
+        assertEquals(previous.getLong("P99.99"), current.getLong("P99.99"));
+        assertEquals(previous.getLong("P99.999"), current.getLong("P99.999"));
+        assertEquals(previous.getLong("MAX"), current.getLong("MAX"));
 
         // Verify that >5 seconds later the timestamps are not the same.
         final int extraDelayMsec = 1000;
@@ -321,7 +319,7 @@ public class TestStatisticsSuite extends StatisticsTestSuiteBase {
 
     public void testLatencyCompressed() throws Exception {
         System.out.println("\n\nTESTING LATENCY_COMPRESSED STATS\n\n\n");
-        Client client  = getFullyConnectedClient();
+        Client client = getFullyConnectedClient();
 
         ColumnInfo[] expectedSchema = new ColumnInfo[5];
         expectedSchema[0] = new ColumnInfo("TIMESTAMP", VoltType.BIGINT);
@@ -364,7 +362,7 @@ public class TestStatisticsSuite extends StatisticsTestSuiteBase {
 
     public void testInitiatorStatistics() throws Exception {
         System.out.println("\n\nTESTING INITIATOR STATS\n\n\n");
-        Client client  = getFullyConnectedClient();
+        Client client = getFullyConnectedClient();
 
         ColumnInfo[] expectedSchema = new ColumnInfo[13];
         expectedSchema[0] = new ColumnInfo("TIMESTAMP", VoltType.BIGINT);
@@ -422,7 +420,7 @@ public class TestStatisticsSuite extends StatisticsTestSuiteBase {
 
     public void testPartitionCount() throws Exception {
         System.out.println("\n\nTESTING PARTITION COUNT\n\n\n");
-        Client client  = getFullyConnectedClient();
+        Client client = getFullyConnectedClient();
 
         ColumnInfo[] expectedSchema = new ColumnInfo[4];
         expectedSchema[0] = new ColumnInfo("TIMESTAMP", VoltType.BIGINT);
@@ -439,13 +437,13 @@ public class TestStatisticsSuite extends StatisticsTestSuiteBase {
         // Should only get one row, total
         assertEquals(1, results[0].getRowCount());
         results[0].advanceRow();
-        int partCount = (int)results[0].getLong("PARTITION_COUNT");
+        int partCount = (int) results[0].getLong("PARTITION_COUNT");
         assertEquals(PARTITIONS, partCount);
     }
 
     public void testMemoryStatistics() throws Exception {
         System.out.println("\n\nTESTING MEMORY STATS\n\n\n");
-        Client client  = getFullyConnectedClient();
+        Client client = getFullyConnectedClient();
 
         ColumnInfo[] expectedSchema = new ColumnInfo[14];
         expectedSchema[0] = new ColumnInfo("TIMESTAMP", VoltType.BIGINT);
@@ -486,7 +484,7 @@ public class TestStatisticsSuite extends StatisticsTestSuiteBase {
 
     public void testIOStatistics() throws Exception {
         System.out.println("\n\nTESTING IO STATS\n\n\n");
-        Client client  = getFullyConnectedClient();
+        Client client = getFullyConnectedClient();
 
         // Based on doc, not code
         // HOST_ID, SITE_ID, and PARTITION_ID all differ.  Fixed to match
@@ -514,9 +512,33 @@ public class TestStatisticsSuite extends StatisticsTestSuiteBase {
         validateSchema(results[0], expectedTable);
     }
 
+    public void testLatencyUncompressed() throws Exception {
+        System.out.println("\n\nTESTING LATENCY_UNCOMPRESSED STATS\n\n\n");
+        Client client = getFullyConnectedClient();
+
+        ColumnInfo[] expectedSchema = new ColumnInfo[6];
+        expectedSchema[0] = new ColumnInfo("TIMESTAMP", VoltType.BIGINT);
+        expectedSchema[1] = new ColumnInfo("HOST_ID", VoltType.INTEGER);
+        expectedSchema[2] = new ColumnInfo("HOSTNAME", VoltType.STRING);
+        expectedSchema[3] = new ColumnInfo("SITE_ID", VoltType.INTEGER);
+        expectedSchema[4] = new ColumnInfo("HISTOGRAM", VoltType.VARBINARY);
+        expectedSchema[5] = new ColumnInfo("UNCOMPRESSED_HISTOGRAM", VoltType.VARBINARY);
+        VoltTable expectedTable = new VoltTable(expectedSchema);
+
+        // Do some stuff to generate some latency stats
+        for (int i = 0; i < SITES * HOSTS; i++) {
+            client.callProcedure("NEW_ORDER.insert", i).getResults();
+        }
+
+        VoltTable[] results = client.callProcedure("@Statistics", "LATENCY_HISTOGRAM", 0).getResults();
+        // one aggregate table returned
+        assertEquals(1, results.length);
+        validateSchema(results[0], expectedTable);
+    }
+
     public void testTopoStatistics() throws Exception {
         System.out.println("\n\nTESTING TOPO STATS\n\n\n");
-        Client client  = getFullyConnectedClient();
+        Client client = getFullyConnectedClient();
 
         ColumnInfo[] expectedSchema1 = new ColumnInfo[3];
         expectedSchema1[0] = new ColumnInfo("Partition", VoltType.INTEGER);
@@ -547,7 +569,7 @@ public class TestStatisticsSuite extends StatisticsTestSuiteBase {
         // Make sure we can find the MPI, at least
         boolean found = false;
         while (topo.advanceRow()) {
-            if ((int)topo.getLong("Partition") == MpInitiator.MP_INIT_PID) {
+            if ((int) topo.getLong("Partition") == MpInitiator.MP_INIT_PID) {
                 found = true;
             }
         }
@@ -571,7 +593,7 @@ public class TestStatisticsSuite extends StatisticsTestSuiteBase {
         // Make sure we can find the MPI, at least
         found = false;
         while (topo.advanceRow()) {
-            if ((int)topo.getLong("Partition") == MpInitiator.MP_INIT_PID) {
+            if ((int) topo.getLong("Partition") == MpInitiator.MP_INIT_PID) {
                 found = true;
             }
         }
@@ -582,7 +604,7 @@ public class TestStatisticsSuite extends StatisticsTestSuiteBase {
 
     public void testLiveClientsStatistics() throws Exception {
         System.out.println("\n\nTESTING LIVECLIENTS STATS\n\n\n");
-        Client client  = getFullyConnectedClient();
+        Client client = getFullyConnectedClient();
 
         ColumnInfo[] expectedSchema = new ColumnInfo[9];
         expectedSchema[0] = new ColumnInfo("TIMESTAMP", VoltType.BIGINT);
@@ -595,31 +617,43 @@ public class TestStatisticsSuite extends StatisticsTestSuiteBase {
         expectedSchema[7] = new ColumnInfo("OUTSTANDING_RESPONSE_MESSAGES", VoltType.BIGINT);
         expectedSchema[8] = new ColumnInfo("OUTSTANDING_TRANSACTIONS", VoltType.BIGINT);
         VoltTable expectedTable = new VoltTable(expectedSchema);
-        int patientRetries = 2;
-        int hostsHeardFrom = 0;
-        //
-        // LIVECLIENTS
-        //
-        do { // loop until we get the desired answer or lose patience waiting out possible races.
-            VoltTable[] results = client.callProcedure("@Statistics", "LIVECLIENTS", 0).getResults();
-            // one aggregate table returned
-            assertEquals(1, results.length);
-            System.out.println("Test LIVECLIENTS table: " + results[0].toString());
-            validateSchema(results[0], expectedTable);
-            // Hacky, on a single local cluster make sure that all 'nodes' are present.
-            // LiveClients stats lacks a common string across nodes, but we can hijack the hostname in this case.
-            results[0].advanceRow();
-            Map<String, String> columnTargets = new HashMap<String, String>();
-            columnTargets.put("HOSTNAME", results[0].getString("HOSTNAME"));
-            hostsHeardFrom =
-                    countHostsProvidingRows(results[0], columnTargets, true);
-        } while ((hostsHeardFrom < HOSTS) && (--patientRetries) > 0);
-        assertEquals(claimRecentAnalysis(), HOSTS, hostsHeardFrom);
+
+        ColumnInfo[] expectedLimitsSchema = new ColumnInfo[9];
+        expectedLimitsSchema[0] = new ColumnInfo("TIMESTAMP", VoltType.BIGINT);
+        expectedLimitsSchema[1] = new ColumnInfo("HOST_ID", VoltType.INTEGER);
+        expectedLimitsSchema[2] = new ColumnInfo("HOSTNAME", VoltType.STRING);
+        expectedLimitsSchema[3] = new ColumnInfo("FILE_DESCRIPTORS_LIMIT", VoltType.INTEGER);
+        expectedLimitsSchema[4] = new ColumnInfo("FILE_DESCRIPTORS_OPEN", VoltType.INTEGER);
+        expectedLimitsSchema[5] = new ColumnInfo("CLIENT_CONNECTIONS_LIMIT", VoltType.INTEGER);
+        expectedLimitsSchema[6] = new ColumnInfo("CLIENT_CONNECTIONS_OPEN", VoltType.INTEGER);
+        expectedLimitsSchema[7] = new ColumnInfo("ACCEPTED_CONNECTIONS", VoltType.INTEGER);
+        expectedLimitsSchema[8] = new ColumnInfo("DROPPED_CONNECTIONS", VoltType.INTEGER);
+        VoltTable expectedLimitsTable = new VoltTable(expectedLimitsSchema);
+
+        await()
+                .atMost(5, TimeUnit.SECONDS)
+                .untilAsserted(() -> { // loop until we get the desired answer or lose patience waiting out possible races.
+                    VoltTable[] results = client.callProcedure("@Statistics", "LIVECLIENTS", 0).getResults();
+                    // one aggregate table returned for live clients and one for limits
+                    assertEquals(2, results.length);
+                    validateSchema(results[0], expectedTable);
+                    validateSchema(results[1], expectedLimitsTable);
+
+                    // Hacky, on a single local cluster make sure that all 'nodes' are present.
+                    // LiveClients stats lacks a common string across nodes, but we can hijack the hostname in this case.
+                    results[0].advanceRow();
+
+                    Map<String, String> columnTargets = new HashMap<String, String>();
+                    columnTargets.put("HOSTNAME", results[0].getString("HOSTNAME"));
+                    int hostsHeardFrom = countHostsProvidingRows(results[0], columnTargets, true);
+
+                    assertEquals(claimRecentAnalysis(), HOSTS, hostsHeardFrom);
+                });
     }
 
     public void testStarvationStatistics() throws Exception {
         System.out.println("\n\nTESTING STARVATION STATS\n\n\n");
-        Client client  = getFullyConnectedClient();
+        Client client = getFullyConnectedClient();
 
         ColumnInfo[] expectedSchema = new ColumnInfo[10];
         expectedSchema[0] = new ColumnInfo("TIMESTAMP", VoltType.BIGINT);
@@ -646,7 +680,7 @@ public class TestStatisticsSuite extends StatisticsTestSuiteBase {
         // One row per site, we don't use HSID though, so hard to do straightforward
         // per-site unique check.  Finesse it.
         // We also get starvation stats for the MPI, so we need to add KFACTOR +1 sites.
-        assertEquals(HOSTS * SITES + (KFACTOR +1), results[0].getRowCount());
+        assertEquals(HOSTS * SITES + (KFACTOR + 1), results[0].getRowCount());
         results[0].advanceRow();
         Map<String, String> columnTargets = new HashMap<String, String>();
         columnTargets.put("HOSTNAME", results[0].getString("HOSTNAME"));
@@ -655,7 +689,7 @@ public class TestStatisticsSuite extends StatisticsTestSuiteBase {
 
     public void testQueueDepthStatistics() throws Exception {
         System.out.println("\n\nTESTING QUEUEDEPTH STATS\n\n\n");
-        Client client  = getFullyConnectedClient();
+        Client client = getFullyConnectedClient();
         ColumnInfo[] expectedSchema = new ColumnInfo[8];
         expectedSchema[0] = new ColumnInfo("TIMESTAMP", VoltType.BIGINT);
         expectedSchema[1] = new ColumnInfo("HOST_ID", VoltType.INTEGER);
@@ -689,7 +723,7 @@ public class TestStatisticsSuite extends StatisticsTestSuiteBase {
 
     public void testManagementStats() throws Exception {
         System.out.println("\n\nTESTING MANAGEMENT STATS\n\n\n");
-        Client client  = getFullyConnectedClient();
+        Client client = getFullyConnectedClient();
 
         VoltTable[] results = null;
         //
@@ -699,6 +733,80 @@ public class TestStatisticsSuite extends StatisticsTestSuiteBase {
         // nine aggregate tables returned.  Assume that we have selected the right
         // subset of stats internally, just check that we get stuff.
         assertEquals(9, results.length);
+    }
+
+    public void testDRConflictsStats() throws Exception {
+        System.out.println("\n\nTESTING DRCONFLICTS STATS\n\n\n");
+        Client client = getFullyConnectedClient();
+
+        ColumnInfo[] expectedSchema = new ColumnInfo[13];
+        expectedSchema[0] = new ColumnInfo("TIMESTAMP", VoltType.BIGINT);
+        expectedSchema[1] = new ColumnInfo("HOST_ID", VoltType.INTEGER);
+        expectedSchema[2] = new ColumnInfo("HOSTNAME", VoltType.STRING);
+        expectedSchema[3] = new ColumnInfo("CLUSTER_ID", VoltType.INTEGER);
+        expectedSchema[4] = new ColumnInfo("REMOTE_CLUSTER_ID", VoltType.INTEGER);
+        expectedSchema[5] = new ColumnInfo("PARTITION_ID", VoltType.INTEGER);
+        expectedSchema[6] = new ColumnInfo("TABLE_NAME", VoltType.STRING);
+        expectedSchema[7] = new ColumnInfo("LAST_CONFLICT_TIMESTAMP", VoltType.TIMESTAMP);
+        expectedSchema[8] = new ColumnInfo("TOTAL_CONFLICT_COUNT", VoltType.BIGINT);
+        expectedSchema[9] = new ColumnInfo("DIVERGENCE_COUNT", VoltType.BIGINT);
+        expectedSchema[10] = new ColumnInfo("MISSING_ROW_COUNT", VoltType.BIGINT);
+        expectedSchema[11] = new ColumnInfo("TIMESTAMP_MISMATCH_COUNT", VoltType.BIGINT);
+        expectedSchema[12] = new ColumnInfo("CONSTRAINT_VIOLATION_COUNT", VoltType.BIGINT);
+        VoltTable expectedTable = new VoltTable(expectedSchema);
+        VoltTable[] results = null;
+
+        results = client.callProcedure("@Statistics", "DRCONFLICTS", 0).getResults();
+        // Only one table returned
+        assertEquals(1, results.length);
+        validateSchema(results[0], expectedTable);
+
+        // Should get zero rows - it is only incremented in case of DR conflicts
+        assertEquals(0, results[0].getRowCount());
+    }
+
+    /*
+     * Test that stats can be performed without error while a host is rejoining
+     */
+    public void testStatsDoesNotTimeoutDuringRejoin() throws Throwable {
+        System.out.println("\n\nTESTING " + getName() + "\n\n\n");
+
+        // Kill one host so it can rejoin
+        LocalCluster cluster = (LocalCluster) m_config;
+        cluster.killSingleHost(2);
+
+        // Give the cluster time to react
+        Thread.sleep(200);
+
+        Client client = getFullyConnectedClient();
+
+        class StatThread extends Thread {
+            volatile boolean m_run = true;
+            Throwable m_error = null;
+
+            @Override
+            public void run() {
+                try {
+                    while (m_run) {
+                        client.callProcedure("@Statistics", "memory", 0);
+                    }
+                } catch (Throwable t) {
+                    m_error = t;
+                }
+            }
+        }
+
+        StatThread st = new StatThread();
+        st.start();
+
+        assertTrue(cluster.recoverOne(2, 0));
+
+        st.m_run = false;
+        st.join();
+
+        if (st.m_error != null) {
+            throw st.m_error;
+        }
     }
 
     //

@@ -1,8 +1,8 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This file contains original code and/or modifications of original code.
- * Any modifications made by VoltDB Inc. are licensed under the following
+ * Any modifications made by Volt Active Data Inc. are licensed under the following
  * terms and conditions:
  *
  * This program is free software: you can redistribute it and/or modify
@@ -43,7 +43,7 @@
  */
 
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -101,20 +101,21 @@ public class PicoNetwork implements Runnable, Connection, IOStatsIntf
     protected final NetworkDBBPool m_pool = new NetworkDBBPool(64);
     protected final NIOReadStream m_readStream = new NIOReadStream();
     protected PicoNIOWriteStream m_writeStream;
-    protected final ConcurrentLinkedQueue<Runnable> m_tasks = new ConcurrentLinkedQueue<Runnable>();
-    protected volatile boolean m_shouldStop = false;//volatile boolean is sufficient
+    protected final ConcurrentLinkedQueue<Runnable> m_tasks = new ConcurrentLinkedQueue<>();
+    protected volatile boolean m_shouldStop = false;
     protected long m_messagesRead;
     protected int m_interestOps = 0;
     protected final SocketChannel m_sc;
+    private final String m_hostDisplayName;
     protected final SelectionKey m_key;
     protected InputHandler m_ih;
 
     private final Thread m_thread;
-    volatile String m_remoteHostname = null;
-    final InetSocketAddress m_remoteSocketAddress;
-    final String m_remoteSocketAddressString;
-    private volatile String m_remoteHostAndAddressAndPort;
-    private String m_threadName;
+    private final String m_remoteHostname;
+    private final InetSocketAddress m_remoteSocketAddress;
+    private final String m_remoteSocketAddressString;
+    private final String m_remoteHostAndAddressAndPort;
+    private final String m_threadName;
     private Set<Long> m_verbotenThreads;
 
     /**
@@ -135,18 +136,26 @@ public class PicoNetwork implements Runnable, Connection, IOStatsIntf
     /**
      * Create a pico network thread
      * @param sc  SocketChannel
+     * @param hostDisplayName
      */
-    public PicoNetwork(SocketChannel sc) {
+    public PicoNetwork(SocketChannel sc,
+                       String hostDisplayName) {
         m_sc = sc;
+        m_hostDisplayName = hostDisplayName;
         InetSocketAddress remoteAddress = (InetSocketAddress)sc.socket().getRemoteSocketAddress();
         m_remoteSocketAddress = remoteAddress;
         m_remoteSocketAddressString = remoteAddress.getAddress().getHostAddress();
-        m_remoteHostAndAddressAndPort = "/" + m_remoteSocketAddressString + ":" + m_remoteSocketAddress.getPort();
+        String remoteHostAndAddressAndPort = "/" + m_remoteSocketAddressString + ":" + m_remoteSocketAddress.getPort();
         String remoteHost = ReverseDNSCache.hostnameOrAddress(m_remoteSocketAddress.getAddress());
+
+        String remoteHostname = null;
         if (!remoteHost.equals(m_remoteSocketAddress.getAddress().getHostAddress())) {
-            m_remoteHostname = remoteHost;
-            m_remoteHostAndAddressAndPort = remoteHost + m_remoteHostAndAddressAndPort;
+            remoteHostname = remoteHost;
+            remoteHostAndAddressAndPort = remoteHost + remoteHostAndAddressAndPort;
         }
+
+        m_remoteHostname = remoteHostname;
+        m_remoteHostAndAddressAndPort = remoteHostAndAddressAndPort;
         m_threadName = remoteHost;
 
         m_thread = new Thread(this, "Pico Network - " + m_threadName);
@@ -247,8 +256,14 @@ public class PicoNetwork implements Runnable, Connection, IOStatsIntf
                     m_messagesRead++;
                 }
             }
+            /*
+             * An established PicoNetwork connection should only receive valid messages sent by another
+             * VoltDB host. Dump the start of the message to determine if this a corrupted message or
+             * to identify the message type that the sender might have constructed incorrectly.
+             */
             catch (VoltProtocolHandler.BadMessageLength e) {
-                networkLog.error("Bad message length exception", e);
+                networkLog.error(String.format("Bad message length from %s", m_remoteHostAndAddressAndPort), e);
+                networkLog.error(VoltProtocolHandler.formatBadLengthDump("Bad message bytes", e));
                 throw e;
             }
         }
@@ -388,7 +403,7 @@ public class PicoNetwork implements Runnable, Connection, IOStatsIntf
             retval.put(
                     m_ih.connectionId(),
                     Pair.of(
-                            getHostnameOrIP(),
+                            m_hostDisplayName,
                             new long[]{
                                     read,
                                     messagesRead,
@@ -459,16 +474,16 @@ public class PicoNetwork implements Runnable, Connection, IOStatsIntf
 
     @Override
     public String getHostnameAndIPAndPort() {
+        return m_remoteHostAndAddressAndPort;
+    }
+
+    @Override
+    public String getHostnameOrIP() {
         if (m_remoteHostname != null) {
             return m_remoteHostname;
         } else {
             return m_remoteSocketAddressString;
         }
-    }
-
-    @Override
-    public String getHostnameOrIP() {
-        return m_remoteHostAndAddressAndPort;
     }
 
     @Override

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 # This file is part of VoltDB.
-# Copyright (C) 2008-2020 VoltDB Inc.
+# Copyright (C) 2008-2022 Volt Active Data Inc.
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -195,6 +195,7 @@ CREATE PROCEDURE Test AS SELECT ID, TM, VAR FROM P1 WHERE TM < ? AND ID > ?;
     f = open("/tmp/tempGenJavaSPTool/ddl.sql", "w")
     f.write(ddl)
     f.close()
+    # not sure what to do here. "voltdb compile" has not existed since 2017
     subprocess.check_call("voltdb compile ddl.sql".split())
     if not os.path.exists("catalog.jar"):
         print "cannot generate catalog.jar"

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -20,6 +20,7 @@ package org.voltdb.messaging;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 
+import org.voltcore.logging.VoltLogger;
 import org.voltcore.messaging.Subject;
 import org.voltcore.messaging.VoltMessage;
 import org.voltcore.utils.CoreUtils;
@@ -37,6 +38,8 @@ import org.voltdb.iv2.TxnEgo;
  * the client
  */
 public class InitiateResponseMessage extends VoltMessage {
+
+    private static final VoltLogger networkLog = new VoltLogger("NETWORK");
 
     private long m_txnId;
     private long m_spHandle;
@@ -120,23 +123,6 @@ public class InitiateResponseMessage extends VoltMessage {
         m_subject = Subject.DEFAULT.getId();
         m_clientInterfaceHandle = sentinel.getClientInterfaceHandle();
         m_connectionId = sentinel.getConnectionId();
-    }
-
-    /**
-     * Create a response from a request.
-     * Note that some private request data is copied to the response.
-     * @param task The initiation request object to collect the
-     * metadata from.
-     */
-    public InitiateResponseMessage(InitiateTaskMessage task) {
-        m_txnId = task.getTxnId();
-        m_spHandle = task.getSpHandle();
-        m_initiatorHSId = task.getInitiatorHSId();
-        m_coordinatorHSId = task.getCoordinatorHSId();
-        m_subject = Subject.DEFAULT.getId();
-        m_clientInterfaceHandle = Long.MIN_VALUE;
-        m_connectionId = Long.MIN_VALUE;
-        m_readOnly = task.isReadOnly();
     }
 
     public void setClientHandle(long clientHandle) {
@@ -309,7 +295,15 @@ public class InitiateResponseMessage extends VoltMessage {
         m_executedOnPreviousLeader = buf.get() == 1;
         m_mpFragmentSent = buf.get() == 1;
         m_response = new ClientResponseImpl();
-        m_response.initFromBuffer(buf);
+        try {
+            m_response.initFromBuffer(buf);
+        } catch (IOException e) {
+            networkLog.error("Unexpected errors while reading results. " +
+                    "Initiator(" + CoreUtils.hsIdToString(m_initiatorHSId) + "), " +
+                    "Coordinator(" + CoreUtils.hsIdToString(m_coordinatorHSId) + "), " +
+                    "TxnId" + TxnEgo.txnIdToString(m_txnId) + " " + e.getMessage());
+            throw e;
+        }
         m_commit = (m_response.getStatus() == ClientResponseImpl.SUCCESS);
         if (m_mispartitioned || isMisrouted()) {
             long hashinatorVersion = buf.getLong();
@@ -336,10 +330,11 @@ public class InitiateResponseMessage extends VoltMessage {
         sb.append("\n READ-ONLY: ").append(m_readOnly);
         sb.append("\n RECOVERING: ").append(m_recovering);
         sb.append("\n MISPARTITIONED: ").append(m_mispartitioned);
-        if (m_commit)
+        if (m_commit) {
             sb.append("\n  COMMIT");
-        else
+        } else {
             sb.append("\n  ROLLBACK/ABORT, ");
+        }
         int[] hashes = m_response.getHashes();
         if (hashes != null) {
             sb.append("\n RESPONSE HASH: ").append(DeterminismHash.description(hashes, m_hashMismatchPos));

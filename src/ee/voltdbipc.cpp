@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -128,6 +128,8 @@ public:
 
     int64_t pushDRBuffer(int32_t partitionId, voltdb::DrStreamBlock *block);
 
+    void reportDRBuffer(int32_t partitionId, const char *reason, const char *buffer, size_t length);
+
     void pushPoisonPill(int32_t partitionId, std::string& reason, voltdb::DrStreamBlock *block);
 
     /**
@@ -151,7 +153,8 @@ public:
     int64_t getQueuedExportBytes(int32_t partitionId, std::string signature);
     void pushExportBuffer(int32_t partitionId, std::string signature, voltdb::ExportStreamBlock *block);
 
-    int reportDRConflict(int32_t partitionId, int32_t remoteClusterId, int64_t remoteTimestamp, std::string tableName, voltdb::DRRecordType action,
+    int reportDRConflict(int32_t partitionId, int32_t remoteClusterId, int64_t remoteTimestamp,
+            std::string tableName, bool isReplicatedTable, voltdb::DRRecordType action,
             voltdb::DRConflictType deleteConflict, voltdb::Table *existingMetaTableForDelete, voltdb::Table *existingTupleTableForDelete,
             voltdb::Table *expectedMetaTableForDelete, voltdb::Table *expectedTupleTableForDelete,
             voltdb::DRConflictType insertConflict, voltdb::Table *existingMetaTableForInsert, voltdb::Table *existingTupleTableForInsert,
@@ -251,6 +254,11 @@ private:
     void commitTopicsGroupOffsets(struct ipc_command *cmd);
     void fetchTopicsGroupOffsets(struct ipc_command *cmd);
     void deleteExpiredTopicsOffsets(struct ipc_command *cmd);
+
+    // Used to set which tables can be used for DR
+    void setReplicableTables(struct ipc_command *cmd);
+    void clearReplicableTables(struct ipc_command *cmd);
+    void clearAllReplicableTables(struct ipc_command *cmd);
 
     void signalHandler(int signum, siginfo_t *info, void *context);
     static void signalDispatcher(int signum, siginfo_t *info, void *context);
@@ -490,6 +498,13 @@ typedef struct {
     char viewNameBytes[0];
 }__attribute__((packed)) set_views_enabled;
 
+typedef struct {
+    struct ipc_command cmd;
+    int32_t clusterId;
+    int32_t tableCount;
+    char tableNames[0];
+}__attribute__((packed)) set_replicable_tables;
+
 using namespace voltdb;
 
 // This is used by the signal dispatcher
@@ -676,6 +691,15 @@ bool VoltDBIPC::execute(struct ipc_command *cmd) {
        case 40:
            deleteExpiredTopicsOffsets(cmd);
            break;
+       case 41:
+           setReplicableTables(cmd);
+           break;
+       case 42:
+           clearAllReplicableTables(cmd);
+           break;
+        case 43:
+            clearReplicableTables(cmd);
+            break;
       default:
         result = stub(cmd);
     }
@@ -763,6 +787,9 @@ int8_t VoltDBIPC::initialize(struct ipc_command *cmd) {
         int hostId;
         int drClusterId;
         int defaultDrBufferSize;
+        int drIgnoreConflicts;
+        int32_t drCrcErrorIgnoreMax;
+        int drCrcErrorIgnoreFatal;
         int64_t logLevels;
         int64_t tempTableMemory;
         int32_t isLowestSiteId;
@@ -782,10 +809,14 @@ int8_t VoltDBIPC::initialize(struct ipc_command *cmd) {
     cs->hostId = ntohl(cs->hostId);
     cs->drClusterId = ntohl(cs->drClusterId);
     cs->defaultDrBufferSize = ntohl(cs->defaultDrBufferSize);
+    cs->drIgnoreConflicts = ntohl(cs->drIgnoreConflicts);
+    cs->drCrcErrorIgnoreMax = ntohl(cs->drCrcErrorIgnoreMax);
     cs->logLevels = ntohll(cs->logLevels);
     cs->tempTableMemory = ntohll(cs->tempTableMemory);
     cs->isLowestSiteId = ntohl(cs->isLowestSiteId);
     bool isLowestSiteId = cs->isLowestSiteId != 0;
+    bool drIgnoreConflicts = cs->drIgnoreConflicts != 0;
+    bool drCrcErrorIgnoreFatal = cs->drCrcErrorIgnoreFatal != 0;
     cs->hostnameLength = ntohl(cs->hostnameLength);
 
     std::string hostname(cs->data, cs->hostnameLength);
@@ -815,6 +846,9 @@ int8_t VoltDBIPC::initialize(struct ipc_command *cmd) {
                              hostname,
                              cs->drClusterId,
                              cs->defaultDrBufferSize,
+                             drIgnoreConflicts,
+                             cs->drCrcErrorIgnoreMax,
+                             drCrcErrorIgnoreFatal,
                              cs->tempTableMemory,
                              isLowestSiteId);
         return kErrorCode_Success;
@@ -1855,13 +1889,15 @@ void VoltDBIPC::pushExportBuffer(
         *reinterpret_cast<int64_t*>(&m_reusedResultBuffer[index+8]) = htonll(block->getCommittedSequenceNumber());
         *reinterpret_cast<int64_t*>(&m_reusedResultBuffer[index+16]) = htonll(block->getRowCount());
         *reinterpret_cast<int64_t*>(&m_reusedResultBuffer[index+24]) = htonll(block->lastSpUniqueId());
+        *reinterpret_cast<int64_t*>(&m_reusedResultBuffer[index+32]) = htonll(block->lastCommittedSpHandle());
     } else {
         *reinterpret_cast<int64_t*>(&m_reusedResultBuffer[index]) = 0;
         *reinterpret_cast<int64_t*>(&m_reusedResultBuffer[index+8]) = 0;
         *reinterpret_cast<int64_t*>(&m_reusedResultBuffer[index+16]) = 0;
         *reinterpret_cast<int64_t*>(&m_reusedResultBuffer[index+24]) = 0;
+        *reinterpret_cast<int64_t*>(&m_reusedResultBuffer[index+32]) = 0;
     }
-    index += 32;
+    index += 40;
     if (block != NULL) {
         *reinterpret_cast<int32_t*>(&m_reusedResultBuffer[index]) = htonl(block->rawLength());
         writeOrDie(m_fd, (unsigned char*)m_reusedResultBuffer, index + 4);
@@ -1870,6 +1906,7 @@ void VoltDBIPC::pushExportBuffer(
         writeOrDie(m_fd, (unsigned char*)block->rawPtr(), block->rawLength());
         // Need the delete in the if statement for valgrind
         delete [] block->rawPtr();
+        delete block;
     } else {
         *reinterpret_cast<int32_t*>(&m_reusedResultBuffer[index]) = htonl(0);
         writeOrDie(m_fd, (unsigned char*)m_reusedResultBuffer, index + 4);
@@ -1912,20 +1949,72 @@ void VoltDBIPC::applyBinaryLog(struct ipc_command *cmd) {
     }
 }
 
+void VoltDBIPC::setReplicableTables(struct ipc_command *cmd) {
+    try {
+        set_replicable_tables* params = (set_replicable_tables*)cmd;
+
+        if (params->tableCount < 0) {
+            sendResponseOrException(m_engine->setReplicableTables(params->clusterId, nullptr));
+        } else {
+            int32_t size = params->tableCount;
+
+            std::vector<std::string> replicableTables;
+            replicableTables.reserve(size);
+
+            int sz = static_cast<int> (ntohl(cmd->msgsize) - sizeof(set_replicable_tables));
+            ReferenceSerializeInputBE in(params->tableNames, sz);
+
+            for (int i = 0; i < size; ++i) {
+                replicableTables.emplace_back(in.readTextString());
+            }
+
+            sendResponseOrException(m_engine->setReplicableTables(params->clusterId, &replicableTables));
+        }
+    } catch (const FatalException& e) {
+        crashVoltDB(e);
+    }
+}
+
+void VoltDBIPC::clearAllReplicableTables(struct ipc_command *cmd) {
+    try {
+        m_engine->clearAllReplicableTables();
+        sendResponseOrException(0);
+    } catch (const FatalException& e) {
+        crashVoltDB(e);
+    }
+}
+
+void VoltDBIPC::clearReplicableTables(struct ipc_command *cmd) {
+    try {
+        int clusterId = *((int*)&cmd->data[0]);
+        m_engine->clearReplicableTables(clusterId);
+        sendResponseOrException(0);
+    } catch (const FatalException& e) {
+        crashVoltDB(e);
+    }
+}
+
 int64_t VoltDBIPC::pushDRBuffer(int32_t partitionId, DrStreamBlock *block) {
     if (block != NULL) {
         delete []block->rawPtr();
+        delete block;
     }
     return -1;
+}
+
+void VoltDBIPC::reportDRBuffer(int32_t partitionId, const char *reason, const char *buffer, size_t length) {
+    return;
 }
 
 void VoltDBIPC::pushPoisonPill(int32_t partitionId, std::string& reason, voltdb::DrStreamBlock *block) {
     if (block != NULL) {
         delete []block->rawPtr();
+        delete block;
     }
 }
 
-int VoltDBIPC::reportDRConflict(int32_t partitionId, int32_t remoteClusterId, int64_t remoteTimestamp, std::string tableName, voltdb::DRRecordType action,
+int VoltDBIPC::reportDRConflict(int32_t partitionId, int32_t remoteClusterId, int64_t remoteTimestamp,
+            std::string tableName, bool isReplicatedTable, voltdb::DRRecordType action,
             voltdb::DRConflictType deleteConflict, voltdb::Table *existingMetaTableForDelete, voltdb::Table *existingTupleTableForDelete,
             voltdb::Table *expectedMetaTableForDelete, voltdb::Table *expectedTupleTableForDelete,
             voltdb::DRConflictType insertConflict, voltdb::Table *existingMetaTableForInsert, voltdb::Table *existingTupleTableForInsert,

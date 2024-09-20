@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -60,24 +60,6 @@ public class VoltUtilLoggingLogger implements VoltLogger.CoreVoltLogger {
     @Override
     public boolean isEnabledFor(Level level) {
         return m_logger.isLoggable(getPriorityForLevel(level));
-    }
-
-    @Override
-    public void l7dlog(Level level, String key, Object[] params, Throwable t) {
-        String msg = "NULL";
-        if (key != null)
-            msg = key;
-        if (t != null)
-            msg += " : Throwable: " + t.toString();
-        if ((params != null) && (params.length > 0)) {
-            msg += " : ";
-            for (Object o : params)
-                if (o != null)
-                    msg += o.toString() + ", ";
-                else
-                    msg += "NULL, ";
-        }
-        m_logger.log(getPriorityForLevel(level), msg);
     }
 
     @Override

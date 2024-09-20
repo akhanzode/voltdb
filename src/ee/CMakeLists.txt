@@ -1,5 +1,5 @@
 # This file is part of VoltDB.
-# Copyright (C) 2008-2020 VoltDB Inc.
+# Copyright (C) 2008-2022 Volt Active Data Inc.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -49,6 +49,12 @@
 #
 ########################################################################
 CMAKE_MINIMUM_REQUIRED (VERSION 2.8.11 FATAL_ERROR)
+
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE "${CCACHE_PROGRAM}")
+endif()
+
 PROJECT(VoltDB_EE)
 
 include(${CMAKE_SOURCE_DIR}/tools/VoltDB.cmake)
@@ -115,9 +121,6 @@ SET (VOLTDB_SRC
   catalog/cluster.cpp
   catalog/column.cpp
   catalog/columnref.cpp
-  catalog/connector.cpp
-  catalog/connectorproperty.cpp
-  catalog/connectortableinfo.cpp
   catalog/constraint.cpp
   catalog/constraintref.cpp
   catalog/database.cpp
@@ -131,6 +134,8 @@ SET (VOLTDB_SRC
   catalog/statement.cpp
   catalog/table.cpp
   catalog/tableref.cpp
+  catalog/topic.cpp
+  catalog/property.cpp
   common/ExecuteWithMpMemory.cpp
   common/FatalException.cpp
   common/HiddenColumn.cpp
@@ -213,6 +218,8 @@ SET (VOLTDB_SRC
   topics/GroupStore.cpp
   topics/messages/OffsetCommit.cpp
   topics/messages/OffsetFetch.cpp
+  topics/encode/AvroEncoder.cpp
+  topics/encode/CsvEncoder.cpp
   topics/orm/Group.cpp
   topics/orm/GroupOffset.cpp
   topics/orm/GroupMember.cpp
@@ -281,6 +288,7 @@ SET (VOLTDB_SRC
   storage/TableStreamerContext.cpp
   storage/TableTupleAllocator.cpp
   storage/TempTableLimits.cpp
+  storage/TopicTupleStream.cpp
   storage/TupleBlock.cpp
   storage/constraintutil.cpp
   storage/persistenttable.cpp

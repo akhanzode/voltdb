@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.SortedSet;
 
 import org.apache.commons.lang3.StringUtils;
+import org.voltcore.logging.VoltLogger;
 import org.voltdb.VoltDB;
 import org.voltdb.VoltType;
 import org.voltdb.catalog.Catalog;
@@ -67,7 +68,7 @@ import com.google_voltpatches.common.io.Resources;
 public class ReportMaker {
 
     static Date m_timestamp = new Date();
-
+    private static VoltLogger compilerLog = new VoltLogger("COMPILER");
     /**
      * Make an html bootstrap tag with our custom css class.
      */
@@ -138,10 +139,6 @@ public class ReportMaker {
                 }
                 sb.append(StringUtils.join(procs, ", "));
                 sb.append("</p>");
-            }
-            if (annotation.statementsThatUseThis.size() > 0) {
-                assert(annotation.statementsThatUseThis.size() == 1);
-                sb.append("<p>Used by the LIMIT PARTITION ROWS Statement</p>");
             }
         }
 
@@ -278,18 +275,6 @@ public class ReportMaker {
         }
         sb.append("</td>");
 
-        // column 6: has tuple limit
-        sb.append("<td>");
-        if (table.getTuplelimit() != Integer.MAX_VALUE) {
-            tag(sb, "info", String.valueOf(table.getTuplelimit()));
-            if (CatalogUtil.getLimitPartitionRowsDeleteStmt(table) != null) {
-                sb.append("<small>enforced by DELETE statement</small>");
-            }
-        } else {
-            tag(sb, null, "No-limit");
-        }
-        sb.append("</td>");
-
         sb.append("</tr>\n");
 
         // BUILD THE DROPDOWN FOR THE DDL / INDEXES DETAIL
@@ -327,37 +312,6 @@ public class ReportMaker {
                 }
                 sb.append(StringUtils.join(procs, ", "));
                 sb.append("</p>");
-            }
-        }
-
-        // LIMIT PARTITION ROW statement may also use the index in this table, prepare the information for report
-        if (! table.getTuplelimitdeletestmt().isEmpty()) {
-            assert(table.getTuplelimitdeletestmt().size() == 1);
-            Statement stmt = table.getTuplelimitdeletestmt().iterator().next();
-
-            for (String tableDotIndexPair : stmt.getIndexesused().split(",")) {
-                if (tableDotIndexPair.length() == 0) {
-                    continue;
-                }
-                String parts[] = tableDotIndexPair.split("\\.", 2);
-                assert(parts.length == 2);
-                if (parts.length != 2) {
-                    continue;
-                }
-                String tableName = parts[0];
-                String indexName = parts[1];
-                if (! table.getTypeName().equals(tableName)) {
-                    continue;
-                }
-
-                Index i = table.getIndexes().get(indexName);
-                assert(i != null);
-                IndexAnnotation ia = (IndexAnnotation) i.getAnnotation();
-                if (ia == null) {
-                    ia = new IndexAnnotation();
-                    i.setAnnotation(ia);
-                }
-                ia.statementsThatUseThis.add(stmt);
             }
         }
 
@@ -509,7 +463,10 @@ public class ReportMaker {
             Table t = tables.get(tableName);
             assert(t != null);
             Index i = t.getIndexes().get(indexName);
-            assert(i != null);
+            if (i == null) {
+                compilerLog.warn("The index, " + indexName + ", found from statement " + statement.getIndexesused() + " but not from table " + tableName);
+                continue;
+            }
             IndexAnnotation ia = (IndexAnnotation) i.getAnnotation();
             if (ia == null) {
                 ia = new IndexAnnotation();
@@ -554,6 +511,9 @@ public class ReportMaker {
         StringBuilder sb = new StringBuilder();
         sb.append("<tr class='primaryrow'>");
 
+        // Modifies display of other columns
+        boolean compound = CatalogUtil.isCompoundProcedure(procedure);
+
         // column 1: procedure name
         String anchor = procedure.getTypeName().toLowerCase();
         sb.append("<td style='white-space: nowrap'><i id='p-" + anchor + "--icon' class='icon-chevron-right'></i> <a href='#p-");
@@ -580,21 +540,25 @@ public class ReportMaker {
 
         // column 3: partitioning
         sb.append("<td>");
-        if (procedure.getSinglepartition()) {
-            tag(sb, "success", "Single");
-        }
-        else {
-            tag(sb, "warning", "Multi");
+        if (!compound) {
+            if (procedure.getSinglepartition()) {
+                tag(sb, "success", "Single");
+            }
+            else {
+                tag(sb, "warning", "Multi");
+            }
         }
         sb.append("</td>");
 
         // column 4: read/write
         sb.append("<td>");
-        if (procedure.getReadonly()) {
-            tag(sb, "success", "Read");
-        }
-        else {
-            tag(sb, "warning", "Write");
+        if (!compound) {
+            if (procedure.getReadonly()) {
+                tag(sb, "success", "Read");
+            }
+            else {
+                tag(sb, "warning", "Write");
+            }
         }
         sb.append("</td>");
 
@@ -632,6 +596,11 @@ public class ReportMaker {
         if (scanCount > 0) {
             tag(sb, "important", "Scans");
         }
+
+        if (compound) {
+            tag(sb,"inverse","Compound");
+        }
+
         sb.append("</td>");
 
         sb.append("</tr>\n");

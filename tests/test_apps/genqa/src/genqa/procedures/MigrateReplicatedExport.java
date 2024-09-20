@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -33,7 +33,6 @@ import org.voltdb.types.TimestampType;
 
 public class MigrateReplicatedExport extends VoltProcedure {
     public final SQLStmt migrate_kafka = new SQLStmt("MIGRATE FROM export_replicated_table_kafka WHERE NOT MIGRATING AND type_not_null_timestamp < DATEADD(SECOND, ?, NOW)");
-    public final SQLStmt migrate_rabbit = new SQLStmt("MIGRATE FROM export_replicated_table_rabbit WHERE NOT MIGRATING AND type_not_null_timestamp < DATEADD(SECOND, ?, NOW)");
     public final SQLStmt migrate_file = new SQLStmt("MIGRATE FROM export_replicated_table_file WHERE NOT MIGRATING AND type_not_null_timestamp < DATEADD(SECOND, ?, NOW)");
     public final SQLStmt migrate_jdbc = new SQLStmt("MIGRATE FROM export_replicated_table_jdbc WHERE NOT MIGRATING AND type_not_null_timestamp < DATEADD(SECOND, ?, NOW)");
     // public final SQLStmt migrate = new SQLStmt("MIGRATE FROM export_replicated_table WHERE NOT MIGRATING AND type_not_null_timestamp < DATEADD(SECOND, ?, NOW)");
@@ -42,7 +41,6 @@ public class MigrateReplicatedExport extends VoltProcedure {
     {
         // ad hoc kinda like "MIGRATE FROM export_replicated_table where <records older than "seconds" ago>
         voltQueueSQL(migrate_kafka, EXPECT_SCALAR_LONG, -seconds);
-        voltQueueSQL(migrate_rabbit, EXPECT_SCALAR_LONG, -seconds);
         voltQueueSQL(migrate_file, EXPECT_SCALAR_LONG, -seconds);
         voltQueueSQL(migrate_jdbc, EXPECT_SCALAR_LONG, -seconds);
         return voltExecuteSQL();

@@ -1,8 +1,8 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This file contains original code and/or modifications of original code.
- * Any modifications made by VoltDB Inc. are licensed under the following
+ * Any modifications made by Volt Active Data Inc. are licensed under the following
  * terms and conditions:
  *
  * This program is free software: you can redistribute it and/or modify
@@ -56,7 +56,7 @@ Table* TableFactory::getPersistentTable(
         voltdb::CatalogId databaseId, char const* name, TupleSchema* schema,
             const std::vector<std::string> &columnNames, char *signature, bool tableIsMaterialized,
             int partitionColumn, TableType tableType, int tableAllocationTargetSize,
-            int tupleLimit, int32_t compactionThreshold, bool drEnabled, bool isReplicated) {
+            int32_t compactionThreshold, bool drEnabled, bool isReplicated) {
     Table *table = NULL;
     StreamedTable *streamedTable = NULL;
     PersistentTable *persistentTable = NULL;
@@ -66,7 +66,7 @@ Table* TableFactory::getPersistentTable(
     } else {
         table = persistentTable = new PersistentTable(
                 partitionColumn, signature, tableIsMaterialized, tableAllocationTargetSize,
-                tupleLimit, drEnabled, isReplicated, tableType);
+                drEnabled, isReplicated, tableType);
     }
 
     initCommon(databaseId, table, name, schema, columnNames,

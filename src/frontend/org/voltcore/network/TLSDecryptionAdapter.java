@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -224,7 +224,7 @@ public class TLSDecryptionAdapter {
      */
     class DecryptionGateway implements Runnable {
 
-        private final byte [] m_overlap = new byte[CipherExecutor.FRAME_SIZE + 2048];
+        private final byte[] m_overlap = new byte[m_decrypter.getPacketBufferSize()];
         private final ConcurrentLinkedDeque<NIOReadStream.Slice> m_q = new ConcurrentLinkedDeque<>();
         private final CompositeByteBuf m_msgbb = Unpooled.compositeBuffer();
 

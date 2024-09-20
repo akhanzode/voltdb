@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -30,7 +30,6 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.stream.Stream;
 
-import com.google_voltpatches.common.base.Strings;
 import org.junit.Test;
 import org.voltdb.BackendTarget;
 import org.voltdb.VoltDB;
@@ -41,8 +40,11 @@ import org.voltdb.client.ClientResponse;
 import org.voltdb.client.ProcCallException;
 import org.voltdb.client.ProcedureCallback;
 import org.voltdb.compiler.VoltProjectBuilder;
+import org.voltdb.types.TimestampType;
 import org.voltdb_testprocs.regressionsuites.failureprocs.BadParamTypesForTimestamp;
 import org.voltdb_testprocs.regressionsuites.fixedsql.GotBadParamCountsInJava;
+
+import com.google_voltpatches.common.base.Strings;
 
 
 /**
@@ -80,6 +82,19 @@ public class TestFunctionsForVoltDBSuite extends RegressionSuite {
                 "TM TIMESTAMP DEFAULT NULL, " +
                 "PRIMARY KEY (ID) ); " +
                 "PARTITION TABLE P2 ON COLUMN ID;\n" +
+
+                "CREATE TABLE P3DIFF ( " +
+                "ID INTEGER DEFAULT '0' NOT NULL, " +
+                "TM1 TIMESTAMP DEFAULT NULL, " +
+                "TM2 TIMESTAMP DEFAULT NULL, " +
+                "PRIMARY KEY (ID) ); " +
+                "PARTITION TABLE P3DIFF ON COLUMN ID;\n" +
+
+                "CREATE TABLE P3SLICE ( " +
+                "ID INTEGER DEFAULT '0' NOT NULL, " +
+                "TM1 TIMESTAMP DEFAULT NULL, " +
+                "PRIMARY KEY (ID) ); " +
+                "PARTITION TABLE P3SLICE ON COLUMN ID;\n" +
 
                 "CREATE TABLE P3_INLINE_DESC ( " +
                 "ID INTEGER DEFAULT '0' NOT NULL, " +
@@ -119,14 +134,16 @@ public class TestFunctionsForVoltDBSuite extends RegressionSuite {
                 ";\n" +
 
                 "create table M1 MIGRATE TO TARGET archiver (" +
+                "ts timestamp default now() not null," +
                 "a int not null, " +
                 "b int not null) " +
-                "USING TTL 10 minutes ON COLUMN a;" +
+                "USING TTL 10 minutes ON COLUMN ts;" +
 
                 "create table M2 MIGRATE TO TARGET archiver (" +
+                "ts timestamp default now() not null," +
                 "a int not null, " +
                 "b int not null) " +
-                "USING TTL 10 minutes ON COLUMN a;" +
+                "USING TTL 10 minutes ON COLUMN ts;" +
                 "PARTITION TABLE M2 ON COLUMN a;\n" +
 
                 "CREATE PROCEDURE IdFieldProc AS\n" +
@@ -3127,6 +3144,292 @@ public class TestFunctionsForVoltDBSuite extends RegressionSuite {
         assertTrue(throwed);
     }
 
+    public void testDatediff() throws IOException, ProcCallException {
+        System.out.println("STARTING test DATEDIFF function tests");
+
+        /*
+         *      "CREATE TABLE P3DIFF ( " +
+                "ID INTEGER DEFAULT '0' NOT NULL, " +
+                "TM1 TIMESTAMP DEFAULT NULL, " +
+                "TM2 TIMESTAMP DEFAULT NULL, " +
+                "PRIMARY KEY (ID) ); " +
+                "PARTITION TABLE P3DIFF ON COLUMN ID;\n" +
+         */
+        Client client = getClient();
+        ClientResponse cr;
+        VoltTable vt;
+
+        cr = client.callProcedure("@AdHoc",
+                "INSERT INTO P3DIFF (ID, TM1, TM2) VALUES (10000, '2000-01-01 01:00:00.00000', '2001-02-02 02:01:01.001001');");
+        assertEquals(ClientResponse.SUCCESS, cr.getStatus());
+        cr = client.callProcedure("@AdHoc",
+                "INSERT INTO P3DIFF (ID, TM1, TM2) VALUES (10001, '2000-01-01 01:00:00.00000', DATEADD(DAY, 1, '2000-01-01 01:00:00.00000'));");
+        assertEquals(ClientResponse.SUCCESS, cr.getStatus());
+
+        // Simple day apart timestamps
+        vt = client.callProcedure("@AdHoc",
+                "SELECT DATEDIFF(year, TM1, TM2), DATEDIFF(month, TM1, TM2), DATEDIFF(quarter, TM1, TM2), DATEDIFF(day, TM1, TM2), " +
+                        "DATEDIFF(hour, TM1, TM2), DATEDIFF(minute, TM1, TM2), DATEDIFF(second, TM1, TM2), DATEDIFF(millis, TM1, TM2), " +
+                        "DATEDIFF(micros, TM1, TM2), DATEDIFF(week, TM1, TM2) FROM P3DIFF WHERE ID = 10001").getResults()[0];
+        assertTrue(vt.advanceRow());
+        assertEquals(0, vt.getLong(0));
+        assertEquals(0, vt.getLong(1));
+        assertEquals(0, vt.getLong(2));
+        assertEquals(1, vt.getLong(3));
+        assertEquals(24, vt.getLong(4));
+        assertEquals(1440, vt.getLong(5));
+        assertEquals(86400, vt.getLong(6));
+        assertEquals(86400000, vt.getLong(7));
+        assertEquals(86400000000L, vt.getLong(8));
+        assertEquals(0, vt.getLong(9));
+
+        vt = client.callProcedure("@AdHoc",
+                "SELECT DATEDIFF(year, TM1, TM2) FROM P3DIFF WHERE ID = 10000").getResults()[0];
+        assertTrue(vt.advanceRow());
+        assertEquals(1, vt.getLong(0));
+
+        vt = client.callProcedure("@AdHoc",
+                "SELECT DATEDIFF(quarter, TM1, TM2) FROM P3DIFF WHERE ID = 10000").getResults()[0];
+        assertTrue(vt.advanceRow());
+        assertEquals(4, vt.getLong(0));
+
+        vt = client.callProcedure("@AdHoc",
+                "SELECT DATEDIFF(month, TM1, TM2) FROM P3DIFF WHERE ID = 10000").getResults()[0];
+        assertTrue(vt.advanceRow());
+        assertEquals(13, vt.getLong(0));
+
+        vt = client.callProcedure("@AdHoc",
+                "SELECT DATEDIFF(day, TM1, TM2) FROM P3DIFF WHERE ID = 10000").getResults()[0];
+        assertTrue(vt.advanceRow());
+        assertEquals(398, vt.getLong(0));
+
+        vt = client.callProcedure("@AdHoc",
+                "SELECT DATEDIFF(week, TM1, TM2) FROM P3DIFF WHERE ID = 10000").getResults()[0];
+        assertTrue(vt.advanceRow());
+        assertEquals(56, vt.getLong(0));
+
+        vt = client.callProcedure("@AdHoc",
+                "SELECT DATEDIFF(hour, TM1, TM2) FROM P3DIFF WHERE ID = 10000").getResults()[0];
+        assertTrue(vt.advanceRow());
+        assertEquals(9553, vt.getLong(0));
+
+        vt = client.callProcedure("@AdHoc",
+                "SELECT DATEDIFF(minute, TM1, TM2) FROM P3DIFF WHERE ID = 10000").getResults()[0];
+        assertTrue(vt.advanceRow());
+        assertEquals(573181, vt.getLong(0));
+
+        vt = client.callProcedure("@AdHoc",
+                "SELECT DATEDIFF(second, TM1, TM2) FROM P3DIFF WHERE ID = 10000").getResults()[0];
+        assertTrue(vt.advanceRow());
+        assertEquals(34390861, vt.getLong(0));
+
+        vt = client.callProcedure("@AdHoc",
+                "SELECT DATEDIFF(millis, TM1, TM2) FROM P3DIFF WHERE ID = 10000").getResults()[0];
+        assertTrue(vt.advanceRow());
+        assertEquals(34390861001L, vt.getLong(0));
+
+        vt = client.callProcedure("@AdHoc",
+                "SELECT DATEDIFF(micros, TM1, TM2) FROM P3DIFF WHERE ID = 10000").getResults()[0];
+        assertTrue(vt.advanceRow());
+        assertEquals(34390861001001L, vt.getLong(0));
+
+        // Test null interval
+        try {
+            vt = client.callProcedure("@AdHoc",
+                    "SELECT DATEDIFF(null, TM1, TM2) FROM P3DIFF WHERE ID = 10000").getResults()[0];
+            fail("Bad interval should throw exception.");
+        } catch (ProcCallException pce) {
+            // All good
+        }
+        // Test null or illegal datepart
+        try {
+            vt = client.callProcedure("@AdHoc",
+                    "SELECT DATEDIFF(SUMMER, TM1, TM2) FROM P3DIFF WHERE ID = 10000").getResults()[0];
+            fail("Bad interval should throw exception.");
+        } catch (ProcCallException pce) {
+            // All good
+        }
+
+        // Test null timestamp
+        cr = client.callProcedure("@AdHoc",
+                "INSERT INTO P3DIFF (ID, TM1, TM2) VALUES (10002, null, null);");
+        vt = client.callProcedure("@AdHoc",
+                "SELECT DATEDIFF(micros, TM1, TM2) FROM P3DIFF WHERE ID = 10002").getResults()[0];
+        assertTrue(vt.advanceRow());
+        assertEquals(null, vt.get(0));
+    }
+
+    // Values expected in this test came from snowflake running the time_window function.
+    public void testTimeWindow() throws IOException, ProcCallException {
+        System.out.println("STARTING test TIME_WINDOW function tests");
+
+        /*
+         *      "CREATE TABLE P3SLICE ( " +
+                "ID INTEGER DEFAULT '0' NOT NULL, " +
+                "TM1 TIMESTAMP DEFAULT NULL, " +
+                "PRIMARY KEY (ID) ); " +
+                "PARTITION TABLE P3SLICE ON COLUMN ID;\n" +
+         */
+        Client client = getClient();
+        ClientResponse cr;
+        VoltTable vt;
+
+        cr = client.callProcedure("@AdHoc",
+                "INSERT INTO P3SLICE (ID, TM1) VALUES (10000, '2001-04-04 14:04:04.00000');");
+        assertEquals(ClientResponse.SUCCESS, cr.getStatus());
+        cr = client.callProcedure("@AdHoc",
+                "INSERT INTO P3SLICE (ID, TM1) VALUES (10001, '1965-04-04 14:04:04.00000');");
+        assertEquals(ClientResponse.SUCCESS, cr.getStatus());
+        cr = client.callProcedure("@AdHoc",
+                "INSERT INTO P3SLICE (ID, TM1) VALUES (10002, NULL);");
+        assertEquals(ClientResponse.SUCCESS, cr.getStatus());
+        vt = client.callProcedure("@AdHoc",
+                "SELECT " +
+                        "TIME_WINDOW(YEAR, 133, TM1, START), " +
+                        "TIME_WINDOW(QUARTER, 133, TM1, START), " +
+                        "TIME_WINDOW(MONTH, 133, TM1, START), " +
+                        "TIME_WINDOW(WEEK, 133, TM1, START), " +
+                        "TIME_WINDOW(DAY, 133, TM1, START), " +
+                        "TIME_WINDOW(HOUR, 133, TM1, START), " +
+                        "TIME_WINDOW(MINUTE, 133, TM1, START), " +
+                        "TIME_WINDOW(SECOND, 133, TM1, START), " +
+                        "TIME_WINDOW(MILLIS, 133, TM1, START), " +
+                        "TIME_WINDOW(MILLISECOND, 133, TM1, START) " +
+                        "FROM P3SLICE WHERE ID = 10000").getResults()[0];
+        assertTrue(vt.advanceRow());
+        assertEquals(new TimestampType("1970-01-01 00:00:000000"), vt.get(0));
+        assertEquals(new TimestampType("1970-01-01 00:00:000000"), vt.get(1));
+        assertEquals(new TimestampType("1992-03-01 00:00:000000"), vt.get(2));
+        assertEquals(new TimestampType("2000-07-31 00:00:000000"), vt.get(3));
+        assertEquals(new TimestampType("2000-12-14 00:00:000000"), vt.get(4));
+        assertEquals(new TimestampType("2001-04-03 20:00:000000"), vt.get(5));
+        assertEquals(new TimestampType("2001-04-04 13:44:000000"), vt.get(6));
+        assertEquals(new TimestampType("2001-04-04 14:03:57"), vt.get(7));
+        assertEquals(new TimestampType("2001-04-04 14:04:03.916000"), vt.get(8));
+        assertEquals(new TimestampType("2001-04-04 14:04:03.916000"), vt.get(9));
+
+        vt = client.callProcedure("@AdHoc",
+                "SELECT " +
+                        "TIME_WINDOW(YEAR, 133, TM1, END), " +
+                        "TIME_WINDOW(QUARTER, 133, TM1, END), " +
+                        "TIME_WINDOW(MONTH, 133, TM1, END), " +
+                        "TIME_WINDOW(WEEK, 133, TM1, END), " +
+                        "TIME_WINDOW(DAY, 133, TM1, END), " +
+                        "TIME_WINDOW(HOUR, 133, TM1, END), " +
+                        "TIME_WINDOW(MINUTE, 133, TM1, END), " +
+                        "TIME_WINDOW(SECOND, 133, TM1, END), " +
+                        "TIME_WINDOW(MILLIS, 133, TM1, END), " +
+                        "TIME_WINDOW(MILLISECOND, 133, TM1, END) " +
+                        "FROM P3SLICE WHERE ID = 10000").getResults()[0];
+        assertTrue(vt.advanceRow());
+        assertEquals(new TimestampType("2103-01-01 00:00:000000"), vt.get(0));
+        assertEquals(new TimestampType("2003-04-01 00:00:000000"), vt.get(1));
+        assertEquals(new TimestampType("2003-04-01 00:00:000000"), vt.get(2));
+        assertEquals(new TimestampType("2003-02-17 00:00:000000"), vt.get(3));
+        assertEquals(new TimestampType("2001-04-26 00:00:000000"), vt.get(4));
+        assertEquals(new TimestampType("2001-04-09 09:00:000000"), vt.get(5));
+        assertEquals(new TimestampType("2001-04-04 15:57:000000"), vt.get(6));
+        assertEquals(new TimestampType("2001-04-04 14:06:10"), vt.get(7));
+        assertEquals(new TimestampType("2001-04-04 14:04:04.049000"), vt.get(8));
+        assertEquals(new TimestampType("2001-04-04 14:04:04.049000"), vt.get(9));
+
+        // Time less than epoch
+        vt = client.callProcedure("@AdHoc",
+                "SELECT " +
+                        "TIME_WINDOW(YEAR, 133, TM1, END), " +
+                        "TIME_WINDOW(QUARTER, 133, TM1, END), " +
+                        "TIME_WINDOW(MONTH, 133, TM1, END), " +
+                        "TIME_WINDOW(WEEK, 133, TM1, END), " +
+                        "TIME_WINDOW(DAY, 133, TM1, END), " +
+                        "TIME_WINDOW(HOUR, 133, TM1, END), " +
+                        "TIME_WINDOW(MINUTE, 133, TM1, END), " +
+                        "TIME_WINDOW(SECOND, 133, TM1, END), " +
+                        "TIME_WINDOW(MILLIS, 133, TM1, END), " +
+                        "TIME_WINDOW(MILLISECOND, 133, TM1, END) " +
+                        "FROM P3SLICE WHERE ID = 10001").getResults()[0];
+        assertTrue(vt.advanceRow());
+        assertEquals(new TimestampType("1970-01-01 00:00:000000"), vt.get(0));
+        assertEquals(new TimestampType("1970-01-01 00:00:000000"), vt.get(1));
+        assertEquals(new TimestampType("1970-01-01 00:00:000000"), vt.get(2));
+        assertEquals(new TimestampType("1967-06-12 00:00:000000"), vt.get(3));
+        assertEquals(new TimestampType("1965-04-08 00:00:000000"), vt.get(4));
+        assertEquals(new TimestampType("1965-04-08 00:00:000000"), vt.get(5));
+        assertEquals(new TimestampType("1965-04-04 16:12:000000"), vt.get(6));
+        assertEquals(new TimestampType("1965-04-04 14:05:39"), vt.get(7));
+        assertEquals(new TimestampType("1965-04-04 14:04:04.038000"), vt.get(8));
+        assertEquals(new TimestampType("1965-04-04 14:04:04.038000"), vt.get(9));
+
+        vt = client.callProcedure("@AdHoc",
+                "SELECT " +
+                        "TIME_WINDOW(YEAR, 133, TM1), " +
+                        "TIME_WINDOW(QUARTER, 133, TM1), " +
+                        "TIME_WINDOW(MONTH, 133, TM1), " +
+                        "TIME_WINDOW(WEEK, 133, TM1), " +
+                        "TIME_WINDOW(DAY, 133, TM1), " +
+                        "TIME_WINDOW(HOUR, 133, TM1), " +
+                        "TIME_WINDOW(MINUTE, 133, TM1), " +
+                        "TIME_WINDOW(SECOND, 133, TM1), " +
+                        "TIME_WINDOW(MILLIS, 133, TM1), " +
+                        "TIME_WINDOW(MILLISECOND, 133, TM1) " +
+                        "FROM P3SLICE WHERE ID = 10001").getResults()[0];
+        assertTrue(vt.advanceRow());
+        assertEquals(new TimestampType("1837-01-01 00:00:000000"), vt.get(0));
+        assertEquals(new TimestampType("1936-10-01 00:00:000000"), vt.get(1));
+        assertEquals(new TimestampType("1958-12-01 00:00:000000"), vt.get(2));
+        assertEquals(new TimestampType("1964-11-23 00:00:000000"), vt.get(3));
+        assertEquals(new TimestampType("1964-11-26 00:00:000000"), vt.get(4));
+        assertEquals(new TimestampType("1965-04-02 11:00:000000"), vt.get(5));
+        assertEquals(new TimestampType("1965-04-04 13:59:000000"), vt.get(6));
+        assertEquals(new TimestampType("1965-04-04 14:03:26"), vt.get(7));
+        assertEquals(new TimestampType("1965-04-04 14:04:03.905000"), vt.get(8));
+        assertEquals(new TimestampType("1965-04-04 14:04:03.905000"), vt.get(9));
+
+        // Invalid intervals should throw exception
+        String maxLimitsUnit[] = { "YEAR", "QUARTER", "MONTH", "WEEK", "DAY", "HOUR", "MINUTE", "SECOND", "MILLIS"};
+        for (int i = 0; i < maxLimitsUnit.length; i++) {
+            try {
+                StringBuilder sb = new StringBuilder();
+                sb.append("SELECT TIME_WINDOW(").append(maxLimitsUnit[i]).append(", -1, , TM1) FROM P3SLICE WHERE ID = 10001");
+                vt = client.callProcedure("@AdHoc", sb.toString()).getResults()[0];
+                fail("window bigger than supported must throw exception.");
+            } catch (ProcCallException ex) {
+            }
+            try {
+                StringBuilder sb = new StringBuilder();
+                sb.append("SELECT TIME_WINDOW(").append(maxLimitsUnit[i]).append(", 0, , TM1) FROM P3SLICE WHERE ID = 10001");
+                vt = client.callProcedure("@AdHoc", sb.toString()).getResults()[0];
+                fail("window bigger than supported must throw exception.");
+            } catch (ProcCallException ex) {
+            }
+        }
+
+        // Null timestamp test
+        vt = client.callProcedure("@AdHoc",
+                "SELECT " +
+                        "TIME_WINDOW(YEAR, 133, TM1), " +
+                        "TIME_WINDOW(QUARTER, 133, TM1), " +
+                        "TIME_WINDOW(MONTH, 133, TM1), " +
+                        "TIME_WINDOW(WEEK, 133, TM1), " +
+                        "TIME_WINDOW(DAY, 133, TM1), " +
+                        "TIME_WINDOW(HOUR, 133, TM1), " +
+                        "TIME_WINDOW(MINUTE, 133, TM1), " +
+                        "TIME_WINDOW(SECOND, 133, TM1), " +
+                        "TIME_WINDOW(MILLIS, 133, TM1), " +
+                        "TIME_WINDOW(MILLISECOND, 133, TM1) " +
+                        "FROM P3SLICE WHERE ID = 10002").getResults()[0];
+        assertTrue(vt.advanceRow());
+        assertNull(vt.get(0));
+        assertNull(vt.get(1));
+        assertNull(vt.get(2));
+        assertNull(vt.get(3));
+        assertNull(vt.get(4));
+        assertNull(vt.get(5));
+        assertNull(vt.get(6));
+        assertNull(vt.get(7));
+        assertNull(vt.get(8));
+        assertNull(vt.get(9));
+    }
+
     @Test
     public void testBadParamTypeForTimeStampField() throws IOException, ProcCallException {
         Client client = getClient();
@@ -3376,14 +3679,14 @@ public class TestFunctionsForVoltDBSuite extends RegressionSuite {
         Client client = getClient();
         // insert some data into the migrating table.
         // m1 is replicated and m2 is partitioned.
-        Stream.of("insert into m1 values(1, 11);",
-                "insert into m1 values(2, 22);",
-                "insert into m1 values(3, 33);",
-                "insert into m1 values(4, 44);",
-                "insert into m2 values(1, 10);",
-                "insert into m2 values(2, 20);",
-                "insert into m2 values(3, 30);",
-                "insert into m2 values(4, 40);",
+        Stream.of("insert into m1(a, b) values(1, 11);",
+                "insert into m1(a, b) values(2, 22);",
+                "insert into m1(a, b) values(3, 33);",
+                "insert into m1(a, b) values(4, 44);",
+                "insert into m2(a, b) values(1, 10);",
+                "insert into m2(a, b) values(2, 20);",
+                "insert into m2(a, b) values(3, 30);",
+                "insert into m2(a, b) values(4, 40);",
                 "insert into p1 values(1, null, 4, 4.1);")
                 .forEachOrdered(stmt -> {
                     try {
@@ -3397,24 +3700,24 @@ public class TestFunctionsForVoltDBSuite extends RegressionSuite {
                 expected_m2 = {{1, 10}, {2, 20}, {3, 30}, {4, 40}}, empty = {};
         ClientResponse cr;
         // select migrating rows
-        cr = client.callProcedure("@AdHoc", "select * from m1 where not migrating() order by a, b;");
+        cr = client.callProcedure("@AdHoc", "select a, b from m1 where not migrating() order by a, b;");
         assertContentOfTable(expected_m1, cr.getResults()[0]);
 
-        cr = client.callProcedure("@AdHoc", "select * from m2 where not migrating() order by a, b;");
+        cr = client.callProcedure("@AdHoc", "select a, b from m2 where not migrating() order by a, b;");
         assertContentOfTable(expected_m2, cr.getResults()[0]);
 
         // forbid select !migrating rows
-        cr = client.callProcedure("@AdHoc", "select * from m1 where migrating() order by a, b;");
+        cr = client.callProcedure("@AdHoc", "select a, b from m1 where migrating() order by a, b;");
         assertContentOfTable(empty, cr.getResults()[0]);
-        cr = client.callProcedure("@AdHoc", "select * from m2 where migrating() order by a, b;");
+        cr = client.callProcedure("@AdHoc", "select a, b from m2 where migrating() order by a, b;");
         assertContentOfTable(empty, cr.getResults()[0]);
 
         cr = client.callProcedure("@AdHoc",
-                "select * from m1 where not migrating() and a >= 3 order by a, b;");
+                "select a, b from m1 where not migrating() and a >= 3 order by a, b;");
         assertContentOfTable(new Object[][]{{3, 33}, {4, 44}}, cr.getResults()[0]);
 
         cr = client.callProcedure("@AdHoc",
-                "select * from m2 where not migrating() and a >= 3 order by a, b;");
+                "select a, b from m2 where not migrating() and a >= 3 order by a, b;");
         assertContentOfTable(new Object[][]{{3, 30}, {4, 40}}, cr.getResults()[0]);
 
         // migrating with aggregate functions.

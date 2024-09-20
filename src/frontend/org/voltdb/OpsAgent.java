@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -16,7 +16,11 @@
  */
 package org.voltdb;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+
+import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -27,11 +31,13 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
+import org.json_voltpatches.JSONException;
 import org.json_voltpatches.JSONObject;
 import org.voltcore.logging.VoltLogger;
 import org.voltcore.messaging.BinaryPayloadMessage;
 import org.voltcore.messaging.HostMessenger;
 import org.voltcore.messaging.Mailbox;
+import org.voltcore.messaging.UnknownSiteId;
 import org.voltcore.messaging.VoltMessage;
 import org.voltcore.network.Connection;
 import org.voltcore.utils.CoreUtils;
@@ -52,15 +58,16 @@ import org.voltdb.utils.CompressionService;
 // well-known IDs for new services.
 // 3. Handling of null/empty cases is bad.
 
-public abstract class OpsAgent
-{
+public abstract class OpsAgent {
     protected static final VoltLogger hostLog = new VoltLogger("HOST");
     private static final byte JSON_PAYLOAD = 0;
+    private static final byte[] JSON_METADATA = {JSON_PAYLOAD};
     private static final byte OPS_PAYLOAD = 1;
     private static final byte OPS_DUMMY = 2;
 
     // ENG-5125
     private static final int MAX_IN_FLIGHT_REQUESTS = 20;
+    // TODO pk this has to change
     static int OPS_COLLECTION_TIMEOUT = 60 * 1000;
 
     private long m_nextRequestId = 0;
@@ -93,6 +100,7 @@ public abstract class OpsAgent
         protected final long startTime;
         private final JSONObject request;
         Future<?> timer;
+
         public PendingOpsRequest(
                 OpsSelector selector,
                 String subselector,
@@ -116,7 +124,7 @@ public abstract class OpsAgent
         }
     }
 
-    private final Map<Long, PendingOpsRequest> m_pendingRequests = new HashMap<Long, PendingOpsRequest>();
+    private final Map<Long, PendingOpsRequest> m_pendingRequests = new HashMap<>();
 
     public OpsAgent(String name) {
         m_name = name;
@@ -166,16 +174,10 @@ public abstract class OpsAgent
 
     public void registerMailbox(final HostMessenger hostMessenger, final long hsId) {
         m_messenger = hostMessenger;
-        hostMessenger.generateMailboxId(hsId);
         m_mailbox = new LocalMailbox(hostMessenger, hsId) {
             @Override
             public void deliver(final VoltMessage message) {
-                m_es.submit(new Runnable() {
-                    @Override
-                    public void run() {
-                        handleMailboxMessage(message);
-                    }
-                });
+                m_es.submit(() -> handleMailboxMessage(message));
             }
         };
         hostMessenger.registerMailbox(m_mailbox);
@@ -184,10 +186,10 @@ public abstract class OpsAgent
     private void handleMailboxMessage(VoltMessage message) {
         try {
             if (message instanceof BinaryPayloadMessage) {
-                BinaryPayloadMessage bpm = (BinaryPayloadMessage)message;
-                byte payload[] = CompressionService.decompressBytes(bpm.m_payload);
+                BinaryPayloadMessage bpm = (BinaryPayloadMessage) message;
+                byte[] payload = CompressionService.decompressBytes(bpm.m_payload);
                 if (bpm.m_metadata[0] == JSON_PAYLOAD) {
-                    String jsonString = new String(payload, "UTF-8");
+                    String jsonString = new String(payload, UTF_8.name());
                     JSONObject obj = new JSONObject(jsonString);
                     //In early startup generate dummy responses
                     if (m_dummyMode) {
@@ -200,6 +202,13 @@ public abstract class OpsAgent
                 } else if (bpm.m_metadata[0] == OPS_DUMMY) {
                     handleOpsResponse(payload, true);
                 }
+            } else if (message instanceof UnknownSiteId) {
+                BinaryPayloadMessage bpm = (BinaryPayloadMessage) ((UnknownSiteId) message).getMessage();
+                assert bpm.m_metadata[0] == JSON_PAYLOAD;
+                byte[] payload = CompressionService.decompressBytes(bpm.m_payload);
+                String jsonString = new String(payload, UTF_8.name());
+                JSONObject obj = new JSONObject(jsonString);
+                handleUnknownSite(obj);
             }
         } catch (Exception e) {
             hostLog.error("Exception processing message in OpsAgent for " + m_name + ": " + message, e);
@@ -224,7 +233,7 @@ public abstract class OpsAgent
         // disagree or there will be trouble here in River City.  Nobody else better add non-table
         // stuff after the responses to the returned messages or said trouble will also occur.  Ick, fragile.
         if (request.aggregateTables == null && !dummy) {
-            List<VoltTable> tables = new ArrayList<VoltTable>();
+            List<VoltTable> tables = new ArrayList<>();
             while (buf.hasRemaining()) {
                 final int tableLength = buf.getInt();
                 int oldLimit = buf.limit();
@@ -235,12 +244,11 @@ public abstract class OpsAgent
                 copy.put(tableBuf);
                 copy.limit(copy.position());
                 copy.position(0);
-                VoltTable vt = PrivateVoltTableFactory.createVoltTableFromBuffer( copy, false);
+                VoltTable vt = PrivateVoltTableFactory.createVoltTableFromBuffer(copy, false);
                 tables.add(vt);
             }
             request.aggregateTables = tables.toArray(new VoltTable[tables.size()]);
-        }
-        else if (!dummy) {
+        } else if (!dummy) {
             for (int ii = 0; ii < request.aggregateTables.length; ii++) {
                 if (buf.hasRemaining()) {
                     try {
@@ -264,6 +272,22 @@ public abstract class OpsAgent
             }
         }
 
+        handleRequestTracking(requestId, request);
+    }
+
+    private void handleUnknownSite(JSONObject originalRequest) throws JSONException {
+        long requestId = originalRequest.getLong("requestId");
+
+        PendingOpsRequest request = m_pendingRequests.get(requestId);
+        if (request == null) {
+            hostLog.warn("Received an OPS response for OPS request " + requestId + " that no longer exists");
+            return;
+        }
+
+        handleRequestTracking(requestId, request);
+    }
+
+    private void handleRequestTracking(long requestId, PendingOpsRequest request) {
         if (--request.expectedOpsResponses > 0) {
             return;
         }
@@ -281,20 +305,16 @@ public abstract class OpsAgent
      * entry point to the OPS system.
      */
     public void performOpsAction(final Connection c, final long clientHandle, final OpsSelector selector,
-            final ParameterSet params) throws Exception
-    {
-        m_es.submit(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    collectStatsImpl(c, clientHandle, selector, params);
-                } catch (Exception e) {
-                    hostLog.warn("Exception while attempting to collect stats", e);
-                    // ENG-14639, prevent clients like sqlcmd from hanging on exception
-                    sendErrorResponse(c, ClientResponse.OPERATIONAL_FAILURE,
-                            "Failed to get statistics (" + e.getMessage() + ").",
-                            clientHandle);
-                }
+                                 final ParameterSet params) throws Exception {
+        m_es.submit(() -> {
+            try {
+                collectStatsImpl(c, clientHandle, selector, params);
+            } catch (Exception e) {
+                hostLog.warn("Exception while attempting to collect stats", e);
+                // ENG-14639, prevent clients like sqlcmd from hanging on exception
+                sendErrorResponse(c, ClientResponse.OPERATIONAL_FAILURE,
+                        "Failed to get statistics (" + e.getMessage() + ").",
+                        clientHandle);
             }
         });
     }
@@ -306,8 +326,7 @@ public abstract class OpsAgent
      * the new request.  Subclasses of OpsAgent should use this when they need this service.
      */
     protected void distributeOpsWork(PendingOpsRequest newRequest, JSONObject obj)
-        throws Exception
-    {
+            throws Exception {
         if (m_pendingRequests.size() > MAX_IN_FLIGHT_REQUESTS) {
             /*
              * Defensively check for an expired request not caught
@@ -332,26 +351,26 @@ public abstract class OpsAgent
 
         final long requestId = m_nextRequestId++;
         m_pendingRequests.put(requestId, newRequest);
-        newRequest.timer = m_es.schedule(new Runnable() {
-            @Override
-            public void run() {
-                checkForRequestTimeout(requestId);
-            }
-        },
-        OPS_COLLECTION_TIMEOUT,
-        TimeUnit.MILLISECONDS);
+        newRequest.timer = m_es.schedule(
+                () -> checkForRequestTimeout(requestId),
+                OPS_COLLECTION_TIMEOUT,
+                TimeUnit.MILLISECONDS);
 
         // selector, subselector, interval filled in by parse...
         obj.put("requestId", requestId);
         obj.put("returnAddress", m_mailbox.getHSId());
         int siteId = CoreUtils.getSiteIdFromHSId(m_mailbox.getHSId());
-        byte payloadBytes[] = CompressionService.compressBytes(obj.toString(4).getBytes("UTF-8"));
+        byte[] payloadBytes = asCompressedBytes(obj);
         for (int hostId : m_messenger.getLiveHostIds()) {
             long agentHsId = CoreUtils.getHSIdFromHostAndSite(hostId, siteId);
             newRequest.expectedOpsResponses++;
-            BinaryPayloadMessage bpm = new BinaryPayloadMessage(new byte[] {JSON_PAYLOAD}, payloadBytes);
+            BinaryPayloadMessage bpm = new BinaryPayloadMessage(JSON_METADATA, payloadBytes);
             m_mailbox.send(agentHsId, bpm);
         }
+    }
+
+    private byte[] asCompressedBytes(JSONObject obj) throws IOException, JSONException {
+        return CompressionService.compressBytes(obj.toString(4).getBytes(UTF_8.name()));
     }
 
     private void checkForRequestTimeout(long requestId) {
@@ -362,7 +381,10 @@ public abstract class OpsAgent
         String request = "Exception formatting request JSON";
         try {
             request = por.request.toString(4);
-        } catch (Throwable t) {}
+        } catch (Throwable t) {
+            // TODO pk dont we want to take any action on exception??
+            // hostLog.error("timeout", t);
+        }
         hostLog.warn("OPS request for " + m_name + ", " + requestId +
                      " timed out, sending error to client. Request:" + request);
 
@@ -384,7 +406,7 @@ public abstract class OpsAgent
          */
         // All of the null/empty table handling/detecting/generation sucks.  Just making it
         // work for now, not making it pretty. --izzy
-        VoltTable responseTables[] = request.aggregateTables;
+        VoltTable[] responseTables = request.aggregateTables;
         if (responseTables == null || responseTables.length == 0) {
             responseTables = new VoltTable[0];
             statusCode = ClientResponse.GRACEFUL_FAILURE;
@@ -407,20 +429,23 @@ public abstract class OpsAgent
         sendOpsResponse(results, obj, OPS_PAYLOAD);
     }
 
+    protected void sendOpsResponse(JSONObject obj, VoltTable... results) throws Exception {
+        sendOpsResponse(results, obj, OPS_PAYLOAD);
+    }
+
     /**
      * Return the results of distributed work to the original requesting agent.
      * Used by subclasses to respond after they've done their local work.
      */
-    private void sendOpsResponse(VoltTable[] results, JSONObject obj, byte payloadType) throws Exception
-    {
+    private void sendOpsResponse(VoltTable[] results, JSONObject obj, byte payloadType) throws Exception {
         long requestId = obj.getLong("requestId");
         long returnAddress = obj.getLong("returnAddress");
         // Send a response with no data since the stats is not supported or not yet available
         if (results == null) {
             ByteBuffer responseBuffer = ByteBuffer.allocate(8);
             responseBuffer.putLong(requestId);
-            byte responseBytes[] = CompressionService.compressBytes(responseBuffer.array());
-            BinaryPayloadMessage bpm = new BinaryPayloadMessage( new byte[] {payloadType}, responseBytes);
+            byte[] responseBytes = CompressionService.compressBytes(responseBuffer.array());
+            BinaryPayloadMessage bpm = new BinaryPayloadMessage(new byte[]{payloadType}, responseBytes);
             m_mailbox.send(returnAddress, bpm);
             return;
         }
@@ -436,15 +461,15 @@ public abstract class OpsAgent
         ByteBuffer responseBuffer = ByteBuffer.allocate(
                 8 + // requestId
                 4 * results.length + // length prefix for each stats table
-                + statbytes);
+                statbytes);
         responseBuffer.putLong(requestId);
         for (ByteBuffer buf : bufs) {
             responseBuffer.putInt(buf.remaining());
             responseBuffer.put(buf);
         }
-        byte responseBytes[] = CompressionService.compressBytes(responseBuffer.array());
+        byte[] responseBytes = CompressionService.compressBytes(responseBuffer.array());
 
-        BinaryPayloadMessage bpm = new BinaryPayloadMessage( new byte[] {payloadType}, responseBytes);
+        BinaryPayloadMessage bpm = new BinaryPayloadMessage(new byte[]{payloadType}, responseBytes);
         m_mailbox.send(returnAddress, bpm);
     }
 
@@ -453,14 +478,12 @@ public abstract class OpsAgent
         m_es.awaitTermination(1, TimeUnit.DAYS);
     }
 
-    protected void sendErrorResponse(Connection c, byte status, String reason, long handle)
-    {
+    protected void sendErrorResponse(Connection c, byte status, String reason, long handle) {
         ClientResponseImpl errorResponse = new ClientResponseImpl(status, new VoltTable[0], reason, handle);
         ByteBuffer buf = ByteBuffer.allocate(errorResponse.getSerializedSize() + 4);
         buf.putInt(buf.capacity() - 4);
         errorResponse.flattenToBuffer(buf).flip();
         c.writeStream().enqueue(buf);
-        return;
     }
 
     public void setDummyMode(boolean enabled) {

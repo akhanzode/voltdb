@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2019 VoltDB Inc.
+ * Copyright (C) 2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -25,8 +25,7 @@ OffsetFetchResponsePartition::OffsetFetchResponsePartition(int16_t version, Chec
         m_leaderEpoch = in.readInt();
     }
     m_metadata = in.readString();
-
-    int16_t error = in.readShort();
+    __attribute__((unused)) int16_t error = in.readShort();
     vassert(error == 0);
 }
 
@@ -53,7 +52,7 @@ void OffsetFetchResponseTopic::write(const int16_t version, SerializeOutput& out
 OffsetFetchResponse::OffsetFetchResponse(int16_t version, CheckedSerializeInput& in) {
     in.readComponents(version, m_topics);
     if (version >= 2) {
-        int16_t error = in.readShort();
+        __attribute__((unused)) int16_t error = in.readShort();
         vassert(error == 0);
     }
 }

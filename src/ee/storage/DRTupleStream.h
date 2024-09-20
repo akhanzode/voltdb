@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -122,7 +122,27 @@ private:
      */
     bool updateParHash(bool isReplicatedTable, int64_t parHash);
 
-    void writeEventData(DREventType type, ByteArray payloads);
+    void writeEventData(DREventType type, ByteArray payloads, int64_t spHandle);
+
+    /**
+     * Update either m_lastCommittedMpUniqueId or m_lastCommittedSpUniqueId with uniqueId and update block if it is not
+     * null
+     */
+    inline void updateLastUniqueId(int64_t uniqueId, DrStreamBlock* block) {
+        if (UniqueId::isMpUniqueId(uniqueId)) {
+            vassert(m_lastCommittedMpUniqueId <= uniqueId);
+            m_lastCommittedMpUniqueId = uniqueId;
+            if (block != nullptr) {
+                m_currBlock->recordCompletedMpTxnForDR(uniqueId);
+            }
+        } else {
+            vassert(m_lastCommittedSpUniqueId <= uniqueId);
+            m_lastCommittedSpUniqueId = uniqueId;
+            if (block != nullptr) {
+                m_currBlock->recordCompletedUniqueId(uniqueId);
+            }
+        }
+    }
 
     const DRTxnPartitionHashFlag m_initialHashFlag;
     DRTxnPartitionHashFlag m_hashFlag;

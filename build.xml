@@ -44,6 +44,15 @@
     <equals arg1="${build}" arg2="memcheck"/>
 </condition>
 
+<!-- IF BUILDING BUILD FROM INTERNAL SET THE NAME OF THE LICENSE  -->
+<condition property="editiontypeMatch">
+    <equals arg1="${voltdb_editiontype}" arg2="developer" />
+</condition>
+
+<!-- IF BUILDING WHITELABEL BUILD  -->
+<condition property="final.build" value="WHITELABEL" else="voltdb" >
+    <equals arg1="${voltdb_whitelabeltype}" arg2="true" />
+</condition>
 
 <!-- make environment var foo available as env.foo -->
 <property environment="env"/>
@@ -65,8 +74,8 @@
 </condition>
 
 <!-- stub the voltpro classpath and src.dir fileset so a fileset with this id always exists -->
-<fileset id="voltpro.classpath" file="." excludes="**"/>
-<fileset id="voltpro.src.dir" file="." excludes="**"/>
+<path id="voltpro.classpath" />
+<path id="voltpro.src.dir" />
 
 <!-- import the pro build.xml if it exists and is requested -->
 <import file="${voltpro}/build.xml" optional="true"/>
@@ -118,7 +127,6 @@
 <property name='cmake.verbose.build'         value='no' />
 <property name='cmake.verbose.config'        value='no' />
 <property name='cmake.build.maxcores'        value='-1' />
-
 
 <!-- os.mac is set when build is running on Mac OSX -->
 <condition property="os.mac">
@@ -188,7 +196,7 @@
         <exclude name='yuicompressor-2.4.8.jar' />
     </fileset>
     <pathelement path="${java.class.path}"/>
-    <fileset refid="voltpro.classpath"/>
+    <path refid="voltpro.classpath"/>
 </path>
 
 <patternset id='junit.exclusions'>
@@ -302,6 +310,7 @@
     <include name='org/voltdb/canonicalddl/TestCanonicalDDLThroughSQLcmd.class' />
     <include name='org/voltdb/catalog/Test*.class' />
     <include name='org/voltdb/common/TestPermission.class' />
+    <include name='org/voltdb/compiler/TestCompilerCanary.class' />
     <include name='org/voltdb/compiler/TestAsyncCompilerAgent.class' />
     <include name='org/voltdb/compiler/TestCatalogVersionUpgrade.class' />
     <include name='org/voltdb/compiler/TestClassMatcher.class' />
@@ -311,6 +320,8 @@
     <include name='org/voltdb/compiler/TestPartitionDDL.class' />
     <include name='org/voltdb/compiler/TestProcCompiler.class' />
     <include name='org/voltdb/compiler/TestVoltCompiler.class' />
+    <include name='org/voltdb/compiler/TestVoltCompilerTableExport.class' />
+    <include name='org/voltdb/compiler/TestCopyParamsMsg.class' />
     <include name='org/voltdb/exportclient/TestJDBCExportClient.class' />
     <include name='org/voltdb/exportclient/decode/TestEndpointExpander.class' />
     <include name='org/voltdb/exportclient/decode/TestJsonObjectDecoer.class' />
@@ -319,9 +330,10 @@
     <include name='org/voltdb/exportclient/kafka/TestKafkaExportClient.class' />
     <include name='org/voltdb/groovy/TestGroovyDeployment.class' />
     <include name='org/voltdb/importer/TestChannelDistributer.class' />
+    <include name='org/voltdb/logging/Test*.class' />
     <include name='org/voltdb/np/Test*.class' />
     <include name='org/voltdb/task/Test*.class' />
-
+    <include name='org/voltdb/e3/topics/**/Test*.class' />
     <!-- Exclude tests -->
     <patternset refid='junit.exclusions'/>
 </patternset>
@@ -595,6 +607,7 @@ DISTRIBUTION
             <include name="src/frontend/org/voltdb/VoltTable.java" />
             <include name="src/frontend/org/voltdb/VoltTableRow.java" />
             <include name="src/frontend/org/voltdb/VoltProcedure.java" />
+            <include name="src/frontend/org/voltdb/VoltCompoundProcedure.java" />
             <include name="src/frontend/org/voltdb/SQLStmt.java" />
             <include name="src/frontend/org/voltdb/VoltType.java" />
             <include name="src/frontend/org/voltdb/InProcessVoltDBServer.java" />
@@ -675,12 +688,8 @@ DISTRIBUTION
     <!-- add misc. other tools in the tools directory -->
     <copy todir="${dist.dir}/tools" >
         <fileset dir="tools" defaultexcludes="yes">
-            <include name="toolrunner.py" />
             <include name="watch_performance.py" />
             <include name="watch_flow.py" />
-            <include name="voltify" />
-            <include name="voltify-README.md" />
-            <include name="voltify.d/**" />
             <include name="kafka/**"/>
             <include name="lib/**" />
             <include name="draingen" />
@@ -717,7 +726,6 @@ DISTRIBUTION
     <exec dir='examples/voter' executable='/usr/bin/env'><arg line="bash run.sh jars"/></exec>
     <exec dir='examples/voltkv' executable='/usr/bin/env'><arg line="bash run.sh jars"/></exec>
     <exec dir='examples/windowing' executable='/usr/bin/env'><arg line="bash run.sh jars"/></exec>
-    <exec dir='examples/windowing-with-ddl' executable='/usr/bin/env'><arg line="bash run.sh jars"/></exec>
     <exec dir='examples/fraud-detection' executable='/usr/bin/env'><arg line="bash run.sh jars"/></exec>
 
     <!-- build the jars for the tutorials -->
@@ -774,21 +782,24 @@ DISTRIBUTION
     </chmod>
 
     <!-- create an archive for distribution -->
+    <property name="voltdb_editiontype" value="community"/>
     <exec executable="mv" failonerror="true">
         <arg value="${raw.dist.dir}/dist"/>
-        <arg value="${raw.dist.dir}/voltdb-community-${dist.version}"/>
+        <arg value="${raw.dist.dir}/voltdb-${voltdb_editiontype}-${dist.version}"/>
     </exec>
+    <delete file="${raw.dist.dir}/voltdb-${voltdb_editiontype}-${dist.version}/LICENSE" failonerror="false" if:set='editiontypeMatch' />
+    <copy file="LICENSE-DEV.txt" tofile="${raw.dist.dir}/voltdb-${voltdb_editiontype}-${dist.version}/LICENSE" overwrite="true" if:set='editiontypeMatch' />
     <exec executable="tar" failonerror="true">
         <arg value="-cz"/>
         <arg value="-C"/>
         <arg value="${raw.dist.dir}"/>
         <arg value="-f"/>
-        <arg value="${raw.dist.dir}/voltdb-community-${dist.version}.tar.gz"/>
-        <arg value="voltdb-community-${dist.version}"/>
+        <arg value="${raw.dist.dir}/${final.build}-${voltdb_editiontype}-${dist.version}.tar.gz"/>
+        <arg value="voltdb-${voltdb_editiontype}-${dist.version}"/>
     </exec>
     <!-- move it back to dist directory for downstream dependencies -->
     <exec executable="mv" failonerror="true">
-        <arg value="${raw.dist.dir}/voltdb-community-${dist.version}"/>
+        <arg value="${raw.dist.dir}/voltdb-${voltdb_editiontype}-${dist.version}"/>
         <arg value="${raw.dist.dir}/dist"/>
     </exec>
 
@@ -832,7 +843,6 @@ DISTRIBUTION
             <include name="examples/voltkv/run.sh"/>
             <include name="examples/voter/run.sh"/>
             <include name="examples/windowing/run.sh"/>
-            <include name="examples/windowing-with-ddl/run.sh"/>
             <include name="examples/fraud-detection/run.sh"/>
             <include name="bin/sqlcmd"/>
         </fileset>
@@ -968,7 +978,6 @@ CLEANING
   <exec dir='examples/voltkv' executable='/usr/bin/env'><arg line="bash run.sh cleanall"/></exec>
   <exec dir='examples/voter' executable='/usr/bin/env'><arg line="bash run.sh cleanall"/></exec>
   <exec dir='examples/windowing' executable='/usr/bin/env'><arg line="bash run.sh cleanall"/></exec>
-  <exec dir='examples/windowing-with-ddl' executable='/usr/bin/env'><arg line="bash run.sh cleanall"/></exec>
   <exec dir='examples/fraud-detection' executable='/usr/bin/env'><arg line="bash run.sh cleanall"/></exec>
 
   <exec dir='doc/tutorials/helloworld' executable='/usr/bin/env'><arg line="bash run.sh clean"/></exec>
@@ -1051,8 +1060,8 @@ JAR BUILDING
   <loadfile property='dist.version' srcFile='version.txt'>
       <filterchain><striplinebreaks/></filterchain>
   </loadfile>
-  <exec dir="." executable="tools/getgitinfo.py">
-      <arg line='${dist.version}' />
+  <exec dir="." executable="python3">
+      <arg line='tools/getgitinfo.py ${dist.version}' />
   </exec>
 </target>
 
@@ -1063,6 +1072,7 @@ JAR BUILDING
             <include name="**"/>
         </fileset>
         <fileset dir="${build.prod.dir}" defaultexcludes="yes">
+            <exclude name="org/voltdb/licensetool/**"/>
             <include name="org/voltdb/**"/>
             <include name="org/voltcore/**"/>
             <include name="org/hsqldb_voltpatches/**" />
@@ -1189,14 +1199,6 @@ JAR BUILDING
     </ant>
 </target>
 
-<target name="voltdbthin.jar" depends="compile" description="used by testability-explorer">
-    <jar destfile="${build.prod.dir}/voltdbthin.jar">
-        <fileset dir="${build.prod.dir}" defaultexcludes="yes" >
-            <include name="org/voltdb/**" />
-        </fileset>
-    </jar>
-</target>
-
 <target name="voltdbfat.jar" depends="compile, buildinfo">
     <jar destfile="${build.prod.dir}/voltdbfat.jar">
         <fileset dir="${build.prod.dir}" defaultexcludes="yes" >
@@ -1306,7 +1308,6 @@ JAVA COMPILATION
     <mkdir dir='${build.testproc.dir}' />
     <mkdir dir='${build.testfunc.dir}' />
 
-    <exec dir='${src.gpl.dir}/org/voltdb/utils' executable='${src.gpl.dir}/org/voltdb/utils/generate_logkeys.py' failonerror='true' />
     <depend
         srcdir="${src.hsqldb.dir}:${src.hsqldb.test.dir}:${src.gpl.dir}:${src.test.dir}:${src.testproc.dir}:${src.testfunc.dir}:${vendor.src.dir}"
         destdir="${build.prod.dir}:${build.test.dir}:${build.testproc.dir}:${build.testfunc.dir}"
@@ -1480,10 +1481,10 @@ NATIVE EE STUFF
 -->
 
 <target name='catalog' depends="buildinfo" description="Generate catalog source code.">
-    <exec dir="${src.catalog.dir}" executable='python' failonerror='true'>
+    <exec dir="${src.catalog.dir}" executable='python3' failonerror='true'>
         <arg line="catalog.py"/>
     </exec>
-    <exec dir="${src.catalog.dir}" executable='python' failonerror='true'>
+    <exec dir="${src.catalog.dir}" executable='python3' failonerror='true'>
         <arg line="install.py"/>
     </exec>
 
@@ -1501,9 +1502,11 @@ NATIVE EE STUFF
     <delete file="${src.ee.dir}/org_voltdb_jni_ExecutionEngine.h" />
     <delete file="${src.ee.dir}/org_voltcore_utils_DBBPool.h" />
     <delete file="${src.ee.dir}/org_voltdb_utils_PosixAdvise.h" />
+    <delete file="${src.ee.dir}/org_voltdb_utils_DirectIoFileChannel.h" />
     <move file='${build.dir}/org_voltdb_jni_ExecutionEngine.h' todir='${src.ee.dir}' />
     <move file='${build.dir}/org_voltcore_utils_DBBPool.h' todir='${src.ee.dir}' />
     <move file='${build.dir}/org_voltdb_utils_PosixAdvise.h' todir='${src.ee.dir}' />
+    <move file="${build.dir}/org_voltdb_utils_DirectIoFileChannel.h" todir='${src.ee.dir}' />
 </target>
 
 
@@ -1513,6 +1516,7 @@ NATIVE EE STUFF
             <filesmatch file1="${src.ee.dir}/org_voltdb_jni_ExecutionEngine.h" file2="${build.dir}/org_voltdb_jni_ExecutionEngine.h" />
             <filesmatch file1="${src.ee.dir}/org_voltcore_utils_DBBPool.h" file2="${build.dir}/org_voltcore_utils_DBBPool.h" />
             <filesmatch file1="${src.ee.dir}/org_voltdb_utils_PosixAdvise.h" file2="${build.dir}/org_voltdb_utils_PosixAdvise.h" />
+            <filesmatch file1="${src.ee.dir}/org_voltdb_utils_DirectIoFileChannel.h" file2="${build.dir}/org_voltdb_utils_DirectIoFileChannel.h" />
         </and>
     </condition>
 </target>
@@ -1521,9 +1525,11 @@ NATIVE EE STUFF
     <delete file="${build.dir}/org_voltdb_jni_ExecutionEngine.h"/>
     <delete file="${build.dir}/org_voltcore_utils_DBBPool.h" />
     <delete file="${build.dir}/org_voltdb_utils_PosixAdvise.h" />
+    <delete file="${build.dir}/org_voltdb_utils_DirectIoFileChannel.h" />
     <javah classpathref="project.classpath" force="yes" verbose="yes" class="org.voltdb.jni.ExecutionEngine" destdir="${build.dir}" />
     <javah classpathref="project.classpath" force="yes" verbose="yes" class="org.voltcore.utils.DBBPool" destdir="${build.dir}" />
     <javah classpathref="project.classpath" force="yes" verbose="yes" class="org.voltdb.utils.PosixAdvise" destdir="${build.dir}" />
+    <javah classpathref="project.classpath" force="yes" verbose="yes" class="org.voltdb.utils.DirectIoFileChannel" destdir="${build.dir}" />
 </target>
 
 <target name='eeconfig' depends='catalog, jnicompile, buildinfo'
@@ -1636,7 +1642,7 @@ LICENSING
 -->
 
 <target name='licensecheck' description="make sure all source files have approved licenses">
-    <exec dir='.' executable='python' failonerror='true'>
+    <exec dir='.' executable='python3' failonerror='true'>
         <arg line="tools/licensescheck.py" />
         <arg line="${voltpro}"/>
     </exec>
@@ -1655,7 +1661,7 @@ TEST CASES
     <property name='echoserver.command' value="java
     -classpath ${classpath} -server -Xmx256m -ea
     org.voltdb.messaging.EchoServer" />
-    <exec dir='tests/scripts/' executable='python' failonerror='true'>
+    <exec dir='tests/scripts/' executable='python3' failonerror='true'>
         <arg line="Testvoltdbclient.py"/>
         <arg line='"${echoserver.command}"'/>
     </exec>
@@ -1788,7 +1794,7 @@ TEST CASES
              1. ensure a result xml file got written
              2. ensure no whacky processes were stranded -->
         <exec executable="/usr/bin/env">
-            <arg value="python" />
+            <arg value="python3" />
             <arg value="${base.dir}/tools/junit-post-process.py" />
             <arg value="--testname=${testname}" />
             <arg value="--outputpath=${build.testoutput.dir}" />
@@ -1947,7 +1953,7 @@ TEST CASES
         <mkdir dir='${build.testoutput.dir}' />
         <mkdir dir='${build.dir}/testoutput-archive/' />
         <exec executable="/usr/bin/env" failonerror='true'>
-            <arg value="python" />
+            <arg value="python3" />
             <arg value="${base.dir}/tools/junit-pre-process.py" />
             <arg value="--archivepath=${build.dir}/testoutput-archive/" />
             <arg value="--outputpath=${build.testoutput.dir}" />
@@ -2052,23 +2058,6 @@ TEST CASES
     </jacoco:report>
 </target>
 
-<target name='testability-report' depends="voltdbthin.jar"
-    description="produce Google Code testability-explorer report">
-    <path id="testability.lib">
-        <pathelement location="${vendor.lib.dir}/ant-testability-explorer.jar" />
-        <pathelement location="${vendor.lib.dir}/testability-explorer.jar" />
-    </path>
-    <taskdef name="testability" classname="com.google.ant.TestabilityTask" classpathref="testability.lib" />
-    <testability resultfile="${build.dir}/testability.result.html" print="html"
-        errorfile="${build.dir}/testability.err.txt">
-        <classpath>
-            <fileset dir="${build.prod.dir}">
-                <include name="voltdbthin.jar" />
-            </fileset>
-        </classpath>
-    </testability>
-</target>
-
 <target name="cpd">
     <taskdef name="cpdtask" classname="net.sourceforge.pmd.cpd.CPDTask" classpath="${vendor.lib.dir}/pmd-4.2.5.jar" />
     <macrodef name="cpd">
@@ -2111,11 +2100,19 @@ TEST CASES
         <isset property="enableiv2"/>
     </condition>
 
+    <fileset id='junit.tests' dir='${build.test.dir}'>
+        <include name="**/${junitclass}.class"/>
+    </fileset>
+
+    <fail message='No such test as ${junitclass}'>
+        <condition>
+            <resourcecount refid='junit.tests' count='0'/>
+        </condition>
+    </fail>
+
     <run_junit>
         <tests>
-            <fileset dir='${build.test.dir}'>
-              <include name="**/${junitclass}.class"/>
-            </fileset>
+            <fileset refid="junit.tests"/>
         </tests>
     </run_junit>
     <fail if="junit.failures" message="JUnit had failures" />
@@ -2161,8 +2158,6 @@ TEST CASES
     <samplecheck app="voter" />
     <echo>checking windowing</echo>
     <samplecheck app="windowing" />
-    <echo>checking windowing-with-ddl</echo>
-    <samplecheck app="windowing-with-ddl" />
 </target>
 
 <target name='sqlcoverage' depends="ee,compile"
@@ -2265,9 +2260,10 @@ TEST CASES
         <include name="version.txt"/>
       </fileset>
     </copy>
-    <exec dir='tests/sqlcoverage' executable='python2.7' failonerror="${sqlcoverage.failonerror}">
+    <exec dir='tests/sqlcoverage' executable='python2' failonerror="${sqlcoverage.failonerror}">
         <env key="TEST_DIR" value="${build.testobjects.dir}" />
         <env key="VOLTDB_BUILD_DIR" value="${build.dir}"/>
+        <env key="VOLT_JUSTATEST" value="true" />
         <arg line='sql_coverage_test.py' />
         <arg line="${config_seed}" />
         <arg line="${config_config}" />
@@ -2315,7 +2311,7 @@ TEST CASES
           <include name='*.jar' />
       </fileset>
       <pathelement location="${build.test.dir}" />
-      <fileset refid="voltpro.classpath"/>
+      <path refid="voltpro.classpath"/>
     </auxClasspath>
     <sourcePath path="${src.gpl.dir}" />
     <sourcePath path="${voltpro.src.dir}"/>
@@ -2402,7 +2398,7 @@ TEST CASES
         <isset property="reportpath"/>
     </condition>
 
-    <exec dir='${sqlcmdtest.dir}' executable='python2.7' failonerror="true">
+    <exec dir='${sqlcmdtest.dir}' executable='python2' failonerror="true">
         <arg value='sqlcmdtest.py' />
     </exec>
 </target>
@@ -2424,87 +2420,10 @@ TEST CASES
         <isset property="reportpath"/>
     </condition>
 
-    <exec dir='${sqlcmdtest.dir}' executable='python2.7' failonerror="true">
+    <exec dir='${sqlcmdtest.dir}' executable='python2' failonerror="true">
         <arg value='sqlcmdtest.py' />
         <arg value='--refresh' />
     </exec>
-</target>
-
-<!--
-***************************************
-BENCHMARKS
-***************************************
--->
-
-<target name='proccallmicrobench' depends='ee, compile'
-    description="Run client-server stored procedure call overhead microbenchmark. [-Dclients={# clients}]">
-    <java fork="true" failonerror="true"
-        classname="org.voltdb.ProcedureCallMicrobench" >
-        <arg value='${clients}' />
-        <jvmarg value="-server" />
-        <jvmarg value="-Xmx512m" />
-        <classpath refid='project.classpath' />
-        <assertions><disable /></assertions>
-    </java>
-</target>
-
-<target name='update_logging' depends='compile'
-    description="Invoke utility that connects to the specified VoltDB host and calls @UpdateLogging system procedure with the specified XML confiG file">
-    <java fork="true" failonerror="true"
-        classname="org.voltdb.UpdateLogging" >
-        <arg value='host=${host}' />
-        <arg value='config=${config}' />
-        <arg value='allHosts=${allHosts}' />
-        <arg value='user=${user}' />
-        <arg value='password=${password}' />
-        <classpath refid='project.classpath' />
-        <assertions><enable /></assertions>
-    </java>
-</target>
-
-<target name='tcp_throughput_sender' depends='compile'
-    description="Open a TCP connection and send fixed sized packets for a specified duration.">
-    <java fork="true" failonerror="true"
-        classname="org.voltdb.TCPThroughputSender" >
-        <jvmarg value="-server" />
-        <jvmarg value="-Xmx512m" />
-        <arg value='${address}' />
-        <arg value='${packetsize}' />
-        <arg value='${seconds}' />
-        <arg value='${numsockets}' />
-        <classpath refid='project.classpath' />
-        <assertions><enable /></assertions>
-    </java>
-</target>
-
-<target name='tcp_throughput_receiver' depends='compile'
-  description="Accept a TCP connection and log how many messages and bytes are received.">
-    <java fork="true" failonerror="true"
-        classname="org.voltdb.TCPThroughputReceiver" >
-        <jvmarg value="-server" />
-        <jvmarg value="-Xmx512m" />
-        <arg value="${respond}" />
-        <arg value="${responsesize}" />
-        <arg value="${packetsize}" />
-        <classpath refid='project.classpath' />
-        <assertions><enable /></assertions>
-    </java>
-</target>
-
-<!--
-***************************************
-JAPEX MICROBENCHMARKS
-***************************************
--->
-
-<target name='microbenchmarks' description="Run all micro-benchmarks.">
-    <!-- don't fail on error: jpeg generator requires sun jdk -->
-    <java fork="true" classname="com.sun.japex.Japex">
-        <jvmarg value="-server"/>
-        <classpath refid="project.classpath"/>
-        <jvmarg value="-Djapex.numberOfThreads=1"/>
-        <arg line="microbenchmark-config.xml"/>
-    </java>
 </target>
 
 <!--

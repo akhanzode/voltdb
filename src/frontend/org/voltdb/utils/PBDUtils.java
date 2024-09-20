@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -24,6 +24,11 @@ import java.nio.channels.FileChannel;
 import java.util.zip.CRC32;
 
 public class PBDUtils {
+    public static class ConfigurationException extends Exception {
+        private static final long serialVersionUID = 1L;
+        ConfigurationException() { super(); }
+        ConfigurationException(String s) { super(s); }
+    }
 
     public static void writeBuffer(FileChannel fc, ByteBuffer buf, int startPos) throws IOException
     {

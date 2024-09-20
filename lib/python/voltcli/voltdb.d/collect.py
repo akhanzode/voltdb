@@ -1,5 +1,5 @@
 # This file is part of VoltDB.
-# Copyright (C) 2008-2020 VoltDB Inc.
+# Copyright (C) 2008-2022 Volt Active Data Inc.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -21,8 +21,8 @@ from voltcli import utility
 collect_help = ('Collect logs on the current node for problem analysis')
 
 dir_spec_help = ('root directory for the database. The default is the current working directory.')
-output_help = ('file name to store collect data in compressed format. The default is the '
-               '\'voltdb_collect_<hostname or IP>.zip\' in the current working directory.')
+output_help = ('file name to store collect data in compressed format. \'-\' means standard output. '
+                'The default is the \'voltdb_collect_<hostname or IP>.zip\' in the current working directory.')
 
 
 @VOLT.Command(
@@ -31,7 +31,7 @@ output_help = ('file name to store collect data in compressed format. The defaul
         VOLT.StringOption (None, '--prefix', 'prefix',
                            'file name prefix for uniquely identifying collection. (Deprecated. Please use --output).',
                            default = ''),
-        VOLT.StringOption('-o', '--output', 'output', output_help, default=''),
+        VOLT.PathOption('-o', '--output', 'output', output_help, default=''),
         VOLT.BooleanOption(None, '--dry-run', 'dryrun',
                            'list the log files without collecting them.',
                            default = False),
@@ -41,12 +41,13 @@ output_help = ('file name to store collect data in compressed format. The defaul
         VOLT.IntegerOption(None, '--days', 'days',
                            'number of days of files to collect (files included are log, crash files), Current day value is 1.',
                            default = 7),
-        VOLT.StringOption('-D', '--dir', 'directory_spec', dir_spec_help, default=''),
-        VOLT.BooleanOption('-f', '--force', 'force', 'Overwrite the existing file.', default = False)
+        VOLT.PathOption('-D', '--dir', 'directory_spec', dir_spec_help, default=''),
+        VOLT.BooleanOption('-f', '--force', 'force', 'Overwrite the existing file.', default = False),
     ),
     arguments = (
         VOLT.PathArgument('voltdbroot', 'the voltdbroot path. (Deprecated. Please use --dir).', absolute = True, optional=True, default=None)
-    )
+    ),
+    log4j_default = ('utility-log4j.xml', 'log4j.xml')
 )
 
 def collect(runner):

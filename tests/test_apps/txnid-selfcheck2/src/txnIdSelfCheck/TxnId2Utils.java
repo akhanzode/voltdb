@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -23,14 +23,14 @@
 
 package txnIdSelfCheck;
 
+import java.io.IOException;
+import java.security.SecureRandom;
+
 import org.voltcore.logging.VoltLogger;
 import org.voltdb.client.Client;
 import org.voltdb.client.ClientResponse;
 import org.voltdb.client.NoConnectionsException;
 import org.voltdb.client.ProcCallException;
-import java.security.SecureRandom;
-
-import java.io.IOException;
 
 public enum TxnId2Utils {;
 
@@ -55,6 +55,7 @@ public enum TxnId2Utils {;
                 statusString.matches(".*Server is currently unavailable; try again later.*") ||
                 statusString.matches(".*Server is paused.*") ||
                 statusString.matches("(?s).*Server is shutting down.*") ||
+                statusString.matches(".*Procedure call not queued: timed out waiting for host connection.*") ||
                 statusString.matches("(?s).*VoltDB failed to create the transaction internally.*it should be safe to resend the work, as the work was never started.*"); /*-5 SERVER_UNAVAILABLE*/
     }
 
@@ -67,6 +68,20 @@ public enum TxnId2Utils {;
         String statusString = cr.getStatusString();
         return (statusString.matches("(?s).*No response received in the allotted time.*") ||
                 statusString.matches(".*Connection to database host \\(.*\\) was lost before a response was received.*"));
+    }
+
+    static boolean isServerUnavailableStatus(byte status) {
+        switch (status) {
+        case ClientResponse.CONNECTION_LOST:
+        case ClientResponse.CONNECTION_TIMEOUT:
+        case ClientResponse.SERVER_UNAVAILABLE:
+        case ClientResponse.CLIENT_REQUEST_TIMEOUT:
+        case ClientResponse.CLIENT_RESPONSE_TIMEOUT:
+        case ClientResponse.RESPONSE_UNKNOWN:
+            return true;
+        default:
+            return false;
+        }
     }
 
 

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -60,7 +60,6 @@ import org.voltdb.exportclient.PersistedMetadata;
 import org.voltdb.iv2.MpInitiator;
 import org.voltdb.snmp.SnmpTrapSender;
 import org.voltdb.utils.BinaryDequeReader;
-import org.voltdb.utils.VoltFile;
 
 import com.google_voltpatches.common.base.Preconditions;
 import com.google_voltpatches.common.base.Throwables;
@@ -243,7 +242,7 @@ public class ExportDataSource implements Comparable<ExportDataSource> {
             exportLog.debug(toString() + " reads gap tracker from PBD:" + m_gapTracker.toString());
         }
 
-        m_adFile = new VoltFile(overflowPath, nonce + ".ad");
+        m_adFile = new File(overflowPath, nonce + ".ad");
         if (exportLog.isDebugEnabled()) {
             exportLog.debug("Creating ad for " + nonce);
         }
@@ -774,10 +773,17 @@ public class ExportDataSource implements Comparable<ExportDataSource> {
                         }
                         return;
                     }
+                    // In rejoin node the initial generation ID first comes from catalog on ZK, if stream
+                    // snapshot tells us a different initial generation ID, we trust it and use it as
+                    // the source of truth.
+                    if (generationIdCreated != m_committedBuffers.getGenerationIdCreated()) {
+                        m_committedBuffers.setInitialGenerationId(generationIdCreated);
+                    }
                     if (m_committedBuffers.deleteStaleBlocks(generationIdCreated)) {
                         // Stale export buffers are deleted , re-create the tracker.
                         m_gapTracker = m_committedBuffers.scanForGap();
                     }
+
                     if (action == StreamStartAction.RECOVER) {
                         m_committedBuffers.truncateToSequenceNumber(sequenceNumber);
                         // Export buffers are truncated to snapshot point

@@ -284,7 +284,7 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
-Boost 1.70
+Boost 1.76
 Boost Software License - Version 1.0 - August 17th, 2003
 
 Permission is hereby granted, free of charge, to any person or organization
@@ -521,7 +521,15 @@ Base64
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
  * OF SUCH DAMAGE.
 ================================================================================
-Log4j 1.2
+reload4j 1.2.20 https://github.com/qos-ch/reload4j
+
+
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+================================================================================
+Log4jext.jar https://cwiki.apache.org/confluence/display/LOGGINGLOG4J/DailyRollingFileAppender
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -1335,7 +1343,7 @@ Apache Cassandra GCInspector.java, MumurHash.java
 // domain. The author hereby disclaims copyright to this source code.
 
 ================================================================================
-Guava 26.0, 18.0, 19.0
+Guava 26.0, 18.0, 19.0, 31.0
 
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
@@ -1528,24 +1536,6 @@ ant_doxygen
  * reserved.
 
 ================================================================================
-Emma
-/* Copyright (C) 2003 Vladimir Roubtsov. All rights reserved.
- *
- * This program and the accompanying materials are made available under
- * the terms of the Common Public License v1.0 which accompanies this distribution,
- * and is available at http://www.eclipse.org/legal/cpl-v10.html
- */
-
-================================================================================
-emma_ant
-/* Copyright (C) 2003 Vladimir Roubtsov. All rights reserved.
- *
- * This program and the accompanying materials are made available under
- * the terms of the Common Public License v1.0 which accompanies this distribution,
- * and is available at http://www.eclipse.org/legal/cpl-v10.html
- */
-
-================================================================================
 Gradle 1.6 (Used in the GEB automated tests of the VMC, VoltDB Management Center)
 
 /*
@@ -1573,88 +1563,6 @@ The License is accompanied by a NOTICE
    ==  the Apache License, Version 2.0,                                   ==
    ==  in this case for the Gradle distribution.                          ==
    =========================================================================
-
-================================================================================
-japex
-/*
-* Japex ver. 0.1 software ("Software")
-*
-* Copyright, 2004-2005 Sun Microsystems, Inc. All Rights Reserved.
-*
-* This Software is distributed under the following terms:
-*
-* Redistribution and use in source and binary forms, with or without
-* modification, is permitted provided that the following conditions are met:
-*
-* Redistributions of source code must retain the above copyright notice,
-* this list of conditions and the following disclaimer.
-*
-* Redistribution in binary form must reproduce the above copyright notice,
-* this list of conditions and the following disclaimer in the
-* documentation and/or other materials provided with the distribution.
-*
-* Neither the name of Sun Microsystems, Inc., 'Java', 'Java'-based names,
-* nor the names of contributors may be used to endorse or promote products
-* derived from this Software without specific prior written permission.
-*
-* The Software is provided "AS IS," without a warranty of any kind. ALL
-* EXPRESS OR IMPLIED CONDITIONS, REPRESENTATIONS AND WARRANTIES, INCLUDING
-* ANY IMPLIED WARRANTY OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
-* PURPOSE OR NON-INFRINGEMENT, ARE HEREBY EXCLUDED. SUN AND ITS LICENSORS
-* SHALL NOT BE LIABLE FOR ANY DAMAGES OR LIABILITIES SUFFERED BY LICENSEE
-* AS A RESULT OF OR RELATING TO USE, MODIFICATION OR DISTRIBUTION OF THE
-* SOFTWARE OR ITS DERIVATIVES. IN NO EVENT WILL SUN OR ITS LICENSORS BE
-* LIABLE FOR ANY LOST REVENUE, PROFIT OR DATA, OR FOR DIRECT, INDIRECT,
-* SPECIAL, CONSEQUENTIAL, INCIDENTAL OR PUNITIVE DAMAGES, HOWEVER CAUSED
-* AND REGARDLESS OF THE THEORY OF LIABILITY, ARISING OUT OF THE USE OF OR
-* INABILITY TO USE SOFTWARE, EVEN IF SUN HAS BEEN ADVISED OF THE
-* POSSIBILITY OF SUCH DAMAGES.
-*
-* You acknowledge that the Software is not designed, licensed or intended
-* for use in the design, construction, operation or maintenance of any
-* nuclear facility.
-*/
-
-================================================================================
-jcommon-1.0.16
- *********************************************
-* THE JCOMMON CLASS LIBRARY: Version 1.0.16 *
-*********************************************
-17 April 2009.
-(C)opyright, 2000-2009, by Object Refinery Limited and Contributors. 12:16
-Test-Ex: /*
- * Copyright 2007 Google Inc.
-This software is released under Apache software license as mentioned below.
-/*
-
-================================================================================
-jfreechart-1.0.13
-
-/* ===========================================================
-* JFreeChart : a free chart library for the Java(tm) platform
-* ===========================================================
-*
-* (C) Copyright 2000-2008, by Object Refinery Limited and Contributors.
-*
-* Project Info:  http://www.jfree.org/jfreechart/index.html
-*
-* This library is free software; you can redistribute it and/or modify it
-* under the terms of the GNU Lesser General Public License as published by
-* the Free Software Foundation; either version 2.1 of the License, or
-* (at your option) any later version.
-*
-* This library is distributed in the hope that it will be useful, but
-* WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
-* or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public
-* License for more details.
-*
-* You should have received a copy of the GNU Lesser General Public
-* License along with this library; if not, write to the Free Software
-* Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301,
-* USA.
-*
-* [Java is a trademark or registered trademark of Sun Microsystems, Inc.
-* in the United States and other countries.]  */
 
 ================================================================================
 junit 4.4 is licensed with the Common Public License - v1.0
@@ -1735,15 +1643,6 @@ PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
 LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-================================================================================
-testability-explorer and ant-testability-explorer
- * Copyright 2007 Google Inc.
-This software is released under Apache software license as mentioned below.
-
-/*
-
-See Apache 2.0 license below.
 
 ================================================================================
 Evan Jones Test Harness
@@ -2031,43 +1930,7 @@ VoltDB Studio | Web uses the following open source components:
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
-Voltify uses the following third party libraries:
-
-virtualenv - Python virtual runtime environment
-
-https://pypi.python.org/pypi/virtualenv
-http://travis-ci.org/pypa/virtualenv
-http://www.virtualenv.org/
-
-Copyright (c) 2007 Ian Bicking and Contributors
-Copyright (c) 2009 Ian Bicking, The Open Planning Project
-Copyright (c) 2011-2013 The virtualenv developers
-
-Permission is hereby granted, free of charge, to any person obtaining
-a copy of this software and associated documentation files (the
-"Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish,
-distribute, sublicense, and/or sell copies of the Software, and to
-permit persons to whom the Software is furnished to do so, subject to
-the following conditions:
-
-The above copyright notice and this permission notice shall be
-included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
-LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
-WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-schemaobject - MySQL live schema parser
-
-http://matuson.com/code/schemaobject/
-git://github.com/mmatuson/SchemaObject.git
-
-Copyright 2009-2010 Mitch Matuson
+kafka-clients-3.1.0 uses following License:
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -2082,27 +1945,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 ================================================================================
-Kafka Uses following Licenses:
-
-Kafka License:
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-
-Metrics:
-/**
- * License : Apache 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- */
-================================================================================
-kafka-avro-serializer-3.0.0 uses the following license:
+kafka-avro-serializer-7.1.0 uses the following license:
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -2117,7 +1960,22 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 ================================================================================
-kafka-schema-registry-client-5.3.2 uses the following license:
+kafka-schema-registry-client-7.1.0 uses the following license:
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+================================================================================
+kafka-schema-serializer-7.1.0 uses the following license:
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -2192,7 +2050,7 @@ Jackson 1.9.13,  2.5.3 uses the following license:
    limitations under the License.
 
 ================================================================================
-Avro 1.7.7 uses the following license:
+Avro 1.11.0 uses the following license:
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -3311,7 +3169,7 @@ needed for netty's util package
  * limitations under the License.
  */
 =========================================================================================
-cron-java8-1.5
+cron-java8-1.7
 License URL: https://github.com/frode-carlsen/cron/blob/master/LICENSE
 Site: https://github.com/frode-carlsen/cron
 /*
@@ -3361,7 +3219,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ================================================================================
-commons-io-1.4.jar (For test ONLY)
+commons-io-1.4.jar
 Apache Commons IO
 Copyright 2002-2010 The Apache Software Foundation
 
@@ -3379,5 +3237,19 @@ The Apache Software Foundation (http://www.apache.org/).
 
 Apache License Version 2.0
 ================================================================================
+awaitility-4.1.1.jar (For test ONLY)
+Awaitility
 
+Site: https://github.com/awaitility/awaitility
+License URL: https://github.com/awaitility/awaitility/blob/master/LICENSE
 
+Apache License Version 2.0
+================================================================================
+assertj-core-3.22.0.jar (For test ONLY)
+AssertJ Core
+
+Site: https://github.com/assertj/assertj-core
+License URL: https://github.com/assertj/assertj-core/blob/5e4779c76ae0fffc6c44f174cd54dfbdefa9b57f/LICENSE.txt
+
+Apache License Version 2.0
+================================================================================

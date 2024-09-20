@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -25,6 +25,7 @@ public enum StatsSelector {
     PROCEDURE,
     STARVATION,
     QUEUE,
+    QUEUEPRIORITY,
     IDLETIME(STARVATION),
     INITIATOR,
     LATENCY(false),
@@ -33,7 +34,9 @@ public enum StatsSelector {
     PARTITIONCOUNT,
     IOSTATS,
     MEMORY,           // info about node's memory usage
-    LIVECLIENTS,      // info about the currently connected clients
+    LIVECLIENTS_CONNECTIONS,      // info about the currently connected clients
+    LIMITS,
+    LIVECLIENTS(LIVECLIENTS_CONNECTIONS, LIMITS),
     PLANNER,          // info about planner and EE performance and cache usage
     CPU,            // return CPU Stats
     MANAGEMENT(MEMORY, INITIATOR, PROCEDURE, IOSTATS, TABLE, INDEX, STARVATION, QUEUE, CPU), // Returns pretty much everything
@@ -45,19 +48,22 @@ public enum StatsSelector {
     PROCEDUREDETAIL(PROCEDURE),  // provides more granular statistics for procedure calls at a per-statement level.
 
     /*
-     * DRPRODUCERPARTITION and DRPRODUCERNODE are internal names
+     * DRPRODUCERPARTITION, DRPRODUCERNODE and DRPRODUCERCLUSTER are internal names
      * Externally the selector is "DRPRODUCER", or just "DR"
      */
     DRPRODUCERPARTITION(false),
     DRPRODUCERNODE(false),
-    DR(DRPRODUCERPARTITION, DRPRODUCERNODE),
+    DRPRODUCERCLUSTER(false),
+    DR(DRPRODUCERPARTITION, DRPRODUCERNODE, DRPRODUCERCLUSTER),
     DRPRODUCER(DR.subSelectors()),
 
+    DRCONSUMERCLUSTER(false),
     DRCONSUMERNODE(false),
     DRCONSUMERPARTITION(false),
-    DRCONSUMER(DRCONSUMERNODE, DRCONSUMERPARTITION),
+    DRCONSUMER(DRCONSUMERNODE, DRCONSUMERPARTITION, DRCONSUMERCLUSTER),
 
     DRROLE(false),
+    DRCONFLICTS,
 
     TOPO,           // return leader and site info for iv2
     TTL,            // return time to live info
@@ -73,27 +79,39 @@ public enum StatsSelector {
     TASK(false),
     TASK_SCHEDULER(false, TASK),
     TASK_PROCEDURE(false, TASK),
-    SYSTEM_TASK(false);
+    SYSTEM_TASK(false),
+
+    // Activity summary for use by 'operator' functions
+    SHUTDOWN_CHECK,
+    STOP_CHECK,
+    PAUSE_CHECK,
+    XDCR_READINESS,
+    // End of 'operator' support
+
+    CLOCKSKEW,
+    COMPOUNDPROCSUMMARY(PROCEDURE),
+    COMPOUNDPROC(PROCEDURE),
+    COMPOUNDPROCCALLS;
 
     /** Whether or not this stat supports interval collection */
     private final boolean m_supportsInterval;
     /** Mapping to actual stat(s) to collect which are registered in the system */
     private final StatsSelector[] m_subSelctors;
 
-    private StatsSelector(boolean supportsInterval, StatsSelector... subSelectors) {
+    StatsSelector(boolean supportsInterval, StatsSelector... subSelectors) {
         m_supportsInterval = supportsInterval;
         m_subSelctors = subSelectors == null ? new StatsSelector[] { this } : subSelectors;
     }
 
-    private StatsSelector(boolean supportsInterval) {
+    StatsSelector(boolean supportsInterval) {
         this(supportsInterval, (StatsSelector[]) null);
     }
 
-    private StatsSelector(StatsSelector... subSelectors) {
+    StatsSelector(StatsSelector... subSelectors) {
         this(true, subSelectors);
     }
 
-    private StatsSelector() {
+    StatsSelector() {
         this(true);
     }
 

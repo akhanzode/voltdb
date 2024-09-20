@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -47,6 +47,8 @@
 #include "GeographyValue.hpp"
 #include "utf8.h"
 #include "murmur3/MurmurHash3.h"
+#define BOOST_STACKTRACE_GNU_SOURCE_NOT_REQUIRED
+#include <boost/stacktrace.hpp>
 
 namespace voltdb {
 
@@ -540,6 +542,25 @@ class NValue {
         }
     };
 
+    std::string toCsvString() const {
+        const ValueType type = getValueType();
+        if (type == ValueType::tTIMESTAMP) {
+            std::stringstream value;
+            streamTimestamp(value, true);
+            return value.str();
+        } else if (type == ValueType::tDOUBLE) {
+            // Formatting with 17 precision digits to try remaining compatible with Java;
+            // Java literature claims a precision of 16 digits but tests show up to 17 or sometimes more.
+            // Note that this formating fails to match the values issued in Java. One example is C++ adding
+            // trailing zeroes, or a rounding difference in the least significant precision digit.
+            char mbstr[128];
+            snprintf(mbstr, sizeof(mbstr), "%.17f", getDouble());
+            return std::string(mbstr);
+        } else {
+            return toString();
+        }
+    }
+
     /* Return a string full of arcana and wonder. */
     std::string debug() const;
     std::string toString() const {
@@ -569,8 +590,7 @@ class NValue {
                 streamSQLFloatFormat(value, getDouble());
                 break;
             case ValueType::tDECIMAL:
-                value << createStringFromDecimal();
-                break;
+                return createStringFromDecimal();
             case ValueType::tVARCHAR:
                 {
                     int32_t length;
@@ -591,6 +611,10 @@ class NValue {
             case ValueType::tTIMESTAMP:
                 streamTimestamp(value);
                 break;
+            case ValueType::tPOINT:
+                return getGeographyPointValue().toWKT();
+            case ValueType::tGEOGRAPHY:
+                return getGeographyValue().toWKT();
             default:
                 throwCastSQLException(type, ValueType::tVARCHAR);
         }
@@ -1247,8 +1271,23 @@ private:
                     break;
                 }
             case ValueType::tVARCHAR:
-                retval.getBigInt() = static_cast<int64_t>(getNumberFromString());
+            {
+                int32_t length;
+                const char* buf = getObject_withoutNull(length);
+                char safeBuffer[length+1];
+                memcpy(safeBuffer, buf, length);
+                safeBuffer[length] = '\0';
+                std::string str(safeBuffer);
+                boost::trim(str);
+                try {
+                    retval.getBigInt() = static_cast<int64_t>(stold(str));
+                } catch (std::exception &e) {
+                    std::ostringstream oss;
+                    oss << "Could not convert to number." << str << " contains invalid character value.";
+                    throw SQLException(SQLException::data_exception_invalid_character_value_for_cast, oss.str().c_str());
+                }
                 break;
+            }
             case ValueType::tVARBINARY:
             default:
                 throwCastSQLException(type, ValueType::tBIGINT);
@@ -1501,7 +1540,7 @@ private:
         return retval;
     }
 
-    void streamTimestamp(std::stringstream& value) const;
+    void streamTimestamp(std::stringstream& value, bool millis=false) const;
 
     NValue castAsString() const {
         vassert(isNull() == false);
@@ -2792,6 +2831,7 @@ inline NValue NValue::initFromTupleStorage(const void *storage, ValueType type, 
             retval.getGeographyPointValue() = *reinterpret_cast<const GeographyPointValue*>(storage);
             break;
         default:
+            VOLT_WARN("NValue:invalid column. Stack: %s", boost::stacktrace::to_string(boost::stacktrace::stacktrace()).c_str());
             throwDynamicSQLException("NValue::initFromTupleStorage() invalid column type '%s'",
                     getTypeName(type).c_str());
     }

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -26,9 +26,7 @@ package org.voltdb.export;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
 import java.util.Map.Entry;
 
 import org.junit.After;
@@ -41,7 +39,6 @@ import org.voltdb.compiler.VoltProjectBuilder;
 import org.voltdb.compiler.deploymentfile.ServerExportEnum;
 import org.voltdb.export.TestExportBaseSocketExport.ServerListener;
 import org.voltdb.regressionsuites.LocalCluster;
-import org.voltdb.utils.VoltFile;
 
 public class TestExportAlterStreamEndToEnd extends ExportLocalClusterBase
 {
@@ -55,13 +52,11 @@ public class TestExportAlterStreamEndToEnd extends ExportLocalClusterBase
             + "     a integer not null, "
             + "     b integer not null"
             + ");";
-    private static List<String> streamNames = new ArrayList<>();
 
     @Before
     public void setUp() throws Exception
     {
         resetDir();
-        VoltFile.resetSubrootForThisProcess();
 
         VoltProjectBuilder builder = null;
         builder = new VoltProjectBuilder();
@@ -71,7 +66,6 @@ public class TestExportAlterStreamEndToEnd extends ExportLocalClusterBase
         builder.setDeadHostTimeout(30);
         // Each stream needs an exporter configuration
         String streamName = "t";
-        streamNames = new ArrayList<>(Arrays.asList(streamName));
         builder.addExport(true /* enabled */,
                          ServerExportEnum.CUSTOM, "org.voltdb.exportclient.SocketExporter",
                          createSocketExportProperties(streamName, false /* is replicated stream? */),
@@ -81,7 +75,6 @@ public class TestExportAlterStreamEndToEnd extends ExportLocalClusterBase
 
 
         m_cluster = new LocalCluster("testFlushExportBuffer.jar", 3, 2, KFACTOR, BackendTarget.NATIVE_EE_JNI);
-        m_cluster.setNewCli(true);
         m_cluster.setHasLocalServer(false);
         m_cluster.overrideAnyRequestForValgrind();
         // Config custom socket exporter
@@ -129,8 +122,7 @@ public class TestExportAlterStreamEndToEnd extends ExportLocalClusterBase
         insertToStream("t", 200, 100, client, data);
 
         client.drain();
-        TestExportBaseSocketExport.waitForExportAllRowsDelivered(client, streamNames);
-        m_verifier.verifyRows();
+        m_verifier.waitForTuplesAndVerify(client);
     }
 
     @Test
@@ -153,12 +145,11 @@ public class TestExportAlterStreamEndToEnd extends ExportLocalClusterBase
         }
 
         client.drain();
-        TestExportBaseSocketExport.waitForExportAllRowsDelivered(client, streamNames);
-        m_verifier.verifyRows();
+        m_verifier.waitForTuplesAndVerify(client);
     }
 
     @Test
-    public void testAlterStreamChangeModifers() throws Exception {
+    public void testAlterStreamChangeModifiers() throws Exception {
         Client client = getClient(m_cluster);
 
         //add data to stream table
@@ -187,7 +178,6 @@ public class TestExportAlterStreamEndToEnd extends ExportLocalClusterBase
         }
 
         client.drain();
-        TestExportBaseSocketExport.waitForExportAllRowsDelivered(client, streamNames);
-        m_verifier.verifyRows();
+        m_verifier.waitForTuplesAndVerify(client);
     }
 }

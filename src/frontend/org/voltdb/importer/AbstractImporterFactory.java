@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -69,12 +69,14 @@ public abstract class AbstractImporterFactory implements BundleActivator
      * Method that is used by the importer framework classes to create
      * an importer instance and wire it correctly for use within the server.
      *
+     * @param priority the priority of this importer
      * @param config configuration information required to create an importer instance
      * @return importer instance created for the given configuration
      */
-    public final AbstractImporter createImporter(ImporterConfig config)
+    public final AbstractImporter createImporter(int priority, ImporterConfig config)
     {
         AbstractImporter importer = create(config);
+        importer.setPriority(priority);
         importer.setImportServerAdapter(m_importServerAdapter);
         return importer;
     }

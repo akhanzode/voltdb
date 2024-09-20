@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -587,7 +587,7 @@ public class TestFragmentProgressUpdate extends TestCase {
         final long NODE_ID = 1;
 
         super.setUp();
-        VoltDB.instance().readBuildInfo("Test");
+        VoltDB.instance().readBuildInfo();
         m_warehousedata = new VoltTable(
                 new VoltTable.ColumnInfo("W_ID", VoltType.SMALLINT),
                 new VoltTable.ColumnInfo("W_NAME", VoltType.STRING),
@@ -623,6 +623,9 @@ public class TestFragmentProgressUpdate extends TestCase {
                 "",
                 0,
                 64*1024,
+                false,
+                -1,
+                false,
                 100,
                 new HashinatorConfig(ElasticHashinator.getConfigureBytes(1),
                                      0,

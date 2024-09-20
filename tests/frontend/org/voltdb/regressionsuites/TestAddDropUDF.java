@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -249,14 +249,6 @@ public class TestAddDropUDF extends RegressionSuite {
 
         cr = client.callProcedure("@AdHoc", "drop procedure proc if exists");
         assertEquals(ClientResponse.SUCCESS, cr.getStatus());
-
-        // Check tuple limit delete.
-        verifyStmtFails(client,
-                "create table R2 ( id bigint, "
-              + "limit partition rows 100 "
-              + "execute ( delete from r2 "
-              + "where add2bigint(id, id) < 100 ) )",
-              "user defined function calls are not supported: \"add2bigint\"");
 
         catalogError = catalogMatchesCompilerFunctionSet(client);
         assertEquals("", catalogError);

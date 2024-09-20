@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -110,6 +110,20 @@ public class AdhocDDLTestBase extends JUnit4LocalClusterTest {
     {
         VoltTable classes = m_client.callProcedure("@SystemCatalog", "CLASSES").getResults()[0];
         boolean found = VoltTableTestHelpers.moveToMatchingRow(classes, "CLASS_NAME", classname);
+        return found;
+    }
+
+    protected boolean findFunctionInSystemCatalog(String function) throws Exception
+    {
+        VoltTable functions = m_client.callProcedure("@SystemCatalog", "FUNCTIONS").getResults()[0];
+        boolean found = VoltTableTestHelpers.moveToMatchingRow(functions, "FUNCTION_NAME", function);
+        return found;
+    }
+
+    protected boolean findTaskInSystemCatalog(String task) throws Exception
+    {
+        VoltTable tasks = m_client.callProcedure("@SystemCatalog", "TASKS").getResults()[0];
+        boolean found = VoltTableTestHelpers.moveToMatchingRow(tasks, "TASK_NAME", task);
         return found;
     }
 

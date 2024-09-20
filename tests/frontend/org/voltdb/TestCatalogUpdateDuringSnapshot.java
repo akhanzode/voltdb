@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2019 VoltDB Inc.
+ * Copyright (C) 2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -180,7 +180,7 @@ public class TestCatalogUpdateDuringSnapshot extends JUnit4LocalClusterTest {
     private void waitForSnapshotToComplete() throws Exception {
         int attempt = 0;
         do {
-            VoltTable table = m_client.callProcedure("@SnapshotStatus").getResults()[0];
+            VoltTable table = m_client.callProcedure("@Statistics", "SnapshotStatus", 0).getResults()[0];
             boolean completed = true;
             while (table.advanceRow()) {
                 if (table.getLong("END_TIME") == 0) {

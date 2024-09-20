@@ -1,6 +1,6 @@
 #!/usr/bin/env python2.7
 # This file is part of VoltDB.
-# Copyright (C) 2008-2020 VoltDB Inc.
+# Copyright (C) 2008-2022 Volt Active Data Inc.
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -32,6 +32,7 @@ A simple script to read in a DDL file and replace
     %%TABLE ...
     + %%INDEX ...
     + %%STREAM ...
+    + %%TOPIC ...
 with generated SQL
 """
 
@@ -78,6 +79,11 @@ if __name__ == '__main__':
                 print("-- %s" % line2)
                 params = process_args(line2[8:], lineno)
                 print(generator.gen_stream(**params))
+
+            elif line2.startswith("%%TOPIC"):
+                print("-- %s" % line2)
+                params = process_args(line2[8:], lineno)
+                print(generator.gen_topic(**params))
 
             else:
                 print(line)

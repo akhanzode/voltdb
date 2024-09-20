@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2019 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -41,7 +41,7 @@ import org.junit.rules.TestName;
 import org.voltcore.logging.VoltLogger;
 import org.voltcore.utils.DBBPool;
 import org.voltcore.utils.DBBPool.BBContainer;
-import org.voltdb.utils.RetentionPolicyMgr.RetentionLimitException;
+import org.voltdb.e3.topics.TopicRetention;
 import org.voltdb.utils.TestPersistentBinaryDeque.ExtraHeaderMetadata;
 
 import com.google.common.collect.ImmutableMap;
@@ -59,7 +59,7 @@ public class TestTimeBasedRetentionPolicy {
 
     @Test(timeout=60_000)
     public void testNoReadersOneSegment() throws Exception {
-        PersistentBinaryDeque.setupRetentionPolicyMgr(1);
+        PersistentBinaryDeque.setupRetentionPolicyMgr(1, 1);
         // In this test, retention policy has only one segment to delete at a time.
         int segmentsCount = 5;
 
@@ -113,7 +113,7 @@ public class TestTimeBasedRetentionPolicy {
 
     @Test
     public void testNoReadersMultiSegments() throws Exception {
-        PersistentBinaryDeque.setupRetentionPolicyMgr(3);
+        PersistentBinaryDeque.setupRetentionPolicyMgr(3, 1);
         // In this test, retention policy may have more than one segment to delete at a time.
         int segmentsCount = 5;
         Random rand = new Random();
@@ -318,7 +318,7 @@ public class TestTimeBasedRetentionPolicy {
 
     @BeforeClass
     public static void setUpClass() {
-        PersistentBinaryDeque.setupRetentionPolicyMgr(2);
+        PersistentBinaryDeque.setupRetentionPolicyMgr(2, 1);
     }
 
     @Before
@@ -345,7 +345,6 @@ public class TestTimeBasedRetentionPolicy {
         bldr.put("10 Mn", 10L * 60_000L);
         bldr.put("2 hr", 2L * 60L * 60_000L);
         bldr.put("23 HR", 23L * 60L * 60_000L);
-        bldr.put("+3 dy", 3L * 24L * 60L * 60_000L);
         bldr.put("2mo" , 60L * 24L * 60L * 60_000L);
         bldr.put("5 yr", 5 * 365L * 24L * 60L * 60_000L);
         s_validLimits = bldr.build();
@@ -357,21 +356,23 @@ public class TestTimeBasedRetentionPolicy {
         bldr.add("-2 mn");
         bldr.add("4 days");
         bldr.add("foo 4 dy");
+        bldr.add("+3 dy");
         s_invalidLimits = bldr.build();
     }
 
     @Test
     public void testParsingLimits() throws Exception {
         for (Map.Entry<String, Long> e : s_validLimits.entrySet()) {
-            long lim = RetentionPolicyMgr.parseTimeLimit(e.getKey());
-            assertEquals(lim, e.getValue().longValue());
+            TopicRetention retention = TopicRetention.parse(e.getKey());
+            assertEquals(e.getValue().longValue(), retention.getEffectiveLimit());
         }
         for (String limStr : s_invalidLimits) {
             try {
-                RetentionPolicyMgr.parseTimeLimit(limStr);
+                TopicRetention retention = TopicRetention.parse(limStr);
+                assertEquals(retention.getPolicy(), TopicRetention.Policy.TIME);
                 fail();
             }
-            catch (RetentionLimitException expected) {
+            catch (Exception expected) {
                 ; // good
             }
         }

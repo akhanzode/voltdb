@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -61,6 +61,32 @@ public class TestSystemCatalogSuite extends RegressionSuite {
         fail("Invalid selector should have resulted in a ProcCallException but didn't");
     }
 
+    public void testUserSelector() throws IOException, ProcCallException, JSONException {
+        Client client = getClient();
+        VoltTable results = client.callProcedure("@SystemCatalog", "USERS").getResults()[0];
+
+        results.advanceRow();
+        assertEquals("bob", results.get("USER", VoltType.STRING));
+        assertEquals("user", results.get("ROLES", VoltType.STRING));
+
+        results.advanceRow();
+        assertEquals("John", results.get("USER", VoltType.STRING));
+        assertEquals("administrator,user", results.get("ROLES", VoltType.STRING));
+    }
+
+    public void testRoleSelector() throws IOException, ProcCallException, JSONException {
+        Client client = getClient();
+        VoltTable results = client.callProcedure("@SystemCatalog", "ROLES").getResults()[0];
+
+        results.advanceRow();
+        assertEquals("administrator", results.get("ROLE", VoltType.STRING));
+        assertEquals("admin,defaultproc,defaultprocread,sql,sqlread,allproc,compoundproc", results.get("PERMISSIONS", VoltType.STRING));
+
+        results.advanceRow();
+        assertEquals("user", results.get("ROLE", VoltType.STRING));
+        assertEquals("defaultproc,defaultprocread,sql,sqlread,allproc", results.get("PERMISSIONS", VoltType.STRING));
+    }
+
     public void testTablesSelector() throws IOException, ProcCallException, JSONException
     {
         Client client = getClient();
@@ -83,13 +109,6 @@ public class TestSystemCatalogSuite extends RegressionSuite {
         assertTrue(json != null && json.length() == 2 &&
                 json.get("partitionColumn").equals("A1") &&
                 json.get("sourceTable").equals("AA_T"));
-
-        results.advanceRow();
-        assertEquals("CC_T_WITH_EXEC_DELETE", results.get("TABLE_NAME", VoltType.STRING));
-        json = new JSONObject((String)results.get("REMARKS", VoltType.STRING));
-        assertTrue(json != null && json.length() == 2 &&
-                json.get("limitPartitionRowsDeleteStmt").equals("DELETE FROM CC_T_WITH_EXEC_DELETE WHERE A1=0;") &&
-                json.get("partitionColumn").equals("A1"));
 
         assertEquals(false, results.advanceRow());
     }
@@ -225,15 +244,13 @@ public class TestSystemCatalogSuite extends RegressionSuite {
         VoltProjectBuilder project = new VoltProjectBuilder();
         project.addLiteralSchema("CREATE TABLE AA_T(A1 INTEGER NOT NULL, A2 INTEGER, PRIMARY KEY(A1)); " +
                                  "CREATE VIEW BB_V(A1, S) AS SELECT A1, COUNT(*) FROM AA_T GROUP BY A1; " +
-                                 "CREATE TABLE CC_T_WITH_EXEC_DELETE "
-                                 + "(A1 INTEGER NOT NULL, "
-                                 + " A2 INTEGER, "
-                                 + "LIMIT PARTITION ROWS 5 "
-                                 + "EXECUTE (DELETE FROM CC_T_WITH_EXEC_DELETE WHERE A1 = 0));"
-                                 + "DR TABLE AA_T;");
+                                 "DR TABLE AA_T;");
         project.addPartitionInfo("AA_T", "A1");
-        project.addPartitionInfo("CC_T_WITH_EXEC_DELETE", "A1");
         project.addStmtProcedure("InsertA", "INSERT INTO AA_T VALUES(?,?);", "AA_T.A1: 0");
+        project.addUsers( new VoltProjectBuilder.UserInfo[]{
+            new VoltProjectBuilder.UserInfo("John", "ChangeMe",new String[] {"administrator","user"}),
+            new VoltProjectBuilder.UserInfo("bob", "ChangeMe",new String[] {"user"})
+        });
 
         LocalCluster lcconfig = new LocalCluster("getclusterinfo-cluster.jar", 2, 2, 1,
                                                BackendTarget.NATIVE_EE_JNI);

@@ -77,8 +77,10 @@ function srccompile() {
 function generateddl() {
     set -x
     ../ddlgen-tool.py ddl1.tmplt > ddl1.sql
-    ../ddlgen-tool.py ddl-migrate-ttl.tmplt > ddl-migrate-ttl.sql
+    ../ddlgen-tool.py ddl-export-cdc-topic.tmplt > ddl-export-cdc-topic.sql
     ../ddlgen-tool.py ddl-migrate-nottl.tmplt > ddl-migrate-nottl.sql
+    ../ddlgen-tool.py ddl-migrate-ttl.tmplt > ddl-migrate-ttl.sql
+    ../ddlgen-tool.py ddl-migrate-ttl-topic.tmplt > ddl-migrate-ttl-topic.sql
     set +x
 }
 
@@ -198,9 +200,7 @@ function async-benchmark() {
         --procedure=JiggleSinglePartition \
         --poolsize=100000 \
         --wait=0 \
-        --ratelimit=100000 \
-        --autotune=true \
-        --latencytarget=10
+        --ratelimit=100000
 }
 
 function clean-vertica() {
@@ -224,8 +224,6 @@ function async-export() {
         --port=21212 \
         --procedure=JiggleExportSinglePartition \
         --poolsize=100000 \
-        --autotune=false \
-        --latencytarget=10 \
         --ratelimit=500 \
         --usetableexport=true \
         --timeout=300
@@ -243,8 +241,6 @@ function async-export-geo() {
         --port=21212 \
         --procedure=JiggleExportGeoSinglePartition \
         --poolsize=100000 \
-        --autotune=false \
-        --latencytarget=10 \
         --ratelimit=500 \
         --timeout=300
 }

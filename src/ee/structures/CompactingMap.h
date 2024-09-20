@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -63,6 +63,11 @@ public:
     }
     // This function does nothing, and is only to offer the same API as PointerKeyValuePair.
     const void *setPointerValue(const void *value) { return NULL; }
+#ifdef VOLT_POOL_CHECKING
+        void shutdown(bool sd) { m_shutdown = sd;}
+private:
+    bool m_shutdown = false;
+#endif
 };
 
 /**
@@ -166,8 +171,14 @@ protected:
     // templated comparison function object
     // follows STL conventions
     Compare m_comper;
+#ifdef VOLT_POOL_CHECKING
+        bool m_shutdown = false;
+#endif
 
 public:
+#ifdef VOLT_POOL_CHECKING
+    void shutdown(bool sd) {m_shutdown = sd;}
+#endif
     class iterator {
         friend class CompactingMap<KeyValuePair, Compare, hasRank>;
     protected:
@@ -287,6 +298,9 @@ CompactingMap<KeyValuePair, Compare, hasRank>::~CompactingMap()
 {
     iterator iter = begin();
     while (!iter.isEnd()) {
+#ifdef VOLT_POOL_CHECKING
+        const_cast<KeyValuePair&>(iter.pair()).shutdown(m_shutdown);
+#endif
         iter.pair().~KeyValuePair();
         iter.moveNext();
     }

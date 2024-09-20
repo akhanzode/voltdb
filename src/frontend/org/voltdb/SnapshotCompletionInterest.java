@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -28,17 +28,21 @@ public interface SnapshotCompletionInterest {
 
     public static class SnapshotCompletionEvent {
         public final String path;
+        public final SnapshotPathType pathType;
         public final String nonce;
         // multipartTxnId is the txnId of the snapshot itself.
         // as well as the last snapshotted MP transaction.
         public final long multipartTxnId;
         public final Map<Integer, Long> partitionTxnIds;
         public final boolean truncationSnapshot;
+        public final boolean terminusSnapshot;
         public final boolean didSucceed;
         public final String requestId;
         public final Map<String, Map<Integer, ExportSnapshotTuple>> exportSequenceNumbers;
         public final Map<Integer, Long> drSequenceNumbers;
         public final Map<Integer, Map<Integer, Map<Integer, DRSiteDrIdTracker>>> drMixedClusterSizeConsumerState;
+        public final Map<Byte, byte[]> drCatalogCommands;
+        public final Map<Byte, String[]> replicableTables;
         public final int drVersion;
         public final long clusterCreateTime;
 
@@ -49,23 +53,30 @@ public interface SnapshotCompletionInterest {
                 final long multipartTxnId,
                 final Map<Integer, Long> partitionTxnIds,
                 final boolean truncationSnapshot,
+                final boolean terminusSnapshot,
                 final boolean didSucceed,
                 final String requestId,
                 final Map<String, Map<Integer, ExportSnapshotTuple>> exportSequenceNumbers,
                 final Map<Integer, Long> drSequenceNumbers,
                 final Map<Integer, Map<Integer, Map<Integer, DRSiteDrIdTracker>>> drMixedClusterSizeConsumerState,
+                final Map<Byte, byte[]> drCatalogCommands,
+                final Map<Byte, String[]> replicableTables,
                 final int drVersion,
                 final long clusterCreateTime) {
             this.path = path;
+            this.pathType = stype;
             this.nonce = nonce;
             this.multipartTxnId = multipartTxnId;
             this.partitionTxnIds = partitionTxnIds;
             this.truncationSnapshot = truncationSnapshot;
+            this.terminusSnapshot = terminusSnapshot;
             this.didSucceed = didSucceed;
             this.requestId = requestId;
             this.exportSequenceNumbers = exportSequenceNumbers;
             this.drSequenceNumbers = drSequenceNumbers;
             this.drMixedClusterSizeConsumerState = drMixedClusterSizeConsumerState;
+            this.drCatalogCommands = drCatalogCommands;
+            this.replicableTables = replicableTables;
             this.drVersion = drVersion;
             this.clusterCreateTime = clusterCreateTime;
         }
@@ -79,11 +90,12 @@ public interface SnapshotCompletionInterest {
                 long multipartTxnId,
                 Map<Integer, Long> partitionTxnIds,
                 boolean truncationSnapshot,
+                boolean terminusSnapshot,
                 int drVersion,
                 long clusterCreateTime) {
             return new SnapshotCompletionEvent(
                     path, stype, nonce, multipartTxnId, partitionTxnIds, truncationSnapshot,
-                    true, "", null, null, new HashMap<>(), drVersion, clusterCreateTime);
+                    terminusSnapshot, true, "", null, null, new HashMap<>(), null, null, drVersion, clusterCreateTime);
         }
     }
 

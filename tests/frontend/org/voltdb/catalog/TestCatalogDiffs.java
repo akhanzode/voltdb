@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -40,7 +40,6 @@ import org.voltdb.compiler.deploymentfile.DeploymentType;
 import org.voltdb.utils.BuildDirectoryUtils;
 import org.voltdb.utils.CatalogUtil;
 import org.voltdb.utils.MiscUtils;
-import org.voltdb.utils.VoltFile;
 
 import junit.framework.TestCase;
 
@@ -742,7 +741,7 @@ public class TestCatalogDiffs extends TestCase {
 
         // start with a table
         VoltProjectBuilder builder = new VoltProjectBuilder();
-        builder.addLiteralSchema("\nCREATE TABLE A (C1 BIGINT NOT NULL, C2 BIGINT NOT NULL, PRIMARY KEY(C1)) USING TTL 10 SECONDS ON COLUMN C2;");
+        builder.addLiteralSchema("\nCREATE TABLE A (C1 BIGINT NOT NULL, C2 TIMESTAMP DEFAULT NOW() NOT NULL, PRIMARY KEY(C1)) USING TTL 10 SECONDS ON COLUMN C2;");
         builder.addPartitionInfo("A", "C1");
         assertTrue("Failed to compile schema", builder.compile(testDir + File.separator + "testAlterTableTTL1.jar"));
         Catalog catOriginal = catalogForJar(testDir + File.separator + "testAlterTableTTL1.jar");
@@ -826,7 +825,7 @@ public class TestCatalogDiffs extends TestCase {
 
         // start with a stream
         VoltProjectBuilder builder = new VoltProjectBuilder();
-        builder.addLiteralSchema("\nCREATE STREAM A (C1 BIGINT NOT NULL, C2 BIGINT NOT NULL);");
+        builder.addLiteralSchema("\nCREATE STREAM A (C1 BIGINT NOT NULL, C2 TIMESTAMP DEFAULT NOW() NOT NULL);");
         assertTrue("Failed to compile schema", builder.compile(testDir + File.separator + "testAlterStreamTTL1.jar"));
         Catalog catOriginal = catalogForJar(testDir + File.separator + "testAlterStreamTTL1.jar");
 
@@ -1360,7 +1359,7 @@ public class TestCatalogDiffs extends TestCase {
     private static Catalog generateCatalogWithDeployment(String ddl, String defaultDepXml) throws IOException {
         VoltProjectBuilder builder = new VoltProjectBuilder();
         builder.addLiteralSchema(ddl);
-        final File jarPath = VoltFile.createTempFile("drrole", "jar");
+        final File jarPath = File.createTempFile("drrole", "jar");
         builder.compile(jarPath.getAbsolutePath());
         Catalog catalog = catalogForJar(jarPath.getAbsolutePath());
         File file = VoltProjectBuilder.writeStringToTempFile(defaultDepXml);

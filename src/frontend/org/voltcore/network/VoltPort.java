@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -177,7 +177,9 @@ public class VoltPort implements Connection
                                 m_messagesRead++;
                             }
                         } catch (VoltProtocolHandler.BadMessageLength e) {
-                            networkLog.error("Bad message length exception", e);
+                            String err = String.format("Bad message length, from %s%s", m_remoteHostAndAddressAndPort,
+                                                       m_messagesRead != 0 ? "" : "; this may indicate mismatched SSL/TLS setting or non-VoltDB sender");
+                            networkLog.error(err, e);
                             throw e;
                         }
                     }

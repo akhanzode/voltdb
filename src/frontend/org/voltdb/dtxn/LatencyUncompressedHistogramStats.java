@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -25,6 +25,13 @@ import org.voltdb.VoltType;
 /** Source of @Statistics LATENCY_HISTOGRAM */
 public class LatencyUncompressedHistogramStats extends LatencyHistogramStats {
 
+    public enum LatencyHistogram {
+        UNCOMPRESSED_HISTOGRAM       (VoltType.VARBINARY);
+
+        public final VoltType m_type;
+        LatencyHistogram(VoltType type) { m_type = type; }
+    }
+
     public LatencyUncompressedHistogramStats(long siteId) {
         super(siteId);
     }
@@ -32,12 +39,14 @@ public class LatencyUncompressedHistogramStats extends LatencyHistogramStats {
     @Override
     protected void populateColumnSchema(ArrayList<ColumnInfo> columns) {
         super.populateColumnSchema(columns);
-        columns.add(new ColumnInfo("UNCOMPRESSED_HISTOGRAM", VoltType.VARBINARY));
+        columns.add(new ColumnInfo(LatencyHistogram.UNCOMPRESSED_HISTOGRAM.name(),
+                LatencyHistogram.UNCOMPRESSED_HISTOGRAM.m_type));
     }
 
     @Override
-    protected void updateStatsRow(Object rowKey, Object[] rowValues) {
-        rowValues[columnNameToIndex.get("UNCOMPRESSED_HISTOGRAM")] = getSerializedCache();
-        super.updateStatsRow(rowKey, rowValues);
+    protected int updateStatsRow(Object rowKey, Object[] rowValues) {
+        int offset = super.updateStatsRow(rowKey, rowValues);
+        rowValues[offset + LatencyHistogram.UNCOMPRESSED_HISTOGRAM.ordinal()] = getSerializedCache();
+        return offset + LatencyHistogram.values().length;
     }
 }

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -45,8 +45,11 @@ import org.json_voltpatches.JSONObject;
 import org.json_voltpatches.JSONStringer;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TestName;
 import org.mockito.ArgumentCaptor;
+
 import org.voltcore.messaging.HostMessenger;
 import org.voltcore.network.Connection;
 import org.voltcore.network.WriteStream;
@@ -56,7 +59,7 @@ import org.voltdb.catalog.SnapshotSchedule;
 import org.voltdb.client.ClientResponse;
 import org.voltdb.sysprocs.saverestore.SnapshotPathType;
 import org.voltdb.sysprocs.saverestore.SnapshotUtil;
-import org.voltdb.utils.VoltFile;
+import org.voltdb.utils.VoltSnapshotFile;
 
 import com.google_voltpatches.common.util.concurrent.Callables;
 
@@ -122,14 +125,18 @@ public class TestSnapshotDaemon {
         }
     }
 
-    private static File tempDir = new VoltFile("/tmp/" + System.getProperty("user.name"));
+    private static File tempDir = new VoltSnapshotFile("/tmp/" + System.getProperty("user.name"));
     protected Initiator m_initiator;
     protected SnapshotDaemon m_daemon;
     protected SnapshotIOAgent m_ioAgent;
     protected MockVoltDB m_mockVoltDB;
 
+    @Rule
+    public final TestName m_name = new TestName();
+
     @Before
     public void setUp() throws Exception {
+        System.out.printf("-=-=-=--=--=-=- Start of test %s -=-=-=--=--=-=-\n", m_name.getMethodName());
         SnapshotDaemon.m_periodicWorkInterval = 100;
         SnapshotDaemon.m_minTimeBetweenSysprocs = 1000;
     }
@@ -141,6 +148,7 @@ public class TestSnapshotDaemon {
         m_mockVoltDB = null;
         m_daemon = null;
         m_initiator = null;
+        System.out.printf("-=-=-=--=--=-=- End of test %s -=-=-=--=--=-=-\n", m_name.getMethodName());
     }
 
     public SnapshotDaemon getSnapshotDaemon(boolean wantFakeResponses) throws Exception {
@@ -367,6 +375,7 @@ public class TestSnapshotDaemon {
 
     @Test
     public void testBadFrequencyAndBasicInit() throws Exception {
+        System.out.println("--------------\n  testBadFrequencyAndBasicInit\n---------------");
         SnapshotDaemon noSnapshots = getSnapshotDaemon(false);
         Thread.sleep(60);
         assertNull(m_initiator.procedureName);
@@ -598,6 +607,7 @@ public class TestSnapshotDaemon {
 
     @Test
     public void testFailedScan() throws Exception {
+        System.out.println("--------------\n  testFailedScan\n---------------");
 
         SnapshotDaemon daemon = getBasicDaemon(false);
 
@@ -686,6 +696,15 @@ public class TestSnapshotDaemon {
     }
 
     public Callable<ClientResponseImpl> getSuccessfulScanThreeResults(final long handle) {
+        return threeResults("woobie", handle, SnapshotPathType.SNAP_PATH);
+    }
+
+    public Callable<ClientResponseImpl> getShutdownScanThreeResults(final long handle) {
+        return threeResults("SHUTDOWN", handle, SnapshotPathType.SNAP_AUTO);
+    }
+
+    private Callable<ClientResponseImpl> threeResults(String prefix, long handle, SnapshotPathType type) {
+
         ClientResponseImpl response = new ClientResponseImpl() {
 
             @Override
@@ -698,19 +717,19 @@ public class TestSnapshotDaemon {
                 VoltTable resultTable = new VoltTable(SnapshotScanAgent.clientColumnInfo);
                 resultTable.addRow(
                         "/tmp",
-                        "woobie_2",
-                        2,
-                        2,
+                        prefix + "_2",
+                        2, // txnid
+                        2, // created
                         0,
                         "",
                         "",
                         "",
                         "",
-                        SnapshotPathType.SNAP_PATH.toString()
+                        type.toString()
                         );
                 resultTable.addRow(
                         "/tmp",
-                        "woobie_5",
+                        prefix + "_5",
                         5,
                         5,
                         0,
@@ -718,11 +737,11 @@ public class TestSnapshotDaemon {
                         "",
                         "",
                         "",
-                        SnapshotPathType.SNAP_PATH.toString()
+                        type.toString()
                         );
                 resultTable.addRow(
                         "/tmp",
-                        "woobie_3",
+                        prefix + "_3",
                         3,
                         3,
                         0,
@@ -730,7 +749,7 @@ public class TestSnapshotDaemon {
                         "",
                         "",
                         "",
-                        SnapshotPathType.SNAP_PATH.toString()
+                        type.toString()
                         );
                 return new VoltTable[] { resultTable, null, null };
             }
@@ -770,6 +789,7 @@ public class TestSnapshotDaemon {
 
     @Test
     public void testSuccessfulScan() throws Exception {
+        System.out.println("--------------\n  testSuccessfulScan\n---------------");
         SnapshotDaemon daemon = getBasicDaemon(false);
 
         long handle = m_initiator.clientData;
@@ -795,7 +815,7 @@ public class TestSnapshotDaemon {
 
         daemon.processClientResponse(getFailureResponse(handle)).get();
         assertNull(m_initiator.procedureName);
-        assertEquals(daemon.getState(), SnapshotDaemon.State.WAITING);
+        assertEquals(SnapshotDaemon.State.WAITING, daemon.getState());
 
         daemon = getBasicDaemon(false);
 
@@ -803,11 +823,12 @@ public class TestSnapshotDaemon {
         daemon.processClientResponse(getSuccessfulScanThreeResults(handle)).get();
         daemon.processClientResponse(getErrMsgResponse(1));
         Thread.sleep(60);
-        assertEquals(daemon.getState(), SnapshotDaemon.State.WAITING);
+        assertEquals(SnapshotDaemon.State.WAITING, daemon.getState());
     }
 
     @Test
     public void testDoSnapshot() throws Exception {
+        System.out.println("--------------\n  testDoSnapshot\n---------------");
         SnapshotDaemon daemon = getBasicDaemon(false);
 
         long handle = m_initiator.clientData;
@@ -842,7 +863,7 @@ public class TestSnapshotDaemon {
         handle = m_initiator.clientData;
         m_initiator.clear();
         daemon.processClientResponse(getErrMsgResponse(handle)).get();
-        assertEquals(daemon.getState(), SnapshotDaemon.State.WAITING);
+        assertEquals(SnapshotDaemon.State.WAITING, daemon.getState());
 
         daemon = getBasicDaemon(false);
 
@@ -965,5 +986,37 @@ public class TestSnapshotDaemon {
         Thread.sleep(1200);
         assertNotNull(m_initiator.procedureName);
         assertTrue("@SnapshotDelete".equals(m_initiator.procedureName));
+    }
+
+    @Test
+    public void testShutdownGrooming() throws Exception {
+        System.out.println("--------------\n  testShutdownGrooming\n---------------");
+        SnapshotDaemon daemon = getBasicDaemon(false);
+        long handle = m_initiator.clientData;
+        m_initiator.clear();
+
+        // Process @SnapshotScan results: 3 shutdown snapshots found.
+        // Expect daemon should delete oldest one.
+        daemon.processClientResponse(getShutdownScanThreeResults(handle)).get();
+        assertNotNull(m_initiator.procedureName);
+        assertTrue("@SnapshotDelete".equals(m_initiator.procedureName));
+
+        String[] paths = (String[])(m_initiator.params[0]);
+        String[] nonces = (String[])(m_initiator.params[1]);
+        assertEquals("bad paths count", 1, paths.length);
+        assertEquals("bad nonces count", 1, nonces.length);
+        assertTrue("bad path", "/tmp".equals(paths[0]));
+        assertTrue("bad nonce", "SHUTDOWN_2".equals(nonces[0]));
+
+        handle = m_initiator.clientData;
+        m_initiator.clear();
+        Thread.sleep(60);
+        assertNull(m_initiator.procedureName);
+
+        // Process @SnapshotDelete results.
+        // Expect daemon to enter WAITING state
+        daemon.processClientResponse(getSuccessResponse(999, handle)).get();
+        assertNull(m_initiator.procedureName);
+        assertEquals(SnapshotDaemon.State.WAITING, daemon.getState());
     }
 }

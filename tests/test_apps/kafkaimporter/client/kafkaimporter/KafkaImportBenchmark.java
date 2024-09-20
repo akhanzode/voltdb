@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -593,6 +593,7 @@ public class KafkaImportBenchmark {
             log.info("mirrorStreamCounts: " + mirrorStreamCounts);
             log.info("importRowCount: " + importRowCount);
         }
+
         if (config.useexport) {
             log.info("The number of rows to export stream: " + finalInsertCount);
             log.info("The number of rows exported: " + exportRowCount);
@@ -604,6 +605,7 @@ public class KafkaImportBenchmark {
                 } else {
                     log.error(mirrorStreamCounts + " Rows not imported by all streams, failing test");
                 }
+                testResult = false;
             }
         }
 

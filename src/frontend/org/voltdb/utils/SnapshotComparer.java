@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -58,6 +58,7 @@ import org.voltdb.sysprocs.saverestore.SnapshotUtil;
 import org.voltdb.sysprocs.saverestore.SnapshotUtil.Snapshot;
 import org.voltdb.sysprocs.saverestore.TableSaveFile;
 
+import com.google_voltpatches.common.collect.Lists;
 import com.jcraft.jsch.ChannelSftp;
 import com.jcraft.jsch.JSch;
 import com.jcraft.jsch.JSchException;
@@ -75,6 +76,7 @@ public class SnapshotComparer {
     public static int STATUS_INCONSISTENCY = -2;
     public static int STATUS_UNKNOWN_ERROR = -3;
 
+    public static int MAX_SNAPSHOT_DIFF_ROWS = Integer.getInteger("MAX_SNAPSHOT_DIFF_ROWS", 20);
     public static final VoltLogger CONSOLE_LOG = new VoltLogger("CONSOLE");
     public static final VoltLogger SNAPSHOT_LOG = new VoltLogger("SNAPSHOT");
     // A string builder to hold all snapshot validation errors, gets printed when no viable snapshot is found
@@ -101,6 +103,7 @@ public class SnapshotComparer {
         }
 
         SnapshotLoader source = new SnapshotLoader(config.local, config.username, config.sourceNonce, config.sourceDirs, config.sourceHosts, config.tables);
+        System.err.println("main Snapshot configured orderLevel=" + config.orderLevel);
         if (config.selfCompare) {
             source.selfCompare(config.orderLevel);
         } else {
@@ -382,6 +385,55 @@ public class SnapshotComparer {
             valid = true;
         }
     }
+    public static void compare(List<VoltTable> ftr, List<VoltTable> ftc, List<String> diff) {
+        if (ftr.isEmpty() || ftc.isEmpty()) {
+            return;
+        }
+        if (diff.size() >= MAX_SNAPSHOT_DIFF_ROWS) {
+            return;
+        }
+        VoltTable tr = ftr.get(0);
+        VoltTable tc = ftc.get(0);
+        while (true) {
+            boolean trMore = tr.advanceRow();
+            if (!trMore) {
+                ftr.remove(0);
+            }
+            boolean tcMore = tc.advanceRow();
+            if (!tcMore) {
+                ftc.remove(0);
+            }
+            if (!tcMore || !trMore) {
+                if(trMore) {
+                    // move cursor to previous position
+                    int activeIndex = tr.getActiveRowIndex();
+                    if (activeIndex > 0) {
+                        tr.resetRowPosition();
+                        tr.advanceToRow(0);
+                        tr.advanceToRow(activeIndex - 1);
+                    }
+                }
+                if(tcMore) {
+                    // move cursor to previous position
+                    int activeIndex = tc.getActiveRowIndex();
+                    if (activeIndex > 0) {
+                        tc.resetRowPosition();
+                        tc.advanceToRow(0);
+                        tc.advanceToRow(activeIndex - 1);
+                    }
+                }
+                break;
+            }
+            if (diff.size() < SnapshotComparer.MAX_SNAPSHOT_DIFF_ROWS) {
+                if (!tr.getRawRow().equals(tc.getRawRow())) {
+                    diff.add("\nfile 1:" + tr.getRow() + "\nfile 2:" + tc.getRow());
+                }
+            }
+        }
+        if (!ftr.isEmpty() && !ftc.isEmpty()) {
+           compare(ftr, ftc, diff);
+        }
+    }
 }
 
 class SnapshotLoader {
@@ -518,6 +570,7 @@ class SnapshotLoader {
     // Todo: now is 1-1 comparing, implement m-way comparing
     public void selfCompare(byte orderLevel) {
         boolean fail = false;
+        CONSOLE_LOG.info("selfCompare Snapshot orderLevel=" + orderLevel);
         // Build a plan for which save file as the baseline for each partition
         Map<String, List<List<File>>> tableToCopies = new HashMap<>();
         for (String tableName : tables.keySet()) {
@@ -589,17 +642,23 @@ class SnapshotLoader {
                     }
 
                     long refCheckSum = 0l, compCheckSum = 0l;
-                    try (TableSaveFile referenceSaveFile = new TableSaveFile(
-                            new FileInputStream(partitionToFiles.get(p).get(0)), 1, relevantPartition);
-                            TableSaveFile compareSaveFile = new TableSaveFile(
+
+                    try (
+                        TableSaveFile referenceSaveFile = new TableSaveFile(
+                                    new FileInputStream(partitionToFiles.get(p).get(0)), 1, relevantPartition);
+                        TableSaveFile compareSaveFile = new TableSaveFile(
                                     new FileInputStream(partitionToFiles.get(p).get(target)), 1, relevantPartition)) {
                         DBBPool.BBContainer cr = null, cc = null;
 
+                        List<VoltTable> ftr = Lists.newArrayList();
+                        List<VoltTable> ftc = Lists.newArrayList();
+                        List<String> diff = Lists.newArrayList();
+                        long ftrCount = 0;
+                        long ftcCount = 0;
                         while (referenceSaveFile.hasMoreChunks() || compareSaveFile.hasMoreChunks()) {
                             // skip chunk for irrelevant partition
                             cr = referenceSaveFile.getNextChunk();
                             cc = compareSaveFile.getNextChunk();
-
                             if (cr == null && cc == null) { // both reached EOF
                                 break;
                             }
@@ -620,42 +679,48 @@ class SnapshotLoader {
                                     }
                                 } else {
                                     if (cr != null && cc == null) {
-                                        System.err.println(
-                                                "Reference file still contains chunks while comparing file does not");
                                         break;
                                     }
-                                    if (cr == null && cc != null) {
-                                        System.err.println(
-                                                "Comparing file still contains chunks while reference file does not");
-                                        break;
+                                    VoltTable tr = null;
+                                    if (cr != null) {
+                                        tr = PrivateVoltTableFactory.createVoltTableFromBuffer(cr.b(), true);
+                                        ftrCount += tr.getRowCount();
+                                        ftr.add(tr);
+                                    }
+                                    VoltTable tc = null;
+                                    if (cc != null) {
+                                        tc = PrivateVoltTableFactory.createVoltTableFromBuffer(cc.b(), true);
+                                        ftcCount += tc.getRowCount();
+                                        ftc.add(tc);
                                     }
 
-                                    final VoltTable tr = PrivateVoltTableFactory.createVoltTableFromBuffer(cr.b(),
-                                            true);
-                                    final VoltTable tc = PrivateVoltTableFactory.createVoltTableFromBuffer(cc.b(),
-                                            true);
-
-                                    if (!tr.hasSameContents(tc, orderLevel == 1)) {
-                                        // seek to find where discrepancy happened
-                                        if (SNAPSHOT_LOG.isDebugEnabled()) {
-                                            SNAPSHOT_LOG.debug(
-                                                    "table from file: " + partitionToFiles.get(p).get(0) + " : " + tr);
-                                            SNAPSHOT_LOG.debug("table from file: " + partitionToFiles.get(p).get(target)
-                                                    + " : " + tc);
+                                    // compare them now, continue checking total counts even after they are found inconsistent
+                                    if (orderLevel == 0) {
+                                        if (diff.size() < SnapshotComparer.MAX_SNAPSHOT_DIFF_ROWS) {
+                                            SnapshotComparer.compare(ftr, ftc, diff);
+                                            if (!diff.isEmpty()) {
+                                                isConsistent = false;
+                                            }
                                         }
+                                    } else {
+                                        // Now we compare whole table that we built.
+                                        if (tr != null && tc != null && !tr.hasSameContents(tc, orderLevel == 1)) {
+                                            // seek to find where discrepancy happened
+                                            if (SNAPSHOT_LOG.isDebugEnabled()) {
+                                                SNAPSHOT_LOG.debug(
+                                                        "table from file: " + partitionToFiles.get(p).get(0) + " : " + ftr);
+                                                SNAPSHOT_LOG.debug("table from file: " + partitionToFiles.get(p).get(target)
+                                                        + " : " + ftc);
+                                            }
 
-                                        int trSize = tr.getRowCount(), tcSize = tc.getRowCount();
-                                        int[][] lookup = new int[trSize + 1][tcSize + 1];
-                                        // fill lookup table
-                                        lcsLength(tr, tc, trSize, tcSize, lookup);
-                                        // find difference
-                                        StringBuilder output = new StringBuilder().append("Diffs between file ")
-                                                .append(partitionToFiles.get(p).get(0)).append(" and file ")
-                                                .append(partitionToFiles.get(p).get(target)).append(" \n");
-                                        diff(tr, tc, trSize, tcSize, lookup, output);
-                                        CONSOLE_LOG.info(output.toString());
-                                        isConsistent = false;
-                                        break;
+                                            StringBuilder output = new StringBuilder().append("Order level:" + orderLevel + " Diffs between file 1:")
+                                                    .append(partitionToFiles.get(p).get(0)).append(" and file 2: ")
+                                                    .append(partitionToFiles.get(p).get(target)).append(" \n");
+                                            diff(tr, tc, output);
+                                            CONSOLE_LOG.info(output.toString());
+                                            isConsistent = false;
+                                            break;
+                                        }
                                     }
                                 }
                             } catch (Exception e) {
@@ -670,6 +735,24 @@ class SnapshotLoader {
                             }
                         }
 
+                        if (orderLevel == 0) {
+                            if (diff.size() < SnapshotComparer.MAX_SNAPSHOT_DIFF_ROWS) {
+                                SnapshotComparer.compare(ftr, ftc, diff);
+                                if (!diff.isEmpty()) {
+                                    isConsistent = false;
+                                }
+                            }
+                            if (!isConsistent) {
+                                StringBuilder sb = new StringBuilder();
+                                sb.append(tableName + " inconsistent between file 1 " + partitionToFiles.get(p).get(0) + " total row count:" + ftrCount + " and file 2 " + partitionToFiles.get(p).get(target)
+                                        + " total row count: " + ftcCount + " on partition:" + partitionid + "\n");
+                                sb.append("Difference:\n");
+                                for (String s : diff) {
+                                    sb.append(s);
+                                }
+                                CONSOLE_LOG.warn(sb.toString());
+                            }
+                        }
                         if (orderLevel >= 2) {
                             isConsistent = (refCheckSum == compCheckSum);
                             // for orderLevel 3. drill down the discrepancies by reorder the whole table to csv then diff
@@ -759,7 +842,7 @@ class SnapshotLoader {
         try {
             SNAPSHOT_LOG.debug("Converting table " + tableName + " to " + outfileName);
             Integer[] relevantPartition = isReplicated ? null : new Integer[]{partitionid};
-            CSVTableSaveFile.convertTableSaveFile(delimiter, relevantPartition, outfile, infile);
+            CSVTableSaveFile.convertTableSaveFile(delimiter, relevantPartition, outfile, infile, false);
         } catch (Exception e) {
             System.err.println(e.getMessage());
             System.err.println("Error: Failed to convert " + infile.getPath() + " to " + outfile.getPath());
@@ -795,62 +878,23 @@ class SnapshotLoader {
         return false;
     }
 
-    // Function to display the differences between two voltTables
-    public static void diff(VoltTable X, VoltTable Y, int m, int n, int[][] lookup, StringBuilder sb) {
-        // if last character of X and Y matches
-        // TODO: optimize by useing bottom up dp, need traverse volttable backward
-        X.resetRowPosition();
-        X.advanceRow();
-        X.advanceToRow(m-1);
-        Y.resetRowPosition();
-        Y.advanceRow();
-        Y.advanceToRow(n-1);
-        if (m > 0 && n > 0 && X.getRawRow().equals(Y.getRawRow())) {
-            String curRow = "  " + X.getRow();
-            diff(X, Y, m - 1, n - 1, lookup, sb);
-            sb.append(curRow);
+    private static void diff(VoltTable t1, VoltTable t2, StringBuilder sb) {
+        if (t1.getRowCount() != t2.getRowCount()) {
+            sb.append("The number of rows differs. File 1:" + t1.getRowCount() + " File 2:" + t2.getRowCount());
+            return;
         }
-        // current row of Y is not present in X
-        else if (n > 0 && (m == 0 || lookup[m][n - 1] >= lookup[m - 1][n])) {
-            String curRow = " +" + Y.getRow();
-            diff(X, Y, m, n - 1, lookup, sb);
-            sb.append(curRow);
-        }
-
-        // current row of X is not present in Y
-        else if (m > 0 && (n == 0 || lookup[m][n - 1] < lookup[m - 1][n])) {
-            String curRow = " -" + X.getRow();
-            diff(X, Y, m - 1, n, lookup, sb);
-            sb.append(curRow);
-        }
-    }
-
-    // Function to fill lookup table by finding the length of LCS
-    private static void lcsLength(VoltTable X, VoltTable Y, int m, int n,
-                                 int[][] lookup) {
-        // first column of the lookup table will be all 0
-        for (int i = 0; i <= m; i++) {
-            lookup[i][0] = 0;
-        }
-
-        // first row of the lookup table will be all 0
-        for (int j = 0; j <= n; j++) {
-            lookup[0][j] = 0;
-        }
-
-        // fill the lookup table in bottom-up manner
-        for (int i = 1; i <= m; i++) {
-            X.advanceRow();
-            Y.resetRowPosition();
-            for (int j = 1; j <= n; j++) {
-                Y.advanceRow();
-                // if current row of X and Y matches
-                if (X.getRawRow().equals(Y.getRawRow())) {
-                    lookup[i][j] = lookup[i - 1][j - 1] + 1;
-                } // else if current row of X and Y don't match
-                else {
-                    lookup[i][j] = Integer.max(lookup[i - 1][j],
-                            lookup[i][j - 1]);
+        t1.resetRowPosition();
+        t2.resetRowPosition();
+        long maxCount = SnapshotComparer.MAX_SNAPSHOT_DIFF_ROWS;
+        long index = 0;
+        while (t1.advanceRow() && t2.advanceRow()) {
+            if (!t1.getRawRow().equals(t2.getRawRow())) {
+                sb.append("\n");
+                sb.append("file 1:" + t1.getRow());
+                sb.append("file 2:" + t2.getRow());
+                index++;
+                if (index == maxCount) {
+                    break;
                 }
             }
         }
@@ -914,7 +958,7 @@ class SnapshotLoader {
      * return InMemoryJarfile of a snapshot jar file
      */
     private InMemoryJarfile getInMemoryJarFileBySnapShotName(String location, String nonce) throws IOException {
-        final File file = new VoltFile(location, nonce + ".jar");
+        final File file = new VoltSnapshotFile(location, nonce + ".jar");
         byte[] bytes = MiscUtils.fileToBytes(file);
         return CatalogUtil.loadInMemoryJarFile(bytes);
     }

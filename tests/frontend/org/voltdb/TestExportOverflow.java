@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -35,7 +35,6 @@ import java.util.HashMap;
 import java.util.Map;
 
 import org.voltdb.client.Client;
-import org.voltdb.client.ClientImpl;
 import org.voltdb.client.ClientResponse;
 import org.voltdb.compiler.VoltProjectBuilder;
 import org.voltdb.compiler.deploymentfile.ServerExportEnum;
@@ -97,9 +96,8 @@ public class TestExportOverflow extends RegressionSuite {
             return;
         }
         Client client = getClient();
-        while (!((ClientImpl) client).isHashinatorInitialized()) {
-            Thread.sleep(1000);
-            System.out.println("Waiting for hashinator to be initialized...");
+        if (!client.waitForTopology(60_000)) {
+            throw new RuntimeException("Timed out waiting for topology info");
         }
 
         // insert rows
@@ -112,13 +110,7 @@ public class TestExportOverflow extends RegressionSuite {
         client.drain();
         client.callProcedure("@Quiesce");
         File overflowDir;
-        boolean newCli = ((LocalCluster)m_config).isNewCli();
-        if (newCli) {
-            overflowDir = new File(((LocalCluster)m_config).getServerSpecificRoot("0") + "/export_overflow");
-        } else {
-            ArrayList<File> subroots = ((LocalCluster) m_config).getSubRoots();
-            overflowDir = findExportOverflowDir(subroots.get(0));
-        }
+        overflowDir = new File(((LocalCluster)m_config).getServerSpecificRoot("0") + "/export_overflow");
         Map<String, FileTime> fileTimes;
         for (int i=0;true; ++i) {
             fileTimes = getFileTimeAttributesRecursively(overflowDir);
@@ -166,8 +158,7 @@ public class TestExportOverflow extends RegressionSuite {
         LocalCluster config = new LocalCluster("export-overflow-test.jar", 1, 1, 0,
                 BackendTarget.NATIVE_EE_JNI, LocalCluster.FailureState.ALL_RUNNING, true, additionalEnv);
         config.setHasLocalServer(false);
-        // This is only for testing create --force.
-        config.setNewCli(false);
+
         boolean compile = config.compile(project);
         assertTrue(compile);
         builder.addServerConfig(config);

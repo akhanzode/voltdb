@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -204,6 +204,8 @@ public class ElasticJoinProducer extends JoinProducerBase implements TaskLog {
                                     event.exportSequenceNumbers,
                                     event.drSequenceNumbers,
                                     event.drMixedClusterSizeConsumerState,
+                                    event.drCatalogCommands,
+                                    event.replicableTables,
                                     false /* requireExistingSequenceNumbers */,
                                     event.clusterCreateTime);
                     if (m_commaSeparatedNameOfViewsToPause != null) {
@@ -283,7 +285,6 @@ public class ElasticJoinProducer extends JoinProducerBase implements TaskLog {
             runForBlockingDataTransfer(siteConnection);
             return;
         }
-
         m_taskQueue.offer(this);
     }
 

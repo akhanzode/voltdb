@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -18,12 +18,17 @@ package org.voltdb;
 
 import java.io.File;
 import java.io.IOException;
+import java.time.Instant;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 import org.voltcore.messaging.HostMessenger;
+import org.voltdb.catalog.Catalog;
+import org.voltdb.common.NodeState;
 import org.voltdb.compiler.CatalogChangeResult;
 import org.voltdb.compiler.deploymentfile.DeploymentType;
 import org.voltdb.compiler.deploymentfile.PathsType;
@@ -32,11 +37,13 @@ import org.voltdb.dtxn.SiteTracker;
 import org.voltdb.elastic.ElasticService;
 import org.voltdb.iv2.Cartographer;
 import org.voltdb.iv2.SpScheduler.DurableUniqueIdListener;
-import org.voltdb.licensetool.LicenseApi;
+import org.voltdb.licensing.Licensing;
+import org.voltdb.serdes.AvroSerde;
 import org.voltdb.settings.ClusterSettings;
 import org.voltdb.snmp.SnmpTrapSender;
 import org.voltdb.task.TaskManager;
 import org.voltdb.utils.HTTPAdminListener;
+import org.voltdb.utils.InMemoryJarfile;
 
 import com.google_voltpatches.common.util.concurrent.ListenableFuture;
 import com.google_voltpatches.common.util.concurrent.ListeningExecutorService;
@@ -53,7 +60,7 @@ public interface VoltDBInterface
      */
     public void recoveryComplete(String requestId);
 
-    public void readBuildInfo(String editionTag);
+    public void readBuildInfo();
 
     public CommandLog getCommandLog();
     public boolean isRunningWithOldVerbs();
@@ -160,6 +167,7 @@ public interface VoltDBInterface
      * @param genId stream table catalog generation id
      * @param currentTxnId  The transaction ID at which this method is called
      * @param deploymentBytes  The deployment file bytes
+     * @param replicableTablesConsumer Consumer for the map of which tables are replicable for dr
      */
     public CatalogContext catalogUpdate(
             String diffCommands,
@@ -170,7 +178,8 @@ public interface VoltDBInterface
             boolean requireCatalogDiffCmdsApplyToEE,
             boolean hasSchemaChange,
             boolean requiresNewExportGeneration,
-            boolean hasSecurityUserChange);
+            boolean hasSecurityUserChange,
+            Consumer<Map<Byte, String[]>> replicableTablesConsumer);
 
     /**
      * Given the information, write the new catalog jar file only
@@ -230,6 +239,11 @@ public interface VoltDBInterface
     public void setClusterCreateTime(long clusterCreateTime);
 
     /**
+     * @return The time this host started
+     */
+    public Instant getHostStartTime();
+
+    /**
      * Notify RealVoltDB that recovery is complete
      */
     void onExecutionSiteRejoinCompletion(long transferred);
@@ -246,6 +260,20 @@ public interface VoltDBInterface
     public void setStartMode(OperationMode mode);
 
     public OperationMode getStartMode();
+
+    public StartAction getStartAction();
+
+    public NodeState getNodeState();
+
+    public boolean getNodeStartupComplete();
+
+    public int[] getNodeStartupProgress();
+
+    public void reportNodeStartupProgress(int completed, int total);
+
+    public int getMyHostId();
+
+    public int getVoltPid();
 
     public void promoteToMaster();
 
@@ -328,14 +356,9 @@ public interface VoltDBInterface
     public ListeningExecutorService getComputationService();
 
     /**
-     * Return the license api. This may be null in community editions!
-     * @return License API based on edition.
+     * Return licensing support object.
      */
-    public LicenseApi getLicenseApi();
-    public void updateLicenseApi(LicenseApi newLicense);
-
-    //Return JSON string represenation of license information.
-    public String getLicenseInformation();
+    public Licensing getLicensing();
 
     public <T> ListenableFuture<T> submitSnapshotIOWork(Callable<T> work);
 
@@ -363,6 +386,15 @@ public interface VoltDBInterface
     public TaskManager getTaskManager();
 
     /**
+     * Return the static {@link AvroSerde} for this instance. When the configuration is updated the instance of
+     * {@link AvroSerde} will be updated with the new configuration so all users of the class can keep using the
+     * retrieved instance with the new configuration.
+     *
+     * @return The instance of {@link AvroSerde} which is currently configured in this instance.
+     */
+    public AvroSerde getAvroSerde();
+
+    /**
      * notify surviving node upon shutting itself down
      */
     public void notifyOfShutdown();
@@ -371,24 +403,53 @@ public interface VoltDBInterface
     void setMasterOnly();
 
     /**
-     * Register a validator to be used to validate the catalog on every update.
-     * @param validator
+     * Build the {@link CatalogValidator} instances. Should be invoked only once on startup.
+     *
+     * @param isPro {@code true} if running enterprise
      */
-    public void registerCatalogValidator(CatalogValidator validator);
+    default void buildCatalogValidators(boolean isPro) {}
 
     /**
-     * Unregister a validator.
-     * @param validator
-     */
-    public void unregisterCatalogValidator(CatalogValidator validator);
-
-    /**
+     * Validate the deployment file.
+     * <p>
      * This will be called from the catalog update procedure on every catalog update.
      * All the registered validators will be called for validation from here.
+     *
+     * @param catalog the new catalog
      * @param newDep the updated deployment
-     * @param curDep the current deployment
+     * @param curDep current deployment or {@code null} if changes are not to be validated
      * @param ccr the result of the validations will be set on this result object
      * @return boolean indicating if the validation was successful or not.
      */
-    public boolean validateDeploymentUpdates(DeploymentType newDep, DeploymentType curDep, CatalogChangeResult ccr);
+    default boolean validateDeployment(Catalog catalog, DeploymentType newDep,
+            DeploymentType curDep, CatalogChangeResult ccr) {
+        return true;
+    }
+
+    /**
+     * Validate the consistency of the whole configuration, i.e. catalog and deployment.
+     * <p>
+     * This will be called once at startup time and from the catalog update procedure on every catalog update.
+     * All the registered validators will be called for validation from here.
+     *
+     * @param catalog the new catalog
+     * @param deployment the new deployment
+     * @param catalogJar the {@link InMemoryJarfile} of the new catalog
+     * @param curCatalog the current catalog or {@code null}
+     * @param ccr the results of validation including any errors need to be set on this result object
+     * @return {@code true} if successful, {@code false} if not and ccr updated with error message
+     */
+    default public boolean validateConfiguration(Catalog catalog, DeploymentType deployment,
+            InMemoryJarfile catalogJar, Catalog curCatalog, CatalogChangeResult ccr) {
+        return true;
+    }
+
+    /**
+     * @return Instance of {@link DrProducerCatalogCommands} for the cluster. Never {@code null}
+     */
+    DrProducerCatalogCommands getDrCatalogCommands();
+
+    default boolean doRecoverCheck() {
+        return true;
+    }
 }

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -23,8 +23,11 @@ package org.voltdb.catalog;
 
 import java.util.List;
 import java.util.Set;
+import java.util.TreeSet;
 
 import org.apache.hadoop_voltpatches.util.PureJavaCrc32;
+import org.voltcore.logging.VoltLogger;
+import org.voltdb.VoltDB;
 import org.voltdb.common.Constants;
 import org.voltdb.compiler.deploymentfile.DrRoleType;
 import org.voltdb.dr2.DRProtocol;
@@ -41,62 +44,49 @@ import com.google_voltpatches.common.collect.ImmutableSet;
  * - All shared DR tables have the same unique indexes/primary keys
  */
 public class DRCatalogDiffEngine extends CatalogDiffEngine {
+    private static final VoltLogger s_log = new VoltLogger("DRAGENT");
+
     /* White list of fields that we care about for DR for table children classes.
        This is used only in serialize commands for DR method.
        There are duplicates added to the set because it lists all the fields per type */
     private static final Set<String> s_whiteListFields = ImmutableSet.of(
             /* Table */
-            "isreplicated", "partitioncolumn", "materializer", "signature", "tuplelimit", "isDRed",
+            "isreplicated", "partitioncolumn", "materializer", "signature", "isDRed",
             /* ColumnRef */
             "index", "column",
             /* Column */
-            "index", "type", "size", "nullable", "name", "defaultvalue", "defaulttype",
-            "aggregatetype", "matviewsource", "matview", "inbytes",
+            "index", "type", "size", "nullable", "name", "inbytes",
             /* Index */
             "unique", "assumeUnique", "countable", "type", "expressionsjson", "predicatejson",
             /* Constraint */
-            "type", "oncommit", "index", "foreignkeytable",
-            /* Statement */
-            "sqltext", "querytype", "readonly", "singlepartition", "replicatedtabledml",
-            "iscontentdeterministic", "isorderdeterministic", "nondeterminismdetail", "cost",
-            "seqscancount", "explainplan", "tablesread", "tablesupdated", "indexesused", "cachekeyprefix"
+            "type", "oncommit", "index", "foreignkeytable"
             );
 
     private static final Set<Class<? extends CatalogType>> s_whiteListChildren =
-            ImmutableSet.of(Column.class, Index.class, Constraint.class, Statement.class, ColumnRef.class);
+            ImmutableSet.of(Column.class, Index.class, Constraint.class, ColumnRef.class);
 
-    private boolean m_isXDCR;
     private byte m_remoteClusterId;
+    private final Set<String> m_replicableTables = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
 
     public DRCatalogDiffEngine(Catalog localCatalog, Catalog remoteCatalog, byte remoteClusterId) {
-        super(localCatalog, remoteCatalog);
+        super(localCatalog, remoteCatalog, false, false);
+        for (Table table : CatalogUtil.getDatabase(localCatalog).getTables()) {
+            assert table.getIsdred() : table + "is not DRed";
+            m_replicableTables.add(table.getTypeName());
+        }
         m_remoteClusterId = remoteClusterId;
+        runDiff(localCatalog, remoteCatalog);
     }
 
-    @Override
-    protected void initialize(Catalog prev, Catalog next) {
-        m_isXDCR = prev.getClusters().get("cluster").getDrrole().equals(DrRoleType.XDCR.value());
+    public static Catalog getDrCatalog(Catalog catalog) {
+        String drCatalogCommands = getDrCatalogCommands(catalog);
+        return executeDrCatalogCommands(drCatalogCommands);
     }
 
     public static DRCatalogCommands serializeCatalogCommandsForDr(Catalog catalog, int protocolVersion) {
-        Cluster cluster = catalog.getClusters().get("cluster");
-        Database db = cluster.getDatabases().get("database");
-        CatalogSerializer serializer = new CatalogSerializer(s_whiteListFields, s_whiteListChildren);
+        assert (protocolVersion == -1 || protocolVersion >= DRProtocol.MULTICLUSTER_PROTOCOL_VERSION);
 
-        if (protocolVersion == -1 || protocolVersion >= DRProtocol.MULTICLUSTER_PROTOCOL_VERSION) {
-            serializer.writeCommandForField(cluster, "drRole", true);
-        } else {
-            // The compatibility mode will not understand the new drRole field,
-            // so use the old field name. We'll remove this in v7.1 when the
-            // compatibility mode is deprecated.
-            serializer.writeCommandForField(db, "isActiveActiveDRed", true);
-        }
-        for (Table t : db.getTables()) {
-            if (t.getIsdred() && t.getMaterializer() == null && ! CatalogUtil.isStream(db, t)) {
-                t.accept(serializer);
-            }
-        }
-        String catalogCommands = serializer.getResult();
+        String catalogCommands = getDrCatalogCommands(catalog);
         PureJavaCrc32 crc = new PureJavaCrc32();
         crc.update(catalogCommands.getBytes(Constants.UTF8ENCODING));
         // DR catalog exchange still uses the old gzip scheme for now, next time DR protocol version is bumped
@@ -104,12 +94,34 @@ public class DRCatalogDiffEngine extends CatalogDiffEngine {
         return new DRCatalogCommands(protocolVersion, crc.getValue(), Encoder.compressAndBase64Encode(catalogCommands));
     }
 
+    private static String getDrCatalogCommands(Catalog catalog) {
+        Cluster cluster = CatalogUtil.getCluster(catalog);
+        CatalogSerializer serializer = new CatalogSerializer(s_whiteListFields, s_whiteListChildren);
+        serializer.writeCommandForField(cluster, "drRole", true);
+
+        Database db = CatalogUtil.getDatabase(catalog);
+        for (Table t : db.getTables()) {
+            if (t.getIsdred() && t.getMaterializer() == null && ! CatalogUtil.isStream(db, t)) {
+                t.accept(serializer);
+            }
+        }
+        return serializer.getResult();
+    }
+
     public static Catalog deserializeCatalogCommandsForDr(String encodedCatalogCommands) {
-        String catalogCommands = Encoder.decodeBase64AndDecompress(encodedCatalogCommands);
+        return deserializeCatalogCommandsForDr(Encoder.base64Decode(encodedCatalogCommands));
+    }
+
+    public static Catalog deserializeCatalogCommandsForDr(byte[] encodedCatalogCommands) {
+        String catalogCommands = new String(Encoder.decompress(encodedCatalogCommands), Constants.UTF8ENCODING);
+        return executeDrCatalogCommands(catalogCommands);
+    }
+
+    private static Catalog executeDrCatalogCommands(String drCatalogCommands) {
         Catalog deserializedMasterCatalog = new Catalog();
         Cluster c = deserializedMasterCatalog.getClusters().add("cluster");
         Database db = c.getDatabases().add("database");
-        deserializedMasterCatalog.execute(catalogCommands);
+        deserializedMasterCatalog.execute(drCatalogCommands);
 
         if (db.getIsactiveactivedred()) {
             // The catalog came from an old version, set DR role here
@@ -118,6 +130,24 @@ public class DRCatalogDiffEngine extends CatalogDiffEngine {
         }
 
         return deserializedMasterCatalog;
+    }
+
+    public static String[] calculateReplicableTables(byte clusterId, byte[] remoteCatalogBytes) {
+        Catalog drCatalog = getDrCatalog(VoltDB.instance().getCatalogContext().catalog);
+        return calculateReplicableTables(clusterId, drCatalog, remoteCatalogBytes);
+    }
+
+    public static String[] calculateReplicableTables(byte clusterId, Catalog local, byte[] remoteCatalogBytes) {
+        Catalog remote = deserializeCatalogCommandsForDr(remoteCatalogBytes);
+
+        DRCatalogDiffEngine diff = new DRCatalogDiffEngine(local, remote, clusterId);
+
+        if (!diff.supported()) {
+            s_log.warn(diff.errors()
+                    + "Inconsistent DR table schemas across clusters prevents replication of those tables.");
+        }
+
+        return diff.m_replicableTables.toArray(new String[diff.m_replicableTables.size()]);
     }
 
     @Override
@@ -129,6 +159,7 @@ public class DRCatalogDiffEngine extends CatalogDiffEngine {
         }
 
         if (suspect instanceof Column || isUniqueIndex(suspect) || isUniqueIndexColumn(suspect)) {
+            removeTableAncestor(suspect);
             return "Missing " + suspect + " from " + suspect.getParent() + " on " +
                 (ChangeType.ADDITION == changeType ? "local cluster" : "remote cluster " + m_remoteClusterId);
         }
@@ -136,38 +167,31 @@ public class DRCatalogDiffEngine extends CatalogDiffEngine {
     }
 
     @Override
-    protected String checkModifyWhitelist(final CatalogType suspect, final CatalogType prevType, final String field) {
-        if (suspect instanceof Cluster ||
-            suspect instanceof PlanFragment ||
-            suspect instanceof MaterializedViewInfo) {
+    protected String checkModifyWhitelist(final CatalogType remoteType, final CatalogType localType,
+            final String field) {
+        if (remoteType instanceof Cluster ||
+            remoteType instanceof PlanFragment ||
+            remoteType instanceof MaterializedViewInfo) {
             if ("drRole".equalsIgnoreCase(field)) {
-                if (((String) prevType.getField(field)).equalsIgnoreCase(DrRoleType.XDCR.value()) ^
-                    ((String) suspect.getField(field)).equalsIgnoreCase(DrRoleType.XDCR.value())) {
+                if (((String) localType.getField(field)).equalsIgnoreCase(DrRoleType.XDCR.value()) ^
+                        ((String) remoteType.getField(field)).equalsIgnoreCase(DrRoleType.XDCR.value())) {
+                    m_replicableTables.clear();
                     return "Incompatible DR modes between two clusters";
                 }
             }
             return null;
-        } else if (suspect instanceof Table) {
-            if ("isdred".equalsIgnoreCase(field)) {
-                assert ((Boolean)suspect.getField("isDRed"));
-                return "Table " + suspect.getTypeName() + " has DR enabled on the remote cluster " + m_remoteClusterId + " but not on the local cluster";
-            }
-            if ("estimatedtuplecount".equals(field)) {
+        } else if (remoteType instanceof Table) {
+            if ("estimatedtuplecount".equals(field) ||
+                    "tableType".equals(field)) {
                 return null;
             }
-            if ("tuplelimit".equals(field)) {
-                return null;
-            }
-            if ("tableType".equals(field)) {
-                return null;
-            }
-        } else if (suspect instanceof Database) {
+        } else if (remoteType instanceof Database) {
             if ("schema".equalsIgnoreCase(field) ||
                 "securityprovider".equalsIgnoreCase(field) ||
                 "isActiveActiveDRed".equalsIgnoreCase(field)) {
                 return null;
             }
-        } else if (suspect instanceof Column) {
+        } else if (remoteType instanceof Column) {
             if ("defaultvalue".equals(field) ||
                 "defaulttype".equals(field) ||
                 "matview".equals(field) ||
@@ -175,13 +199,30 @@ public class DRCatalogDiffEngine extends CatalogDiffEngine {
                 "matviewsource".equals(field)) {
                 return null;
             }
-        } else if (isTableLimitDeleteStmt(suspect)) {
-            return null;
-        } else if ((suspect instanceof Index && isUniqueIndex(suspect) == isUniqueIndex(prevType)) ||
-                   (suspect instanceof ColumnRef && !isUniqueIndexColumn(suspect))) {
+        } else if ((remoteType instanceof Index && isUniqueIndex(remoteType) == isUniqueIndex(localType))
+                || (remoteType instanceof ColumnRef && !isUniqueIndexColumn(remoteType))) {
             return null;
         }
-        return "Incompatible schema between remote cluster " + m_remoteClusterId + " and local cluster: field " + field + " in schema object " + suspect;
+        removeTableAncestor(localType);
+        return "Incompatible schema between remote cluster " + m_remoteClusterId + " and local cluster: field " + field
+                + " in schema object " + remoteType;
+    }
+
+    /**
+     * Remove the ancestor of {@code type} which is a {@link Table} from {@link #m_replicableTables}. {@code type} can
+     * be a {@link Table}
+     *
+     * @param type {@link CatalogType} whose {@link Table} ancestor should be removed
+     */
+    private void removeTableAncestor(CatalogType type) {
+        for (CatalogType ancestor = type; ancestor != null; ancestor = ancestor.getParent()) {
+            if (ancestor instanceof Table) {
+                m_replicableTables.remove(ancestor.getTypeName());
+                return;
+            }
+        }
+
+        throw new IllegalArgumentException("Type does not have a table as an ancestor: " + type);
     }
 
     private boolean isUniqueIndexColumn(CatalogType suspect) {

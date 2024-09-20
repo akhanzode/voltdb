@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -42,7 +42,7 @@ import org.voltdb.client.ClientResponse;
 import org.voltdb.sysprocs.saverestore.SnapshotUtil;
 import org.voltdb.sysprocs.saverestore.SnapshotPathType;
 import org.voltdb.sysprocs.saverestore.TableSaveFile;
-import org.voltdb.utils.VoltFile;
+import org.voltdb.utils.VoltSnapshotFile;
 
 /**
  * Agent responsible for collecting SnapshotScan info on this host.
@@ -418,7 +418,7 @@ public class SnapshotScanAgent extends OpsAgent
     private VoltTable getDiskFreeResults(String path)
     {
         VoltTable results = constructDiskFreeResultsTable();
-        File dir = new VoltFile(path);
+        File dir = new VoltSnapshotFile(path);
 
         if (dir.isDirectory()) {
             final long free = dir.getUsableSpace();
@@ -449,7 +449,7 @@ public class SnapshotScanAgent extends OpsAgent
     }
 
     private final List<File> retrieveRelevantFiles(String filePath) {
-        final File path = new VoltFile(filePath);
+        final File path = new VoltSnapshotFile(filePath);
 
         if (!path.exists()) {
             m_errorString = "Provided search path does not exist: " + filePath;

@@ -52,8 +52,9 @@ function jars-ifneeded() {
 
 # run the voltdb server locally
 function server() {
-    # note: "create --force" will delete any existing data
-    voltdb create --force -H $STARTUPLEADERHOST
+    # note: "init --force" will delete any existing data
+    voltdb init --force
+    voltdb start -H $STARTUPLEADERHOST
 }
 
 # load schema and procedures
@@ -87,9 +88,7 @@ function async-benchmark() {
         --maxvaluesize=1024 \
         --entropy=127 \
         --usecompression=false \
-        --ratelimit=20000 \
-        --autotune=false \
-        --latencytarget=6
+        --ratelimit=20000
 }
 
 function help() {

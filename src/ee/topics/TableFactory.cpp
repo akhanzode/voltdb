@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2019 VoltDB Inc.
+ * Copyright (C) 2019-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -38,7 +38,9 @@ const std::string GroupOffsetTable::indexName = GroupOffsetTable::name + "_pkey"
 class GroupTableStandalonePredicate : public AbstractExpression {
     NValue eval(const TableTuple* tuple, const TableTuple* unused = nullptr) const override {
         NValue protocol = tuple->getNValue(static_cast<int32_t>(GroupTable::Column::PROTOCOL));
-        return protocol.isNull() ? NValue::getTrue() : NValue::getFalse();
+        int32_t length;
+        ValuePeeker::peekObject_withoutNull(protocol, &length);
+        return length == 0 ? NValue::getTrue() : NValue::getFalse();
     }
 
     std::string debugInfo(const std::string &spacer) const override {
@@ -57,7 +59,7 @@ PersistentTable* TableFactory::createGroup(const SystemTableFactory &factory) {
     std::vector<ValueType> columnTypes = { ValueType::tVARCHAR, ValueType::tTIMESTAMP, ValueType::tINTEGER,
             ValueType::tVARCHAR, ValueType::tVARCHAR };
     std::vector<int32_t> columnSizes = { 256, 0, 0, 36, 256 };
-    std::vector<bool> allowNull = { false, false, false, true, true };
+    std::vector<bool> allowNull = { false, false, false, true, false };
     std::vector<bool> columnInBytes = { true, false, false, true, true };
 
     TupleSchema *schema = TupleSchema::createTupleSchema(columnTypes, columnSizes, allowNull, columnInBytes);
@@ -74,18 +76,21 @@ PersistentTable* TableFactory::createGroup(const SystemTableFactory &factory) {
 /*
  * Create a table for tracking topics group members equivalent to
  * CREATE TABLE _topics_group_member (group_id VARCHAR(256 BYTES) NOT NULL, id VARCHAR(36 BYTES) NOT NULL,
+ *     client_id VARCHAR(256 BYTES) NOT NULL, client_host VARCHAR(256 BYTES) NOT NULL,
  *     session_timeout INTEGER NOT NULL, rebalance_timeout INTEGER NOT NULL, instance_id VARCHAR(256 BYTES),
  *     protocol_metadata VARBINARY(1048576) NOT NULL, assignments VARBINARY(1048576) NOT NULL);
  * PARTITION TABLE topics_group_member ON COLUMN group_id;
  */
 PersistentTable* TableFactory::createGroupMember(const SystemTableFactory &factory) {
-    std::vector<std::string> columnNames = { "group_id", "id", "session_timeout", "rebalance_timeout", "instance_id",
+    std::vector<std::string> columnNames = { "group_id", "id", "client_id", "client_host", "session_timeout",
+            "rebalance_timeout", "instance_id",
             "protocol_metadata", "assignments" };
-    std::vector<ValueType> columnTypes = { ValueType::tVARCHAR, ValueType::tVARCHAR, ValueType::tINTEGER,
+    std::vector<ValueType> columnTypes = { ValueType::tVARCHAR, ValueType::tVARCHAR,
+            ValueType::tVARCHAR, ValueType::tVARCHAR, ValueType::tINTEGER,
             ValueType::tINTEGER, ValueType::tVARCHAR, ValueType::tVARBINARY, ValueType::tVARBINARY };
-    std::vector<int32_t> columnSizes = { 256, 36, 0, 0, 256, 1048576, 1048576 };
-    std::vector<bool> allowNull = { false, false, false, false, true, false, false };
-    std::vector<bool> columnInBytes = { true, true, false, false, true, true, true };
+    std::vector<int32_t> columnSizes = { 256, 36, 256, 256, 0, 0, 256, 1048576, 1048576 };
+    std::vector<bool> allowNull = { false, false, false, false, false, false, true, false, false };
+    std::vector<bool> columnInBytes = { true, true, true, true, false, false, true, true, true };
 
     TupleSchema *schema = TupleSchema::createTupleSchema(columnTypes, columnSizes, allowNull, columnInBytes);
     std::vector<int32_t> indexColumns = { static_cast<int32_t>(GroupMemberTable::Column::GROUP_ID) };

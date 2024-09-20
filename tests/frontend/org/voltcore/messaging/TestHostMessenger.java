@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -26,6 +26,8 @@ package org.voltcore.messaging;
 import static junit.framework.Assert.assertFalse;
 import static junit.framework.Assert.assertNotSame;
 import static junit.framework.Assert.assertNull;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.AssertionsForClassTypes.entry;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -37,15 +39,20 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import com.google_voltpatches.common.collect.ImmutableMap;
+import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.zookeeper_voltpatches.ZooKeeper;
+import org.assertj.core.util.Sets;
 import org.json_voltpatches.JSONObject;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.voltcore.common.Constants;
+import org.voltcore.utils.Pair;
 import org.voltcore.zk.CoreZK;
 import org.voltdb.StartAction;
 import org.voltdb.VoltDB;
@@ -105,8 +112,9 @@ public class TestHostMessenger {
                 .coordinators(coordinators)
                 .build();
         config.internalPort = config.internalPort + index;
-        config.zkInterface = "127.0.0.1:" + (7181 + index);
-        HostMessenger hm = new HostMessenger(config, null);
+        config.zkInterface = "127.0.0.1";
+        config.zkPort = 7181 + index;
+        HostMessenger hm = new HostMessenger(config, null, randomHostDisplayName());
         createdMessengers.add(hm);
         if (start) {
             hm.start();
@@ -126,24 +134,36 @@ public class TestHostMessenger {
 
     private HostMessenger createHostMessenger(int index, JoinAcceptor jc,
             boolean start)  throws Exception {
+        return createHostMessengerWithDisplayName(index, jc, start, randomHostDisplayName());
+    }
+
+    private HostMessenger createHostMessengerWithDisplayName(int index,
+                                                             JoinAcceptor jc,
+                                                             boolean start,
+                                                             String hostDisplayName) throws Exception {
         if (jc instanceof MeshProber) {
-            assertTrue("index is bigger than hostcount", index < ((MeshProber)jc).getHostCount());
+            assertTrue("index is bigger than hostcount", index < ((MeshProber) jc).getHostCount());
         }
         final HostMessenger.Config config;
         if (jc instanceof MeshProber) {
-            config = new HostMessenger.Config(((MeshProber)jc).isPaused());
+            config = new HostMessenger.Config(((MeshProber) jc).isPaused());
         } else {
             config = new HostMessenger.Config(false);
         }
         config.internalPort = config.internalPort + index;
-        config.zkInterface = "127.0.0.1:" + (7181 + index);
+        config.zkInterface = "127.0.0.1";
+        config.zkPort = 7181 + index;
         config.acceptor = jc;
-        HostMessenger hm = new HostMessenger(config, null);
+        HostMessenger hm = new HostMessenger(config, null, hostDisplayName);
         createdMessengers.add(hm);
         if (start) {
             hm.start();
         }
         return hm;
+    }
+
+    private String randomHostDisplayName() {
+        return RandomStringUtils.random(20);
     }
 
     static class HostMessengerThread extends Thread {
@@ -297,6 +317,41 @@ public class TestHostMessenger {
 
         assertTrue(hostids1.equals(hostids2));
         assertTrue(hostids2.equals(hostids3));
+    }
+
+    @Test
+    public void testShouldCreateAdditionalConnectionToPartitionGroupPeer() throws Exception {
+        MeshProber.Builder jc = MeshProber.builder()
+                .coordinators(coordinators(2))
+                .startAction(StartAction.PROBE)
+                .nodeState(NodeState.INITIALIZING)
+                .bare(true);
+
+        HostMessenger hm1 = createHostMessenger(0, jc.build(), true);
+        HostMessenger hm2 = createHostMessenger(1, jc.build(), false);
+
+        final AtomicReference<Exception> exception = new AtomicReference<Exception>();
+        HostMessengerThread hm2Start = new HostMessengerThread(hm2, exception);
+
+        hm2Start.start();
+        hm2Start.join();
+
+        if (exception.get() != null) {
+            fail(exception.get().toString());
+        }
+
+        Determination dtm = prober(hm1).waitForDetermination();
+        assertEquals(StartAction.CREATE, dtm.startAction);
+        assertEquals(2, dtm.hostCount);
+
+        assertEquals(dtm, prober(hm2).waitForDetermination());
+
+        assertFalse(hm1.m_foreignHosts.get(hm2.getHostId()).getHasMultiConnections());
+
+        hm1.setPartitionGroupPeers(Sets.set(hm2.getHostId()), 5);
+        hm1.createAuxiliaryConnections(false);
+
+        assertTrue(hm1.m_foreignHosts.get(hm2.getHostId()).getHasMultiConnections());
     }
 
     @Test
@@ -1228,7 +1283,7 @@ public class TestHostMessenger {
             fail("did not crash on whole cluster rejoin attempt");
         } catch (AssertionError pass) {
             assertTrue(VoltDB.wasCrashCalled);
-            assertTrue(VoltDB.crashMessage.contains("have different startup snapshots nonces"));
+            assertTrue(VoltDB.crashMessage.contains("have different startup snapshot nonces"));
         }
     }
 
@@ -1332,7 +1387,7 @@ public class TestHostMessenger {
             fail("did not crash on whole cluster rejoin attempt");
         } catch (AssertionError pass) {
             assertTrue(VoltDB.wasCrashCalled);
-            assertTrue(VoltDB.crashMessage.contains("is incompatible with this node verion"));
+            assertTrue(VoltDB.crashMessage.contains("is incompatible with this node version"));
         }
     }
 
@@ -1589,5 +1644,131 @@ public class TestHostMessenger {
         previous.add(3);
         // this should not trip partition detection
         assertFalse(HostMessenger.makePPDDecision(-1, previous, current, true));
+    }
+
+    @Test
+    public void testShouldCorrectlyPropagateHostDisplayNames() throws Exception {
+        MeshProber.Builder jc = MeshProber.builder()
+                .coordinators(coordinators(3))
+                .startAction(StartAction.PROBE)
+                .nodeState(NodeState.INITIALIZING)
+                .bare(true);
+
+        int hostId1 = 0;
+        int hostId2 = 1;
+        int hostId3 = 2;
+
+        String hostDisplayName1 = "host-0";
+        String hostDisplayName2 = "host-1";
+        String hostDisplayName3 = "host-2";
+
+        HostMessenger hm1 = createHostMessengerWithDisplayName(hostId1, jc.build(), true, hostDisplayName1);
+        HostMessenger hm2 = createHostMessengerWithDisplayName(hostId2, jc.build(), false, hostDisplayName2);
+        HostMessenger hm3 = createHostMessengerWithDisplayName(hostId3, jc.build(), false, hostDisplayName3);
+
+        final AtomicReference<Exception> exception = new AtomicReference<Exception>();
+        HostMessengerThread hm2Start = new HostMessengerThread(hm2, exception);
+        HostMessengerThread hm3Start = new HostMessengerThread(hm3, exception);
+
+        hm2Start.start();
+        hm2Start.join();
+
+        hm3Start.start();
+        hm3Start.join();
+
+        if (exception.get() != null) {
+            fail(exception.get().toString());
+        }
+
+        Determination dtm = prober(hm1).waitForDetermination();
+        assertEquals(StartAction.CREATE, dtm.startAction);
+        assertEquals(3, dtm.hostCount);
+
+        assertEquals(dtm, prober(hm2).waitForDetermination());
+        assertEquals(dtm, prober(hm3).waitForDetermination());
+
+        Map<Integer, String> hostIdToHostDisplayName1 = toHostIdToHostDisplayNameMap(hm1.m_foreignHosts);
+        Map<Integer, String> hostIdToHostDisplayName2 = toHostIdToHostDisplayNameMap(hm2.m_foreignHosts);
+        Map<Integer, String> hostIdToHostDisplayName3 = toHostIdToHostDisplayNameMap(hm3.m_foreignHosts);
+
+        assertThat(hostIdToHostDisplayName1).containsOnly(
+                entry(hostId2, hostDisplayName2),
+                entry(hostId3, hostDisplayName3)
+        );
+        assertThat(hostIdToHostDisplayName2).containsOnly(
+                entry(hostId1, hostDisplayName1),
+                entry(hostId3, hostDisplayName3)
+        );
+        assertThat(hostIdToHostDisplayName3).containsOnly(
+                entry(hostId1, hostDisplayName1),
+                entry(hostId2, hostDisplayName2)
+        );
+    }
+
+    @Test
+    public void testShouldCorrectlyPropagateHostDisplayNamesInIoStats() throws Exception {
+        MeshProber.Builder jc = MeshProber.builder()
+                .coordinators(coordinators(3))
+                .startAction(StartAction.PROBE)
+                .nodeState(NodeState.INITIALIZING)
+                .bare(true);
+
+        int hostId1 = 0;
+        int hostId2 = 1;
+        int hostId3 = 2;
+
+        String hostDisplayName1 = "host-0";
+        String hostDisplayName2 = "host-1";
+        String hostDisplayName3 = "host-2";
+
+        HostMessenger hm1 = createHostMessengerWithDisplayName(hostId1, jc.build(), true, hostDisplayName1);
+        HostMessenger hm2 = createHostMessengerWithDisplayName(hostId2, jc.build(), false, hostDisplayName2);
+        HostMessenger hm3 = createHostMessengerWithDisplayName(hostId3, jc.build(), false, hostDisplayName3);
+
+        final AtomicReference<Exception> exception = new AtomicReference<Exception>();
+        HostMessengerThread hm2Start = new HostMessengerThread(hm2, exception);
+        HostMessengerThread hm3Start = new HostMessengerThread(hm3, exception);
+
+        hm2Start.start();
+        hm2Start.join();
+
+        hm3Start.start();
+        hm3Start.join();
+
+        if (exception.get() != null) {
+            fail(exception.get().toString());
+        }
+
+        Determination dtm = prober(hm1).waitForDetermination();
+        assertEquals(StartAction.CREATE, dtm.startAction);
+        assertEquals(3, dtm.hostCount);
+
+        assertEquals(dtm, prober(hm2).waitForDetermination());
+        assertEquals(dtm, prober(hm3).waitForDetermination());
+
+        List<String> ioStatsConnectionNames1 = toConnectionNames(hm1.getIOStats(false));
+        List<String> ioStatsConnectionNames2 = toConnectionNames(hm2.getIOStats(false));
+        List<String> ioStatsConnectionNames3 = toConnectionNames(hm3.getIOStats(false));
+
+        assertThat(ioStatsConnectionNames1).contains(
+                hostDisplayName2,
+                hostDisplayName3
+        );
+        assertThat(ioStatsConnectionNames2).contains(
+                hostDisplayName1,
+                hostDisplayName3
+        );
+        assertThat(ioStatsConnectionNames3).contains(
+                hostDisplayName1,
+                hostDisplayName2
+        );
+    }
+
+    private Map<Integer, String> toHostIdToHostDisplayNameMap(ImmutableMap<Integer, ForeignHost> m_foreignHosts) {
+        return m_foreignHosts.entrySet().stream().collect(Collectors.toMap(Map.Entry::getKey, entry -> entry.getValue().hostDisplayName()));
+    }
+
+    private List<String> toConnectionNames(Map<Long, Pair<String, long[]>> ioStats) {
+        return ioStats.values().stream().map(Pair::getFirst).collect(Collectors.toList());
     }
 }

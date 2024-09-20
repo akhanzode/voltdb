@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -45,7 +45,7 @@ public class NonDeterministicSPProc extends VoltProcedure {
 
     public static final SQLStmt sql = new SQLStmt("insert into kv \nvalues ?, ?");
     public static final SQLStmt sql2 = new SQLStmt("insert into  kv values ?, ?");
-    public static final SQLStmt sql3 = new SQLStmt("select key from kv where nondetval = ? limit 100");
+    public static final SQLStmt sql3 = new SQLStmt("select key from kv where nondetval = ? order by key limit 100");
     public static final SQLStmt sql4 = new SQLStmt("update kv set nondetval = ? where key = ?;");
 
     public VoltTable run(long key, long value, int failType) {

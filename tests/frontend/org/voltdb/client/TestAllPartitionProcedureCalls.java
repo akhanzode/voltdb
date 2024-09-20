@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -31,6 +31,7 @@ import java.io.File;
 import java.io.IOException;
 import java.util.concurrent.CountDownLatch;
 
+import org.apache.commons.io.FileUtils;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -39,7 +40,6 @@ import org.voltdb.VoltTable;
 import org.voltdb.compiler.VoltProjectBuilder;
 import org.voltdb.regressionsuites.JUnit4LocalClusterTest;
 import org.voltdb.regressionsuites.LocalCluster;
-import org.voltdb.utils.VoltFile;
 
 /**
  *  Test client all partition calls
@@ -55,7 +55,7 @@ public class TestAllPartitionProcedureCalls extends JUnit4LocalClusterTest {
     @Before
     public void setUp() throws Exception
     {
-        VoltFile.recursivelyDelete(new File("/tmp/" + System.getProperty("user.name")));
+        FileUtils.deleteDirectory(new File("/tmp/" + System.getProperty("user.name")));
         File f = new File("/tmp/" + System.getProperty("user.name"));
         f.mkdirs();
 
@@ -73,7 +73,6 @@ public class TestAllPartitionProcedureCalls extends JUnit4LocalClusterTest {
         cluster.startUp();
 
         ClientConfig config = new ClientConfig();
-        config.setClientAffinity(false);
         client = ClientFactory.createClient(config);
         client.createConnection("", cluster.port(0));
         load(client, "TABLE_INT_PARTITION");
@@ -123,26 +122,26 @@ public class TestAllPartitionProcedureCalls extends JUnit4LocalClusterTest {
         // check sysproc
         responses = client.callAllPartitionProcedure("@Statistics", "MEMORY");
         for (ClientResponseWithPartitionKey response : responses) {
-            assertEquals(ClientResponse.GRACEFUL_FAILURE, response.response.getStatus());
-            String msg = response.response.getStatusString();
-            assertTrue(msg.contains("Invalid procedure for all-partition execution"));
+            checkFail(response);
         }
 
         // check multipart
         responses = client.callAllPartitionProcedure("MultiPartitionProcedureSample", 0);
         for (ClientResponseWithPartitionKey response : responses) {
-            assertEquals(ClientResponse.GRACEFUL_FAILURE, response.response.getStatus());
-            String msg = response.response.getStatusString();
-            assertTrue(msg.contains("Invalid procedure for all-partition execution"));
+            checkFail(response);
         }
 
         // check wrong-partitioning
         responses = client.callAllPartitionProcedure("PartitionedTestProcNonZeroPartitioningParam", 0, 1);
         for (ClientResponseWithPartitionKey response : responses) {
-            assertEquals(ClientResponse.GRACEFUL_FAILURE, response.response.getStatus());
-            String msg = response.response.getStatusString();
-            assertTrue(msg.contains("Invalid procedure for all-partition execution"));
+            checkFail(response);
         }
+    }
+
+    private void checkFail(ClientResponseWithPartitionKey response) {
+        assertEquals(ClientResponse.GRACEFUL_FAILURE, response.response.getStatus());
+        String msg = response.response.getStatusString();
+        assertTrue("wrong failure msg \""+msg+"\"", msg.contains("Invalid procedure for all-partition execution"));
     }
 
     @Test
@@ -205,10 +204,15 @@ public class TestAllPartitionProcedureCalls extends JUnit4LocalClusterTest {
 
     private void validateResults(ClientResponseWithPartitionKey[]  responses, int partitionCount) {
         assertNotNull("responses are null", responses);
-        assertEquals ("response array size is not equal to the number of partitions", partitionCount, responses.length);
+        assertEquals("response array size is not equal to the number of partitions", partitionCount, responses.length);
         long total = 0;
         for (ClientResponseWithPartitionKey resp: responses) {
-            VoltTable results = resp.response.getResults()[0];
+            byte status = resp.response.getStatus();
+            String msg = resp.response.getStatusString();
+            assertEquals("response failed, message \""+msg+"\"", ClientResponse.SUCCESS, status);
+            VoltTable[] vta = resp.response.getResults();
+            assertTrue("response has no table", vta.length > 0);
+            VoltTable results = vta[0];
             long count = results.fetchRow(0).getLong(0);
             assertTrue(count > 0);
             total += count;

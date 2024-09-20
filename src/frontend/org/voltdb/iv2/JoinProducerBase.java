@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -188,11 +188,14 @@ public abstract class JoinProducerBase extends SiteTasker {
                                    Map<String, Map<Integer, ExportSnapshotTuple>> exportSequenceNumbers,
                                    Map<Integer, Long> drSequenceNumbers,
                                    Map<Integer, Map<Integer, Map<Integer, DRSiteDrIdTracker>>> allConsumerSiteTrackers,
+                                   Map<Byte, byte[]> drCatalogCommands,
+                                   Map<Byte, String[]> replicableTables,
                                    boolean requireExistingSequenceNumbers,
                                    long clusterCreateTime)
     {
         siteConnection.setRejoinComplete(m_completionAction, exportSequenceNumbers, drSequenceNumbers,
-                allConsumerSiteTrackers, requireExistingSequenceNumbers, clusterCreateTime);
+                allConsumerSiteTrackers, drCatalogCommands, replicableTables, requireExistingSequenceNumbers,
+                clusterCreateTime);
     }
 
     protected void registerSnapshotMonitor(String nonce) {

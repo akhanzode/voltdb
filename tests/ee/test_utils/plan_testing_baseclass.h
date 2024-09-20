@@ -1,8 +1,8 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This file contains original code and/or modifications of original code.
- * Any modifications made by VoltDB Inc. are licensed under the following
+ * Any modifications made by Volt Active Data Inc. are licensed under the following
  * terms and conditions:
  *
  * Permission is hereby granted, free of charge, to any person obtaining
@@ -157,7 +157,7 @@ public:
         m_engine->resetReusedResultOutputBuffer();
         m_engine->resetPerFragmentStatsOutputBuffer();
         int partitionCount = 1;
-        m_engine->initialize(m_cluster_id, m_site_id, 0, partitionCount, 0, "", 0, 1024, voltdb::DEFAULT_TEMP_TABLE_MEMORY, true);
+        m_engine->initialize(m_cluster_id, m_site_id, 0, partitionCount, 0, "", 0, 1024, false, -1, false, voltdb::DEFAULT_TEMP_TABLE_MEMORY, true);
         partitionCount = htonl(partitionCount);
         int tokenCount = htonl(100);
         int partitionId = htonl(0);

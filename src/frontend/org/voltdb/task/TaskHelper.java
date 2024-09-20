@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2019 VoltDB Inc.
+ * Copyright (C) 2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -33,7 +33,7 @@ public interface TaskHelper {
     /**
      * @return The scope in which the task will be executing
      */
-    TaskScope getTaskScepe();
+    TaskScope getTaskScope();
 
     /**
      * Returns the ID of the scope when this helper is passed to an {@code instantiate} method otherwise {@code -1}

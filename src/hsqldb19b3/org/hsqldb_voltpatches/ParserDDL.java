@@ -1,4 +1,5 @@
 /* Copyright (c) 2001-2009, The HSQL Development Group
+ * Copyright (c) 2010-2022, Volt Active Data Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -28,12 +29,12 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-
 package org.hsqldb_voltpatches;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import org.hsqldb_voltpatches.HsqlNameManager.HsqlName;
@@ -49,6 +50,7 @@ import org.hsqldb_voltpatches.rights.User;
 import org.hsqldb_voltpatches.types.Charset;
 import org.hsqldb_voltpatches.types.Type;
 import org.hsqldb_voltpatches.types.UserTypeModifier;
+
 
 /**
  * Parser for DDL statements
@@ -71,6 +73,21 @@ public class ParserDDL extends ParserRoutine {
 
     ParserDDL(Session session, Scanner scanner) {
         super(session, scanner);
+    }
+
+    private static class Pair<T, U> {
+        private final T m_first;
+        private final U m_second;
+        Pair(T first, U second) {
+            m_first = first;
+            m_second = second;
+        }
+        T getFirst() {
+            return m_first;
+        }
+        U getSecond() {
+            return m_second;
+        }
     }
 
     @Override
@@ -241,6 +258,7 @@ public class ParserDDL extends ParserRoutine {
         }
     }
 
+    // Called from StatementSchema
     void processAlter() {
 
         session.setScripting(true);
@@ -248,19 +266,24 @@ public class ParserDDL extends ParserRoutine {
 
         switch (token.tokenType) {
 
-            case Tokens.STREAM :
+            case Tokens.STREAM : {
+                read();
+                processAlterStream();
+                break;
+            }
+
             case Tokens.TABLE : {
                 read();
                 processAlterTable();
-
                 break;
             }
+
             case Tokens.DOMAIN : {
                 read();
                 processAlterDomain();
-
                 break;
             }
+
             default : {
                 throw unexpectedToken();
             }
@@ -284,6 +307,7 @@ public class ParserDDL extends ParserRoutine {
 
                 return compileRenameObject(name, SchemaObject.INDEX);
             }
+
             case Tokens.SCHEMA : {
                 read();
 
@@ -294,6 +318,7 @@ public class ParserDDL extends ParserRoutine {
 
                 return compileRenameObject(name, SchemaObject.SCHEMA);
             }
+
             case Tokens.CATALOG : {
                 read();
                 checkIsSimpleName();
@@ -308,31 +333,37 @@ public class ParserDDL extends ParserRoutine {
                 return compileRenameObject(database.getCatalogName(),
                                            SchemaObject.CATALOG);
             }
+
             case Tokens.SEQUENCE : {
                 read();
-
                 return compileAlterSequence();
             }
+
             case Tokens.TABLE : {
                 read();
-
                 return compileAlterTable();
             }
+
+            case Tokens.VIEW : {
+                read();
+                return compileAlterView();
+            }
+
             case Tokens.STREAM : {
                 read();
-
-                return compileAlterTable();
+                return compileAlterStream();
             }
+
             case Tokens.USER : {
                 read();
-
                 return compileAlterUser();
             }
+
             case Tokens.DOMAIN : {
                 read();
-
                 return compileAlterDomain();
             }
+
             default : {
                 throw unexpectedToken();
             }
@@ -593,8 +624,17 @@ public class ParserDDL extends ParserRoutine {
                                    writeName);
     }
 
+    // Process ALTER TABLE or ALTER STREAM
+    // (no differences between TABLE and STREAM yet)
     private void processAlterTable() {
+        processAlterTableOrStream();
+    }
 
+    private void processAlterStream() {
+        processAlterTableOrStream();
+    }
+
+    private void processAlterTableOrStream() {
         String   tableName = token.tokenString;
         HsqlName schema    = session.getSchemaHsqlName(token.namePrefix);
 
@@ -635,6 +675,7 @@ public class ParserDDL extends ParserRoutine {
                 // A VoltDB extension to support the assume unique attribute
                 boolean assumeUnique = false; // For VoltDB
                 // End of VoltDB extension
+
                 switch (token.tokenType) {
 
                     case Tokens.FOREIGN :
@@ -673,13 +714,6 @@ public class ParserDDL extends ParserRoutine {
 
                         return;
 
-                    // A VoltDB extension to support LIMIT PARTITION ROWS syntax
-                    case Tokens.LIMIT :
-                        read();
-                        processAlterTableAddLimitConstraint(t, cname);
-
-                        return;
-                    // End of VoltDB extension
                     case Tokens.COLUMN :
                         if (cname != null) {
                             throw unexpectedToken();
@@ -729,28 +763,6 @@ public class ParserDDL extends ParserRoutine {
 
                         return;
                     }
-                    // A VoltDB extension to support LIMIT PARTITION ROWS syntax
-                    case Tokens.LIMIT : {
-                        // CASCADE currently has no meaning with this constraint,
-                        // always false
-                        boolean cascade = false;
-
-                        read();
-                        readThis(Tokens.PARTITION);
-                        readThis(Tokens.ROWS);
-
-                        Constraint c = t.getLimitConstraint();
-                        if (c != null) {
-                            processAlterTableDropConstraint(
-                                    t, c.getName().name, cascade);
-                        }
-                        else {
-                            throw Error.error(ErrorCode.X_42501);
-                        }
-
-                        return;
-                    }
-                    // End of VoltDB extension
                     case Tokens.CONSTRAINT : {
                         boolean cascade = false;
 
@@ -820,111 +832,89 @@ public class ParserDDL extends ParserRoutine {
         }
     }
 
+    // Compiles ALTER TABLE statement
     Statement compileAlterTable() {
 
-        String   tableName = token.tokenString;
-        HsqlName schema    = session.getSchemaHsqlName(token.namePrefix);
-        Table t = database.schemaManager.getUserTable(session, tableName,
-            schema.name);
+        String tableName = token.tokenString;
+        HsqlName schema = session.getSchemaHsqlName(token.namePrefix);
+        Table t = database.schemaManager.getUserTable(session, tableName, schema.name);
 
         if (t.isView()) {
             throw Error.error(ErrorCode.X_42501, tableName);
         }
 
         read();
-
         switch (token.tokenType) {
 
             case Tokens.RENAME : {
                 read();
                 readThis(Tokens.TO);
-
                 return compileRenameObject(t.getName(), SchemaObject.TABLE);
             }
+
             case Tokens.ADD : {
                 read();
 
                 HsqlName cname = null;
-
                 if (token.tokenType == Tokens.CONSTRAINT) {
                     read();
-
                     cname = readNewDependentSchemaObjectName(t.getName(),
                             SchemaObject.CONSTRAINT);
                 }
 
-                // A VoltDB extension to support the assume unique attribute
-                boolean assumeUnique = false;
-                // End of VoltDB extension
                 switch (token.tokenType) {
 
                     case Tokens.FOREIGN :
                         read();
                         readThis(Tokens.KEY);
-
-                        return compileAlterTableAddForeignKeyConstraint(t,
-                                cname);
+                        return compileAlterTableAddForeignKeyConstraint(t, cname);
 
                     // A VoltDB extension to support the assume unique attribute
                     case Tokens.ASSUMEUNIQUE:
-                        assumeUnique = true;
-                        // $FALL-THROUGH$
+                        read();
+                        return compileAlterTableAddUniqueConstraint(t, cname, true);
                     // End of VoltDB extension
+
                     case Tokens.UNIQUE :
                         read();
-
-                        // A VoltDB extension to support the assume unique attribute
-                        return compileAlterTableAddUniqueConstraint(t, cname, assumeUnique);
-                        /* disable 1 line ...
-                        return compileAlterTableAddUniqueConstraint(t, cname);
-                        ... disabled 1 line */
-                        // End of VoltDB extension
+                        return compileAlterTableAddUniqueConstraint(t, cname, false);
 
                     case Tokens.CHECK :
                         read();
-
                         return compileAlterTableAddCheckConstraint(t, cname);
 
                     case Tokens.PRIMARY :
                         read();
                         readThis(Tokens.KEY);
-
                         return compileAlterTableAddPrimaryKey(t, cname);
 
-                    // A VoltDB extension to support LIMIT PARTITION ROWS syntax
-                    case Tokens.LIMIT :
-                        read();
-
-                        return compileAlterTableAddLimitConstraint(t, cname);
-                    // End of VoltDB extension
                     case Tokens.COLUMN :
                         if (cname != null) {
                             throw unexpectedToken();
                         }
-
                         read();
                         checkIsSimpleName();
-
                         return compileAlterTableAddColumn(t);
 
                     case Tokens.USING :
                         if (t.getTTL() != null) {
-                            throw Error.error(ErrorCode.X_42504);
+                            throw Error.error(ErrorCode.X_42504); // object already exists
                         }
                         if (t.hasMigrationTarget()) {
-                            throw Error.error(ErrorCode.X_42581, "May not add TTL column");
+                            // Warning, there's a unit test depending on this exact wording
+                            throw Error.error(ErrorCode.X_42513, "May not add TTL column");
                         }
                         return readTimeToLive(t, true);
+
                     default :
                         if (cname != null) {
                             throw unexpectedToken();
                         }
-
                         checkIsSimpleName();
-
                         return compileAlterTableAddColumn(t);
                 }
             }
+
             case Tokens.DROP : {
                 read();
 
@@ -933,53 +923,44 @@ public class ParserDDL extends ParserRoutine {
                     case Tokens.PRIMARY : {
                         read();
                         readThis(Tokens.KEY);
-
                         return compileAlterTableDropPrimaryKey(t);
                     }
-                    // A VoltDB extension to support LIMIT PARTITION ROWS syntax
-                    case Tokens.LIMIT : {
-                        read();
-                        readThis(Tokens.PARTITION);
-                        readThis(Tokens.ROWS);
-                        return compileAlterTableDropLimit(t);
-                    }
-                    // End of VoltDB extension
+
                     case Tokens.CONSTRAINT : {
                         read();
-
                         return compileAlterTableDropConstraint(t);
                     }
+
                     case Tokens.TTL :
                         read();
                         return compileAlterTableDropTTL(t);
+
                     case Tokens.COLUMN :
                         read();
-                    // $FALL-THROUGH$
+                        // $FALL-THROUGH$
+
                     default : {
                         checkIsSimpleName();
-
-                        String  name    = token.tokenString;
+                        String column = token.tokenString;
+                        read(); // advance over identifier
                         boolean cascade = false;
-
-                        read();
-
                         if (token.tokenType == Tokens.RESTRICT) {
                             read();
-                        } else if (token.tokenType == Tokens.CASCADE) {
+                        }
+                        else if (token.tokenType == Tokens.CASCADE) {
                             read();
-
                             cascade = true;
                         }
-
-                        return compileAlterTableDropColumn(t, name, cascade);
+                        return compileAlterTableDropColumn(t, column, cascade);
                     }
                 }
             }
+
             case Tokens.ALTER : {
                 read();
 
                 if (token.tokenType == Tokens.EXPORT) {
-                    return readPersistentExport(t, true);
+                    return readPersistentExport(t);
                 }
 
                 if (token.tokenType == Tokens.USING) {
@@ -990,26 +971,101 @@ public class ParserDDL extends ParserRoutine {
                     read();
                 }
 
-                int          columnIndex = t.getColumnIndex(token.tokenString);
-                ColumnSchema column      = t.getColumn(columnIndex);
-
-                read();
-
+                int columnIndex = t.getColumnIndex(token.tokenString);
+                ColumnSchema column = t.getColumn(columnIndex);
+                read(); // advance over identifier
                 return compileAlterColumn(t, column, columnIndex);
             }
+
             default : {
                 throw unexpectedToken();
             }
         }
     }
 
-    //VoltDB extension, drop TTL
+    // Compiles ALTER VIEW statement.
+    // Only ALTER USING TTL... is supported, with
+    // syntax the same as used on the CREATE VIEW.
+    Statement compileAlterView() {
+
+        String tableName = token.tokenString;
+        HsqlName schema = session.getSchemaHsqlName(token.namePrefix);
+        Table t = database.schemaManager.getUserTable(session, tableName, schema.name);
+
+        if (!t.isView()) {
+            throw Error.error(ErrorCode.X_42501, tableName);
+        }
+
+        read();  // skip past table name
+        readThis(Tokens.ALTER);
+        checkIsThis(Tokens.USING);
+
+        return readTimeToLive(t, true);
+    }
+
+    // Compiles ALTER STREAM statement
+    Statement compileAlterStream() {
+
+        String tableName = token.tokenString;
+        HsqlName schema = session.getSchemaHsqlName(token.namePrefix);
+        Table t = database.schemaManager.getUserTable(session, tableName, schema.name);
+
+        if (t.isView()) {
+            throw Error.error(ErrorCode.X_42501, tableName);
+        }
+
+        read();
+        switch (token.tokenType) {
+
+            case Tokens.RENAME : {
+                read();
+                readThis(Tokens.TO);
+                return compileRenameObject(t.getName(), SchemaObject.TABLE);
+            }
+
+            case Tokens.ADD : {
+                read();
+                readIfThis(Tokens.COLUMN);
+                checkIsSimpleName();
+                // do not advance past identifier in this case
+                return compileAlterTableAddColumn(t);
+            }
+
+            case Tokens.DROP : {
+                read();
+                readIfThis(Tokens.COLUMN);
+                checkIsSimpleName();
+                String column = token.tokenString;
+                read(); // advance past identifier
+                return compileAlterTableDropColumn(t, column, false);
+            }
+
+            case Tokens.ALTER : {
+                read();
+                if (token.tokenType == Tokens.EXPORT) {
+                    return readPersistentExport(t);
+                }
+                readIfThis(Tokens.COLUMN);
+                int columnIndex = t.getColumnIndex(token.tokenString);
+                ColumnSchema column = t.getColumn(columnIndex);
+                read(); // advance past identifier
+                return compileAlterColumn(t, column, columnIndex);
+            }
+
+            default : {
+                throw unexpectedToken();
+            }
+        }
+    }
+
+    // VoltDB extension, DROP TTL
     private Statement compileAlterTableDropTTL(Table t) {
         if (t.hasMigrationTarget()) {
-            throw Error.error(ErrorCode.X_42581, "May not drop TTL column");
+            // Warning, there's a unit test depending on this exact wording
+            throw Error.error(ErrorCode.X_42513, "May not drop TTL column");
         }
         if (t.getTTL() == null) {
-            throw Error.error(ErrorCode.X_42501);
+            throw Error.error(ErrorCode.X_42501); // object not found
         }
         Object[] args = new Object[] {
             t.getName(),
@@ -1020,118 +1076,124 @@ public class ParserDDL extends ParserRoutine {
                                    null, t.getName());
     }
 
-    private void setPeristentExportTriggers(Table table) {
-        // EXPORT TO TARGET FOO ON INSERT, DELETE, UPDATE;
-        if (token.tokenType != Tokens.EXPORT) {
-            return;
-        }
-        String target = readMigrateTarget();
-        List<String> triggers = readExportTrigger(false);
-        target = target.toUpperCase();
-        PersistentExport export = new PersistentExport(target, triggers);
-        table.persistentExport = export;
-    }
-    private Statement readPersistentExport(Table table, boolean alter) {
-
-        // EXPORT TO TARGET FOO ON INSERT, DELETE, UPDATE;
+    // This is used for ALTER TABLE... ALTER
+    // - parses 'EXPORT TO TARGET/TOPIC FOO ON INSERT, DELETE, UPDATE'
+    // and for ALTER STREAM... ALTER
+    // - parses 'EXPORT TO TARGET/TOPIC' (no ON clause allowed)
+    // In both cases
+    // - parse must end with semicolon, no more clauses after this.
+    private Statement readPersistentExport(Table table) {
         if (token.tokenType != Tokens.EXPORT) {
             return null;
         }
-        String target = readMigrateTarget();
-        // read triggers
-        List<String> triggers = readExportTrigger(true);
+        Pair<String,Integer> target = readExportTargetOrTopic();
+        List<String> triggers = table.isStream() ? Collections.emptyList()
+                                                 : readExportTrigger();
+        if (token.tokenType != Tokens.SEMICOLON) {
+            throw unexpectedToken();
+        }
+
         Object[] args = new Object[] {
                 table.getName(),
-                target.toUpperCase(),
+                target.getFirst().toUpperCase(),
                 triggers,
-                Integer.valueOf(SchemaObject.CONSTRAINT), Boolean.valueOf(false),
-                Boolean.valueOf(false)
+                Boolean.valueOf(target.getSecond() == Tokens.TOPIC),
+                // TODO: Unclear what used following args, maybe nothing?
+                // Integer.valueOf(SchemaObject.CONSTRAINT), Boolean.valueOf(false),
+                // Boolean.valueOf(false)
             };
-        return new StatementSchema(null, StatementTypes.ALTER_EXPORT, args,
-                                       null, table.getName());
+
+        return new StatementSchema(null/*sql*/, StatementTypes.ALTER_EXPORT, args,
+                                   null/*readName*/, table.getName()/*writeName*/);
     }
 
-    private List<String> readExportTrigger(boolean alter) {
-        List<String> triggers = new ArrayList<>();
-        read();
-        if (token.tokenType == Tokens.ON) {
-            read();
-            int lastTokenType = token.tokenType;
-            int endToken = (alter ? Tokens.SEMICOLON : Tokens.OPENBRACKET);
-            while (token.tokenType != endToken) {
-                String theToken = null;;
-                switch(token.tokenType) {
-                case Tokens.DELETE:
-                    theToken = Tokens.T_DELETE;
-                    break;
-                case Tokens.INSERT:
-                    theToken = Tokens.T_INSERT;
-                    break;
-                case Tokens.UPDATE:
-                    theToken = Tokens.T_UPDATE;
-                    break;
-                case Tokens.UPDATEOLD:
-                    theToken = Tokens.T_UPDATEOLD;
-                    break;
-                case Tokens.UPDATENEW:
-                    theToken = Tokens.T_UPDATENEW;
-                    break;
-                default:
-                    if (token.tokenType != Tokens.COMMA){
-                        throw unexpectedToken();
-                    }
-                }
-                if (theToken != null) {
-                    if (triggers.contains(theToken)) {
-                        throw unexpectedToken();
-                    }
-                    triggers.add(theToken);
-                }
-                read();
+    // Parses 'ON trigger...' syntax.
+    // - On entry, the current token is the potential ON token;
+    //   if not ON, we return without reading anything further.
+    // - On return, the current token will be the first token that
+    //   is not part of the trigger list.
+    private List<String> readExportTrigger() {
+        if (token.tokenType != Tokens.ON) {
+            return Arrays.asList("INSERT");
+        }
 
-                // Cannot have two same tokens in a row
-                if (lastTokenType == token.tokenType) {
-                    throw unexpectedToken();
+        List<String> triggers = new ArrayList<>();
+        boolean delimiter = true; // a trigger is next
+        boolean endNow = false;
+
+        while (!endNow) {
+            read();
+            switch(token.tokenType) {
+
+            // Triggers
+            case Tokens.DELETE:
+            case Tokens.INSERT:
+            case Tokens.UPDATE:
+            case Tokens.UPDATEOLD:
+            case Tokens.UPDATENEW:
+                String theToken = Tokens.getKeyword(token.tokenType);
+                // TODO: should we enforce use of comma? Wasn't checked before.
+                if (triggers.contains(theToken)) {
+                    throw unexpectedToken(theToken + " is repeated");
                 }
-                lastTokenType = token.tokenType;
+                triggers.add(theToken);
+                delimiter = false;
+                break;
+
+            // Separator between triggers
+            case Tokens.COMMA:
+                if (delimiter) {
+                    throw unexpectedToken(); // comma should only follow a trigger
+                }
+                delimiter = true;
+                break;
+
+            // Any other token starts some other clause
+            default:
+                if (delimiter) {
+                    throw unexpectedToken(); // there must be a trigger
+                }
+                endNow = true;
+                break;
             }
         }
-        if (triggers.contains(Tokens.T_UPDATE) && (triggers.contains(Tokens.T_UPDATEOLD) || triggers.contains(Tokens.T_UPDATENEW))){
-            throw unexpectedToken("Cann't combine " + Tokens.T_UPDATE + " with " + Tokens.T_UPDATEOLD +
-                    " or " + Tokens.T_UPDATENEW);
-        }
-        if (triggers.contains(Tokens.T_UPDATEOLD) && triggers.contains(Tokens.T_UPDATENEW)) {
-            throw unexpectedToken("Use " + Tokens.T_UPDATE + " instead of both " + Tokens.T_UPDATEOLD +
-                    " and " + Tokens.T_UPDATENEW);
-        }
 
-        if (triggers.isEmpty()) {
-            triggers= Arrays.asList("INSERT");
+        boolean isUpdateOld = triggers.contains(Tokens.T_UPDATEOLD);
+        boolean isUpdateNew = triggers.contains(Tokens.T_UPDATENEW);
+        if (isUpdateOld | isUpdateNew) {
+            // TODO: better error - this is not a syntax error much less an unexpected token
+            if (triggers.contains(Tokens.T_UPDATE)) {
+                throw unexpectedToken("Can't combine " + Tokens.T_UPDATE + " with " + Tokens.T_UPDATEOLD +
+                                      " or " + Tokens.T_UPDATENEW);
+            }
+            if (isUpdateOld & isUpdateNew) {
+                throw unexpectedToken("Use " + Tokens.T_UPDATE + " instead of both " + Tokens.T_UPDATEOLD +
+                                      " and " + Tokens.T_UPDATENEW);
+            }
         }
 
         return triggers;
     }
+
+    // Parses USING TTL 10 SECONDS ON COLUMN aaa [BATCH_SIZE 1000] [MAX_FREQUENCY 1]
+    // terminates on reading semicolon.
+    // TTL, COLUMN required.
+    // BATCH_SIZE, MAX_FREQUENCY defaulted if not specified.
     private Statement readTimeToLive(Table table, boolean alter) {
-        //syntax: USING TTL 10 SECONDS ON COLUMN a BATCH_SIZE 1000 MAX_FREQUENCY 1 MIGRATE TO TARGET <TARGET NAME>
         if (!alter && token.tokenType != Tokens.USING) {
             return null;
         }
+
         int timeLiveValue = 0;
         String ttlUnit = "SECONDS";
         String ttlColumn = "";
         int batchSize = 1000;
         int maxFrequency = 1;
-        read();
-        if (token.tokenType != Tokens.TTL) {
-            throw unexpectedToken();
-        }
 
+        // Time to live
         read();
-        if (token.tokenType != Tokens.X_VALUE) {
-            throw unexpectedToken();
-        }
-        timeLiveValue = (Integer)(token.tokenValue);
-
+        checkIsThis(Tokens.TTL);
+        timeLiveValue = readInt();
         read();
         if (token.tokenType == Tokens.SECONDS || token.tokenType == Tokens.MINUTES ||
              token.tokenType == Tokens.HOURS || token.tokenType == Tokens.DAYS) {
@@ -1139,111 +1201,144 @@ public class ParserDDL extends ParserRoutine {
             read();
         }
 
-        if (token.tokenType == Tokens.ON) {
-            read();
-            if (token.tokenType != Tokens.COLUMN) {
-                throw unexpectedToken();
-            }
-            read();
-            if (token.tokenType != Tokens.X_IDENTIFIER) {
-                throw unexpectedToken();
-            }
-            ttlColumn = token.tokenString;
-            int index = table.findColumn(ttlColumn);
-            if (index < 0) {
-                throw unexpectedToken();
-            }
-            ColumnSchema col = table.getColumn(index);
-            //TIMESTAMP, INTEGER, BIGINT
-            int colType = col.getDataType().typeCode;
-            if (colType != Types.SQL_INTEGER && colType != Types.SQL_BIGINT && colType != Types.SQL_TIMESTAMP) {
-                throw unexpectedToken();
-            }
-            // At this moment we don't allow alter TTL column of migrate table on the fly
-            if (alter && table.hasMigrationTarget() && !token.tokenString.equals(table.getTTL().ttlColumn.getNameString())) {
-                throw Error.error(ErrorCode.X_42581, "May not alter TTL column");
-            }
-        } else {
-            throw unexpectedToken();
-        }
+        // Column for TTL determination
+        readThis(Tokens.ON);
+        readThis(Tokens.COLUMN);
+        checkIsValidIdentifier();
+        ttlColumn = token.tokenString;
+
+        // BATCH_SIZE, MAX_FREQUENCY, in either order
         read();
-        if (token.tokenType == Tokens.SEMICOLON) {
-            return createTimeToLive(table, timeLiveValue, ttlUnit, ttlColumn, batchSize, maxFrequency);
-        }
-        if (token.tokenType == Tokens.BATCH_SIZE || token.tokenType == Tokens.MAX_FREQUENCY) {
-            if (token.tokenType == Tokens.BATCH_SIZE) {
-                read();
-                if (token.tokenType != Tokens.X_VALUE) {
-                    throw unexpectedToken();
-                }
-                batchSize = (Integer)(token.tokenValue);
+        boolean seenBatch = false, seenFreq = false;
+        while (token.tokenType != Tokens.SEMICOLON && token.tokenType != Tokens.X_ENDPARSE) {
+            switch (token.tokenType) {
+
+            case Tokens.BATCH_SIZE:
+                batchSize = readInt();
                 if (batchSize < 1) {
                     throw unexpectedToken("BATCH_SIZE must be a positive integer");
                 }
-            } else {
-                read();
-                if (token.tokenType != Tokens.X_VALUE) {
+                if (seenBatch) {
+                    throw unexpectedToken("BATCH_SIZE is repeated");
+                }
+                seenBatch = true;
+                break;
+
+            case Tokens.MAX_FREQUENCY:
+                maxFrequency = readInt();
+                if (maxFrequency < 1) {
+                    throw unexpectedToken("MAX_FREQUENCY must be a positive integer");
+                }
+                if (seenFreq) {
+                    throw unexpectedToken("MAX_FREQUENCY is repeated");
+                }
+                seenFreq = true;
+                break;
+
+            default:
+                String require = String.format("%s%s%s",
+                                               seenBatch ? "" : Tokens.T_BATCH_SIZE,
+                                               seenBatch|seenFreq ? "" : " or ",
+                                               seenFreq ? "" : Tokens.T_MAX_FREQUENCY);
+                if (require.isEmpty()) {
                     throw unexpectedToken();
                 }
-                maxFrequency = (Integer)(token.tokenValue);
-                if (maxFrequency < 1) {
-                    throw unexpectedToken("MAX_FREQUENCY must be a positive integer");
+                else {
+                    throw unexpectedTokenRequire(require);
                 }
             }
-        }
 
-        read();
-        if (token.tokenType == Tokens.SEMICOLON) {
-            return createTimeToLive(table, timeLiveValue, ttlUnit, ttlColumn, batchSize, maxFrequency);
-        }
-
-        if (token.tokenType == Tokens.BATCH_SIZE || token.tokenType == Tokens.MAX_FREQUENCY) {
             read();
-            if (token.tokenType != Tokens.X_VALUE) {
-                throw unexpectedToken();
+        }
+
+        // Semantic checks on column
+        // Only limited checks possible for views during creation
+        if (table instanceof View && !alter) {
+            View view = (View)table;
+            if (view.findColumnName(ttlColumn) == null) {
+                throw Error.error(ErrorCode.X_42501, ttlColumn); // object not found
             }
-            if (token.tokenType == Tokens.BATCH_SIZE) {
-                batchSize = (Integer)(token.tokenValue);
-                if (batchSize < 1) {
-                    throw unexpectedToken("BATCH_SIZE must be a positive integer");
-                }
-            } else {
-                maxFrequency = (Integer)(token.tokenValue);
-                if (maxFrequency < 1) {
-                    throw unexpectedToken("MAX_FREQUENCY must be a positive integer");
-                }
+            view.addTTL(timeLiveValue, ttlUnit, ttlColumn, batchSize, maxFrequency);
+            return null;
+        }
+
+        // Table or stream.
+        // Check on type of TTL column is done in Volt's DDLCompiler.
+        int index = table.findColumn(ttlColumn);
+        if (index < 0) {
+            throw Error.error(ErrorCode.X_42501, ttlColumn); // object not found
+        }
+
+        // At this moment we don't allow alter TTL column of migrate table on the fly
+        if (alter && table.hasMigrationTarget()) {
+            String oldColumn = table.getTTL().ttlColumnName.name;
+            if (!ttlColumn.equals(oldColumn)) {
+                throw Error.error(ErrorCode.X_42513, "TTL column"); // property cannot be changed
             }
         }
 
+        return createTimeToLive(table, timeLiveValue, ttlUnit, ttlColumn, batchSize, maxFrequency);
+    }
+
+    // Read next token, return primitive int value.
+    // (Differs from ParserBase.readInteger in that it first reads
+    //  the next token, and does not read past the integer).
+    private int readInt() {
         read();
-        if (token.tokenType == Tokens.SEMICOLON) {
-            return createTimeToLive(table, timeLiveValue, ttlUnit, ttlColumn, batchSize, maxFrequency);
+        if (token.tokenType != Tokens.X_VALUE) {
+            throw unexpectedTokenRequire("integer");
         }
+        return ((Integer)(token.tokenValue)).intValue();
+    }
 
+    // Parses '[MIGRATE|EXPORT] TO [TARGET|TOPIC] name' syntax.
+    // - On entry, the current token is the potential MIGRATE or EXPORT token.
+    //   If neither of those, we return without reading further.
+    // - On return, the current token is the first token after the
+    //   parsed clause (i.e., after the target/topic name)
+    private Pair<String,Integer> readMigrateTargetOrTopic() {
+        return token.tokenType == Tokens.MIGRATE
+            ? readToTargetOrTopic()
+            : null;
+    }
+
+    private Pair<String,Integer> readExportTargetOrTopic() {
+        return token.tokenType == Tokens.EXPORT
+            ? readToTargetOrTopic()
+            : null;
+    }
+
+    // Common code for readMigrateTargetOrTopic, readExportTargetOrTopic
+    private Pair<String,Integer> readToTargetOrTopic() {
         read();
+        readThis(Tokens.TO);
+        if (token.tokenType != Tokens.TARGET && token.tokenType != Tokens.TOPIC) {
+            throw unexpectedTokenRequire(Tokens.T_TARGET + " or " + Tokens.T_TOPIC);
+        }
+        int targetType = token.tokenType;
+        read();
+        checkIsValidIdentifier();
+        String ident = token.tokenString;
+        read();
+        return new Pair<>(ident, targetType);
+    }
 
-      if (token.tokenType == Tokens.SEMICOLON) {
-            return createTimeToLive(table, timeLiveValue, ttlUnit, ttlColumn, batchSize, maxFrequency);
-        } else {
-            throw unexpectedToken();
+    // Acceptable identifier for MIGRATE TO, EXPORT TO, or
+    // TTL .. ON COLUMN clauses.
+    // - any unquoted ident, including SQL reserved keywords
+    //   such as 'default'.
+    // - quoted idents are not allowed, since SQLParser does
+    //   not support them.
+    private boolean isValidIdentifier() {
+        return token.isUndelimitedIdentifier;
+    }
+
+    private void checkIsValidIdentifier() {
+        if (!token.isUndelimitedIdentifier) {
+            throw unexpectedTokenRequire("identifier");
         }
     }
 
-    private String readMigrateTarget() {
-        read();
-        if (token.tokenType != Tokens.TO) {
-            throw unexpectedToken();
-        }
-        read();
-        if (token.tokenType != Tokens.TARGET) {
-            throw unexpectedToken();
-        }
-        read();
-        if (token.tokenType != Tokens.X_IDENTIFIER) {
-            throw unexpectedToken();
-        }
-        return token.tokenString;
-    }
     private Statement createTimeToLive(Table table, int value, String unit, String column,
             int batchSize, int maxFrequency) {
         table.addTTL(value, unit, column, batchSize, maxFrequency);
@@ -1345,22 +1440,39 @@ public class ParserDDL extends ParserRoutine {
 
         int position = getPosition();
 
-        table.setHasMigrationTarget(token.tokenType == Tokens.MIGRATE);
-        if (token.tokenType == Tokens.EXPORT) {
-            // have to setup PersistentExport
-            setPeristentExportTriggers(table);
+        // Here we might have EXPORT TO or MIGRATE TO, and the
+        // object of that can be a TARGET or a TOPIC. If EXPORT,
+        // there may be 'ON triggers'. If TOPIC, there may be
+        // 'WITH KEY ... VALUE ...'.
+        Pair<String,Integer> target = null;
+        if (token.tokenType == Tokens.MIGRATE) {
+            table.setHasMigrationTarget(true);
+            target = readMigrateTargetOrTopic();
         }
-        // skip "migrate to target" statement, it will be handled later in DDLCompiler.processCreateTableStatement
-        // We can collect the ttl first in order to decide if its a ttl migration or general migration.
-        readUntilThis(Tokens.OPENBRACKET);
+        else if (token.tokenType == Tokens.EXPORT) {
+            target = readExportTargetOrTopic();
+            List<String> triggers = readExportTrigger();
+            table.addPersistentExport(target.getFirst(), triggers,
+                                      target.getSecond() == Tokens.TOPIC);
+        }
+        if (token.tokenType == Tokens.WITH) {
+            if (target == null || target.getSecond() != Tokens.TOPIC) {
+                throw unexpectedToken(); // stopping here gives a better diagnostic
+            }
+            skipTopicKeysAndValues();
+        }
 
+        // Migration/export will be handled later in DDLCompiler.processCreateTableStatement.
+        // But we want to collect any TTL information here, in this damnable syntax,
+        // First skip to column definitions, assumed to be next '(...)' part.
+        // And then read past the column definitions to locate any TTL definition.
+        // TODO: this results in a lousy diagnostic in many cases. Is it true that
+        //       we should already be positioned at the column definitions? If so,
+        //       then we can do a better job.
+        readUntilThis(Tokens.OPENBRACKET);
         readThis(Tokens.OPENBRACKET);
 
-        {
-            Constraint c = new Constraint(null, true, null, Constraint.TEMP);
-
-            tempConstraints.add(c);
-        }
+        tempConstraints.add(new Constraint(null, true, null, Constraint.TEMP));
 
         boolean start     = true;
         boolean startPart = true;
@@ -1389,9 +1501,6 @@ public class ParserDDL extends ParserRoutine {
                 // End of VoltDB extension
                 case Tokens.UNIQUE :
                 case Tokens.CHECK :
-                // A VoltDB extension to support LIMIT PARTITION ROWS
-                case Tokens.LIMIT :
-                // End of VoltDB extension
                     if (!startPart) {
                         throw unexpectedToken();
                     }
@@ -1485,10 +1594,9 @@ public class ParserDDL extends ParserRoutine {
                                    null, null);
     }
 
-    // skip Export to target of statment
-    // skip constraint ?
     StatementSchema compileCreateStream(int type) {
 
+        // Read name and create stream object
         HsqlName name = readNewSchemaObjectNameNoCheck(SchemaObject.TABLE);
         HsqlArrayList tempConstraints = new HsqlArrayList();
 
@@ -1500,6 +1608,10 @@ public class ParserDDL extends ParserRoutine {
             return readTableAsSubqueryDefinition(table);
         }
 
+        // Skip some stream-specific tokens that will be analyzed in DDLCompiler.processCreateStreamStatement
+        skipStreamSpecificTokens();
+
+        // Parse the stream columns
         int position = getPosition();
 
         readUntilThis(Tokens.OPENBRACKET);
@@ -1539,9 +1651,6 @@ public class ParserDDL extends ParserRoutine {
                 // End of VoltDB extension
                 case Tokens.UNIQUE :
                 case Tokens.CHECK :
-                // A VoltDB extension to support LIMIT PARTITION ROWS
-                case Tokens.LIMIT :
-                // End of VoltDB extension
                     if (!startPart) {
                         throw unexpectedToken();
                     }
@@ -1627,6 +1736,109 @@ public class ParserDDL extends ParserRoutine {
                                    null, null);
     }
 
+    /**
+     * Skip stream-specific tokens preceding the column definitions
+     * <p>
+     * CREATE STREAM foo [ PARTITION ON COLUMN ... ] [ EXPORT TO ... ] (column-definitions)
+     * <p>
+     * PARTITION and EXPORT can be in any order, EXPORT TO TOPIC ... WITH may contains clauses
+     * with brackets ()  that must be ignored at this level.
+     */
+    private void skipStreamSpecificTokens() {
+        boolean parsedPartition = false;
+        boolean parsedExport = false;
+
+        do {
+            if (!parsedPartition && token.tokenType == Tokens.PARTITION) {
+                skipStreamPartition();
+                parsedPartition = true;
+            }
+            else if (!parsedExport && token.tokenType == Tokens.EXPORT) {
+                skipStreamExport();
+                parsedExport = true;
+            }
+            else if (token.tokenType != Tokens.OPENBRACKET) {
+                throw unexpectedToken();
+            }
+        } while (token.tokenType != Tokens.OPENBRACKET);
+    }
+
+    private void skipStreamPartition() {
+        assert token.tokenType == Tokens.PARTITION;
+
+        read();
+        readThis(Tokens.ON);
+        readThis(Tokens.COLUMN);
+        checkIsValidIdentifier();
+        read();
+    }
+
+    private void skipStreamExport() {
+        assert token.tokenType == Tokens.EXPORT;
+        boolean toTopic = false;
+
+        // Common skipping EXPORT TO [ TARGET | TOPIC ] <identifier>
+        read();
+        readThis(Tokens.TO);
+        if (token.tokenType == Tokens.TOPIC) {
+            toTopic = true;
+        }
+        else if (token.tokenType != Tokens.TARGET) {
+            throw unexpectedToken();
+        }
+        read();
+        checkIsValidIdentifier();
+        read();
+
+        // TO TOPIC might have WITH keys and values, but for
+        // TARGET it's not allowed. Better to reject it now.
+        if (token.tokenType == Tokens.WITH) {
+            if (!toTopic) {
+                throw unexpectedToken();
+            }
+            skipTopicKeysAndValues();
+        }
+    }
+
+    // Skip over 'WITH [ KEY (...) ] [ VALUE (....) ]'
+    // KEY and VALUE tokens are ordered
+    // At least one of the two is required after WITH
+    // - On entry the current token is the potential 'WITH'
+    // - Returns with current token set to the token after
+    //   the parsed clause
+    private void skipTopicKeysAndValues() {
+        if (token.tokenType != Tokens.WITH) {
+            return;
+        }
+
+        boolean hasKey = false;
+        boolean hasValue = false;
+        read();
+        if (token.tokenType == Tokens.KEY) {
+            hasKey = true;
+            read();
+            if (token.tokenType != Tokens.OPENBRACKET) {
+                throw unexpectedTokenRequire(Tokens.getKeyword(Tokens.OPENBRACKET));
+            }
+            readUntilThis(Tokens.CLOSEBRACKET);
+            readThis(Tokens.CLOSEBRACKET);
+        }
+        if (token.tokenType == Tokens.VALUE) {
+            hasValue = true;
+            read();
+            if (token.tokenType != Tokens.OPENBRACKET) {
+                throw unexpectedTokenRequire(Tokens.getKeyword(Tokens.OPENBRACKET));
+            }
+            readUntilThis(Tokens.CLOSEBRACKET);
+            readThis(Tokens.CLOSEBRACKET);
+        }
+        if (!hasKey && !hasValue) {
+            // Must have one of them with WITH
+            throw unexpectedToken();
+        }
+
+        // Return with current token just after any KEY (...) VALUE (...)
+    }
 
     private ColumnSchema[] readLikeTable(Table table) {
 
@@ -1906,14 +2118,6 @@ public class ParserDDL extends ParserRoutine {
 
                     break;
                 }
-                // A VoltDB extension to support LIMIT PARTITION ROWS
-                case Constraint.LIMIT : {
-                    table.addConstraint(c);
-                    session.database.schemaManager.addSchemaObject(c);
-
-                    break;
-                }
-                // End of VoltDB extension
             }
         }
 
@@ -2179,10 +2383,11 @@ public class ParserDDL extends ParserRoutine {
         return name;
     }
 
+    // Called from StatementSchema
     void processCreateView() {
 
-        StatementSchema cs   = compileCreateView();
-        View            view = (View) cs.arguments[0];
+        StatementSchema cs = compileCreateView();
+        View view = (View) cs.arguments[0];
 
         checkSchemaUpdateAuthorisation(view.getSchemaName());
         database.schemaManager.checkSchemaObjectNotExists(view.getName());
@@ -2191,22 +2396,36 @@ public class ParserDDL extends ParserRoutine {
 
     StatementSchema compileCreateView() {
 
-        read();
+        read(); // skip over VIEW
 
         HsqlName name = readNewSchemaObjectName(SchemaObject.VIEW);
-
         name.setSchemaIfNull(session.getCurrentSchemaHsqlName());
+
+        // Here we might have MIGRATE TO, and the object of that can be a
+        // TARGET or a TOPIC. If TOPIC, there may be 'WITH KEY ... VALUE ...'.
+        Pair<String,Integer> target = null;
+        if (token.tokenType == Tokens.MIGRATE) {
+            target = readMigrateTargetOrTopic();
+        }
+        if (token.tokenType == Tokens.WITH) {
+            if (target == null || target.getSecond() != Tokens.TOPIC) {
+                throw unexpectedToken();
+            }
+            skipTopicKeysAndValues();
+        }
 
         HsqlName[] colList = null;
 
+        // Optional list of columns in view
         if (token.tokenType == Tokens.OPENBRACKET) {
             colList = readColumnNames(name);
         }
 
+        // AS selection
         readThis(Tokens.AS);
         startRecording();
 
-        int             position = getPosition();
+        int position = getPosition();
         QueryExpression queryExpression;
 
         try {
@@ -2216,9 +2435,10 @@ public class ParserDDL extends ParserRoutine {
         }
 
         Token[] statement = getRecordedStatement();
-        String  sql       = getLastPart(position);
-        int     check     = SchemaObject.ViewCheckModes.CHECK_NONE;
+        String sql = getLastPart(position);
 
+        // Undocumented WITH ... CHECK OPTION
+        int check = SchemaObject.ViewCheckModes.CHECK_NONE;
         if (token.tokenType == Tokens.WITH) {
             read();
 
@@ -2234,21 +2454,29 @@ public class ParserDDL extends ParserRoutine {
             readThis(Tokens.OPTION);
         }
 
+        // Create basic view
         View view = new View(session, database, name, colList, sql, check);
+        if (target != null) {
+            view.setHasMigrationTarget(true);
+        }
+
+        // Now we can parse any TTL
+        if (token.tokenType == Tokens.USING) {
+            readTimeToLive(view, false);
+        }
 
         queryExpression.setAsTopLevel();
         queryExpression.setView(view);
         queryExpression.resolve(session);
-        view.compile(session);
+        view.compile(session); // column schema gets filled in here
         checkSchemaUpdateAuthorisation(name.schema);
         database.schemaManager.checkSchemaObjectNotExists(name);
 
         String statementSQL = Token.getSQL(statement);
-
         view.statement = statementSQL;
 
-        String   fullSQL = getLastPart();
-        Object[] args    = new Object[]{ view };
+        String fullSQL = getLastPart();
+        Object[] args = new Object[] { view };
 
         return new StatementSchema(fullSQL, StatementTypes.CREATE_VIEW, args,
                                    null, null);
@@ -3359,30 +3587,6 @@ public class ParserDDL extends ParserRoutine {
 
                 break;
             }
-            // A VoltDB extension to support LIMIT PARTITION ROWS
-            case Tokens.LIMIT : {
-                read();
-
-                for (int i = 0;  i < constraintList.size(); i++) {
-                    if (((Constraint)constraintList.get(i)).getConstraintType() == Constraint.LIMIT) {
-                        throw Error.error(ErrorCode.X_42524,
-                                String.format("Multiple LIMIT PARTITION ROWS constraints on table %s are forbidden.", schemaObject.getName().name));
-                    }
-                }
-
-                if (constName == null) {
-                    constName = database.nameManager.newAutoName("LIMIT",
-                            schemaObject.getSchemaName(),
-                            schemaObject.getName(), SchemaObject.CONSTRAINT);
-                }
-
-                Constraint c = new Constraint(constName, isAutogeneratedName, null, Constraint.LIMIT);
-                readLimitConstraintCondition(c);
-                constraintList.add(c);
-
-                break;
-            }
-            // End of VoltDB extension
             default : {
                 if (constName != null) {
                     throw Error.error(ErrorCode.X_42581);
@@ -3985,7 +4189,7 @@ public class ParserDDL extends ParserRoutine {
      * Responsible for handling tail of ALTER TABLE ... RENAME ...
      * @param table table
      */
-    void processAlterTableRename(Table table) {
+    private void processAlterTableRename(Table table) {
 
         HsqlName name = readNewSchemaObjectName(SchemaObject.TABLE);
 
@@ -3999,7 +4203,7 @@ public class ParserDDL extends ParserRoutine {
     }
 
     // A VoltDB extension to support indexed expressions and the assume unique attribute
-    void processAlterTableAddUniqueConstraint(Table table, HsqlName name, boolean assumeUnique) {
+    private void processAlterTableAddUniqueConstraint(Table table, HsqlName name, boolean assumeUnique) {
         boolean isAutogeneratedName = false;
         if (name == null) {
             name = database.nameManager.newAutoName("CT",
@@ -4087,7 +4291,7 @@ public class ParserDDL extends ParserRoutine {
                                    null, table.getName());
     }
 
-    void processAlterTableAddForeignKeyConstraint(Table table, HsqlName name) {
+    private void processAlterTableAddForeignKeyConstraint(Table table, HsqlName name) {
 
         if (name == null) {
             name = database.nameManager.newAutoName("FK",
@@ -4135,7 +4339,7 @@ public class ParserDDL extends ParserRoutine {
                                    c.core.mainTableName, table.getName());
     }
 
-    void processAlterTableAddCheckConstraint(Table table, HsqlName name) {
+    private void processAlterTableAddCheckConstraint(Table table, HsqlName name) {
 
         Constraint check;
         boolean isAutogeneratedName = false;
@@ -4180,7 +4384,7 @@ public class ParserDDL extends ParserRoutine {
                                    null, table.getName());
     }
 
-    void processAlterTableAddColumn(Table table) {
+    private void processAlterTableAddColumn(Table table) {
 
         int           colIndex   = table.getColumnCount();
         HsqlArrayList list       = new HsqlArrayList();
@@ -4257,7 +4461,7 @@ public class ParserDDL extends ParserRoutine {
                                    null, table.getName());
     }
 
-    void processAlterTableAddPrimaryKey(Table table, HsqlName name) {
+    private void processAlterTableAddPrimaryKey(Table table, HsqlName name) {
         boolean isAutogeneratedName = false;
 
         if (name == null) {
@@ -4305,7 +4509,7 @@ public class ParserDDL extends ParserRoutine {
     /**
      * Responsible for handling tail of ALTER TABLE ... DROP COLUMN ...
      */
-    void processAlterTableDropColumn(Table table, String colName,
+    private void processAlterTableDropColumn(Table table, String colName,
                                      boolean cascade) {
 
         int colindex = table.getColumnIndex(colName);
@@ -4359,7 +4563,7 @@ public class ParserDDL extends ParserRoutine {
     /**
      * Responsible for handling tail of ALTER TABLE ... DROP CONSTRAINT ...
      */
-    void processAlterTableDropConstraint(Table table, String name,
+    private void processAlterTableDropConstraint(Table table, String name,
                                          boolean cascade) {
 
         session.commit(false);
@@ -4371,7 +4575,7 @@ public class ParserDDL extends ParserRoutine {
         return;
     }
 
-    void processAlterColumn(Table table, ColumnSchema column,
+    private void processAlterColumn(Table table, ColumnSchema column,
                             int columnIndex) {
 
         int position = getPosition();
@@ -4681,7 +4885,7 @@ public class ParserDDL extends ParserRoutine {
                                    null, null);
     }
 
-    void processAlterColumnSequenceOptions(ColumnSchema column) {
+    private void processAlterColumnSequenceOptions(ColumnSchema column) {
 
         OrderedIntHashSet set      = new OrderedIntHashSet();
         NumberSequence    sequence = column.getIdentitySequence().duplicate();
@@ -4978,7 +5182,7 @@ public class ParserDDL extends ParserRoutine {
         }
     }
 
-    void processAlterDomain() {
+    private void processAlterDomain() {
 
         HsqlName schema = session.getSchemaHsqlName(token.namePrefix);
 
@@ -5561,60 +5765,6 @@ public class ParserDDL extends ParserRoutine {
 
 
     /************************* Volt DB Extensions *************************/
-    /**
-     * Responsible for handling Volt limit constraints section of CREATE TABLE ...
-     *
-     * @param c check constraint
-     */
-    void readLimitConstraintCondition(Constraint c) {
-        readThis(Tokens.PARTITION);
-        readThis(Tokens.ROWS);
-
-        int rowsLimit = readInteger();
-        c.rowsLimit = rowsLimit;
-
-        // The optional EXECUTE (DELETE ...) clause
-        if (readIfThis(Tokens.EXECUTE)) {
-            // Capture the statement between parentheses following the EXECUTE keyword,
-            // as in
-            //
-            // LIMIT PARTITION ROWS 10 EXECUTE (DELETE FROM tbl WHERE b = 1)
-            //
-            readThis(Tokens.OPENBRACKET);
-
-            startRecording();
-
-            int numOpenBrackets = 1;
-            while (numOpenBrackets > 0) {
-                switch(token.tokenType) {
-                case Tokens.OPENBRACKET:
-                    numOpenBrackets++;
-                    read();
-                    break;
-
-                case Tokens.CLOSEBRACKET:
-                    numOpenBrackets--;
-                    if (numOpenBrackets > 0) {
-                        // don't want the final parenthesis
-                        read();
-                    }
-                    break;
-
-                case Tokens.X_ENDPARSE:
-                    throw unexpectedToken();
-
-                default:
-                    read();
-                }
-            }
-
-            Token[] stmtTokens = getRecordedStatement();
-
-            // This captures the DELETE statement exactly, including embedded whitespace, etc.
-            c.rowsLimitDeleteStmt = Token.getSQL(stmtTokens);
-            readThis(Tokens.CLOSEBRACKET);
-        }
-    }
 
     // Default disallow empty parenthesis
     private java.util.List<Expression> XreadExpressions(java.util.List<Boolean> ascDesc) {
@@ -5734,85 +5884,6 @@ public class ParserDDL extends ParserRoutine {
         return true;
     }
 
-    // A VoltDB extension to support LIMIT PARTITION ROWS syntax
-    private Statement compileAlterTableAddLimitConstraint(Table table, HsqlName name)
-    {
-        boolean isAutogeneratedName = false;
-        if (name == null) {
-            name = database.nameManager.newAutoName("LIMIT",
-                    table.getSchemaName(), table.getName(),
-                    SchemaObject.CONSTRAINT);
-            isAutogeneratedName = true;
-
-        }
-
-        Constraint c = new Constraint(name, isAutogeneratedName, null, Constraint.LIMIT);
-
-        readLimitConstraintCondition(c);
-
-        String   sql  = getLastPart();
-        Object[] args = new Object[]{ c };
-
-        return new StatementSchema(sql, StatementTypes.ALTER_TABLE, args,
-                                   null, table.getName());
-    }
-    // End of VoltDB extension
-
-    // A VoltDB extension to support LIMIT PARTITION ROWS syntax
-    private void processAlterTableAddLimitConstraint(Table table, HsqlName name) {
-        boolean isAutogeneratedName = false;
-        if (name == null) {
-            name = database.nameManager.newAutoName("LIMIT",
-                    table.getSchemaName(), table.getName(),
-                    SchemaObject.CONSTRAINT);
-            isAutogeneratedName = true;
-        }
-
-        Constraint c = new Constraint(name, isAutogeneratedName, null, Constraint.LIMIT);
-
-        readLimitConstraintCondition(c);
-        session.commit(false);
-
-        TableWorks tableWorks = new TableWorks(session, table);
-        tableWorks.addLimitConstraint(c);
-    }
-    // End of VoltDB extension
-
-    // A VoltDB extension to support LIMIT PARTITION ROWS syntax
-    private Statement compileAlterTableDropLimit(Table t) {
-
-        HsqlName readName  = null;
-        HsqlName writeName = null;
-        boolean  cascade   = false;
-
-        if (token.tokenType == Tokens.RESTRICT) {
-            read();
-        } else if (token.tokenType == Tokens.CASCADE) {
-            read();
-
-            cascade = true;
-        }
-
-        SchemaObject object = t.getLimitConstraint();
-        if (object == null) {
-            throw Error.error(ErrorCode.X_42501);
-        }
-
-        if (cascade) {
-            writeName = database.getCatalogName();
-        } else {
-            writeName = t.getName();
-        }
-
-        Object[] args = new Object[] {
-            object.getName(), Integer.valueOf(SchemaObject.CONSTRAINT),
-            Boolean.valueOf(cascade), Boolean.valueOf(false)
-        };
-        String sql = getLastPart();
-
-        return new StatementSchema(sql, StatementTypes.DROP_CONSTRAINT, args,
-                                   readName, writeName);
-    }
     // End of VoltDB extension
 
     /**********************************************************************/

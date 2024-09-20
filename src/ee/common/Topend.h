@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -71,9 +71,12 @@ class Topend {
 
     virtual int64_t pushDRBuffer(int32_t partitionId, DrStreamBlock *block) = 0;
 
+    virtual void reportDRBuffer(int32_t partitionId, const char *reason, const char *buffer, size_t length) = 0;
+
     virtual void pushPoisonPill(int32_t partitionId, std::string& reason, DrStreamBlock *block) = 0;
 
-    virtual int reportDRConflict(int32_t partitionId, int32_t remoteClusterId, int64_t remoteTimestamp, std::string tableName, DRRecordType action,
+    virtual int reportDRConflict(int32_t partitionId, int32_t remoteClusterId, int64_t remoteTimestamp,
+            std::string tableName, bool isReplicatedTable, DRRecordType action,
             DRConflictType deleteConflict, Table *existingMetaTableForDelete, Table *existingTupleTableForDelete,
             Table *expectedMetaTableForDelete, Table *expectedTupleTableForDelete,
             DRConflictType insertConflict, Table *existingMetaTableForInsert, Table *existingTupleTableForInsert,
@@ -139,9 +142,12 @@ public:
 
     int64_t pushDRBuffer(int32_t partitionId, DrStreamBlock *block);
 
+    void reportDRBuffer(int32_t partitionId, const char *reason, const char *buffer, size_t length);
+
     void pushPoisonPill(int32_t partitionId, std::string& reason, DrStreamBlock *block);
 
-    int reportDRConflict(int32_t partitionId, int32_t remoteClusterId, int64_t remoteTimestamp, std::string tableName, DRRecordType action,
+    int reportDRConflict(int32_t partitionId, int32_t remoteClusterId, int64_t remoteTimestamp,
+            std::string tableName, bool isReplicatedTable, DRRecordType action,
             DRConflictType deleteConflict, Table *existingMetaTableForDelete, Table *existingTupleTableForDelete,
             Table *expectedMetaTableForDelete, Table *expectedTupleTableForDelete,
             DRConflictType insertConflict, Table *existingMetaTableForInsert, Table *existingTupleTableForInsert,

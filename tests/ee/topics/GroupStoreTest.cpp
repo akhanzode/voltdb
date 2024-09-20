@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2019 VoltDB Inc.
+ * Copyright (C) 2019-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -155,7 +155,8 @@ TEST_F(GroupStoreTest, StoreGroup) {
     // Insert group
     {
         RandomData scratch(128);
-        group.getOrCreateMember(generateGroupMemberid()).update(1000, 2000, ValueFactory::getNullStringValue(),
+        group.getOrCreateMember(generateGroupMemberid()).update(ValueFactory::getTempStringValue("truc"),
+                ValueFactory::getTempStringValue("bidule"), 1000, 2000, ValueFactory::getNullStringValue(),
                 ValueFactory::getTempBinaryValue(&scratch, 64), ValueFactory::getTempBinaryValue(&scratch[64], 64));
 
         ASSERT_EQ(0, m_groupStore.getGroupTable()->activeTupleCount());
@@ -171,7 +172,8 @@ TEST_F(GroupStoreTest, StoreGroup) {
     {
         RandomData scratch(128);
 
-        group.getOrCreateMember(generateGroupMemberid()).update(1000, 2000, ValueFactory::getNullStringValue(),
+        group.getOrCreateMember(generateGroupMemberid()).update(ValueFactory::getTempStringValue("truc"),
+                ValueFactory::getTempStringValue("bidule"), 1000, 2000, ValueFactory::getNullStringValue(),
                 ValueFactory::getTempBinaryValue(&scratch, 64), ValueFactory::getTempBinaryValue(&scratch[64], 64));
 
         upsertGroup(group);
@@ -196,9 +198,11 @@ TEST_F(GroupStoreTest, StoreGroup) {
         Group group2(m_groupStore, groupId2, 1000, 5, leader, protocol);
 
         RandomData scratch(128);
-        group2.getOrCreateMember(generateGroupMemberid()).update(1000, 2000, ValueFactory::getNullStringValue(),
+        group2.getOrCreateMember(generateGroupMemberid()).update(ValueFactory::getTempStringValue("truc"),
+                ValueFactory::getTempStringValue("bidule"), 1000, 2000, ValueFactory::getNullStringValue(),
                 ValueFactory::getTempBinaryValue(&scratch, 64), ValueFactory::getTempBinaryValue(&scratch[64], 64));
-        group2.getOrCreateMember(generateGroupMemberid()).update(1000, 2000, ValueFactory::getNullStringValue(),
+        group2.getOrCreateMember(generateGroupMemberid()).update(ValueFactory::getTempStringValue("truc"),
+                ValueFactory::getTempStringValue("bidule"), 1000, 2000, ValueFactory::getNullStringValue(),
                 ValueFactory::getTempBinaryValue(&scratch, 64), ValueFactory::getTempBinaryValue(&scratch[64], 64));
 
         upsertGroup(group2);
@@ -216,7 +220,7 @@ TEST_F(GroupStoreTest, CommitOffsets) {
     CommitOffsets offsets;
 
     {
-        Group group(m_groupStore, groupId, 1000, 5, ValueFactory::getNullStringValue(), ValueFactory::getNullStringValue());
+        Group group(m_groupStore, groupId, 1000, 5, ValueFactory::getNullStringValue(), ValueFactory::getTempStringValue("protocol"));
         upsertGroup(group);
     }
 
@@ -257,7 +261,7 @@ TEST_F(GroupStoreTest, FetchOffsets) {
     CommitOffsets offsets;
 
     {
-        Group group(m_groupStore, groupId, 1000, 5, ValueFactory::getNullStringValue(), ValueFactory::getNullStringValue());
+        Group group(m_groupStore, groupId, 1000, 5, ValueFactory::getNullStringValue(), ValueFactory::getTempStringValue("protocol"));
         upsertGroup(group);
     }
 
@@ -361,9 +365,11 @@ TEST_F(GroupStoreTest, DeleteGroup) {
 
     {
         Group group(m_groupStore, groupId, 1000, 5, leader, protocol);
-        group.getOrCreateMember(generateGroupMemberid()).update(1000, 2000, ValueFactory::getNullStringValue(),
+        group.getOrCreateMember(generateGroupMemberid()).update(ValueFactory::getTempStringValue("truc"),
+                ValueFactory::getTempStringValue("bidule"), 1000, 2000, ValueFactory::getNullStringValue(),
                 ValueFactory::getTempBinaryValue(&scratch, 64), ValueFactory::getTempBinaryValue(&scratch[64], 64));
-        group.getOrCreateMember(generateGroupMemberid()).update(1000, 2000, ValueFactory::getNullStringValue(),
+        group.getOrCreateMember(generateGroupMemberid()).update(ValueFactory::getTempStringValue("truc"),
+                ValueFactory::getTempStringValue("bidule"), 1000, 2000, ValueFactory::getNullStringValue(),
                 ValueFactory::getTempBinaryValue(&scratch, 64), ValueFactory::getTempBinaryValue(&scratch[64], 64));
 
         upsertGroup(group);
@@ -380,9 +386,11 @@ TEST_F(GroupStoreTest, DeleteGroup) {
     // Create a second group and offsets
     {
         Group group(m_groupStore, groupId2, 1000, 5, leader, protocol);
-        group.getOrCreateMember(generateGroupMemberid()).update(1000, 2000, ValueFactory::getNullStringValue(),
+        group.getOrCreateMember(generateGroupMemberid()).update(ValueFactory::getTempStringValue("truc"),
+                ValueFactory::getTempStringValue("bidule"), 1000, 2000, ValueFactory::getNullStringValue(),
                 ValueFactory::getTempBinaryValue(&scratch, 64), ValueFactory::getTempBinaryValue(&scratch[64], 64));
-        group.getOrCreateMember(generateGroupMemberid()).update(1000, 2000, ValueFactory::getNullStringValue(),
+        group.getOrCreateMember(generateGroupMemberid()).update(ValueFactory::getTempStringValue("truc"),
+                ValueFactory::getTempStringValue("bidule"), 1000, 2000, ValueFactory::getNullStringValue(),
                 ValueFactory::getTempBinaryValue(&scratch, 64), ValueFactory::getTempBinaryValue(&scratch[64], 64));
 
         upsertGroup(group);
@@ -443,7 +451,8 @@ TEST_F(GroupStoreTest, FetchGroups) {
         for (int j = 0 ; j < 10; ++j) {
             int len = ::snprintf(&scratch, scratch.len(), "memberId_%d", i);
             NValue memberId = ValueFactory::getTempStringValue(&scratch, len);
-            group->getOrCreateMember(memberId).update(200, 500, memberId,
+            group->getOrCreateMember(memberId).update(ValueFactory::getTempStringValue("truc"),
+                    ValueFactory::getTempStringValue("bidule"), 200, 500, memberId,
                     ValueFactory::getTempBinaryValue(&scratch, scratch.len() - j),
                     ValueFactory::getTempBinaryValue(&scratch, scratch.len() - (j * 2)));
         }
@@ -513,7 +522,7 @@ TEST_F(GroupStoreTest, BadMessages) {
 
     NValue groupId = ValueFactory::getTempStringValue("groupId");
     {
-        Group group(m_groupStore, groupId, 1000, 5, ValueFactory::getNullStringValue(), ValueFactory::getNullStringValue());
+        Group group(m_groupStore, groupId, 1000, 5, ValueFactory::getNullStringValue(), ValueFactory::getTempStringValue("protocol"));
         upsertGroup(group);
     }
 
@@ -549,8 +558,9 @@ TEST_F(GroupStoreTest, DeleteExpiredOffsets) {
             ValueFactory::getTempStringValue("protocol"));
     upsertGroup(regular);
 
+    // For standalone group use an empty protocol (not null)
     Group standalone(m_groupStore, standaloneGroupId, 1, 2, ValueFactory::getNullStringValue(),
-            ValueFactory::getNullStringValue());
+            ValueFactory::getTempStringValue(""));
     upsertGroup(standalone);
 
     std::vector<NValue> topics = { ValueFactory::getTempStringValue("topic1"), ValueFactory::getTempStringValue(

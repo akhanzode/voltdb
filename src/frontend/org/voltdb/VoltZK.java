@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -68,6 +68,7 @@ public class VoltZK {
 
     public static final String buildstring = "/db/buildstring";
     public static final String catalogbytes = "/db/catalogbytes";
+    public static final String license = "/db/license";
     //This node doesn't mean as much as it used to, it is accurate at startup
     //but isn't updated after elastic operation. We use the cartographer for most things
     //now
@@ -247,6 +248,8 @@ public class VoltZK {
     public static final String actionLock = "/db/action_lock";
 
     public static final String hashMismatchedReplicas = "/db/mismatched";
+
+    public static final String trigger_txn_restart = "/db/restart";
 
     // Persistent nodes (mostly directories) to create on startup
     public static final String[] ZK_HIERARCHY = {
@@ -599,16 +602,10 @@ public class VoltZK {
     }
 
     public static boolean removeActionBlocker(ZooKeeper zk, String node, VoltLogger log) {
-        if (log != null) {
-            log.info("Removing action blocker " + node);
-        }
         try {
             zk.delete(node, -1);
         } catch (KeeperException e) {
             if (e.code() == KeeperException.Code.NONODE) {
-                if (log != null) {
-                    log.info("Action blocker " + node + " does not exist.");
-                }
                 return true;
             }
             if (log != null) {

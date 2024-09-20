@@ -1,5 +1,5 @@
 # This file is part of VoltDB.
-# Copyright (C) 2008-2020 VoltDB Inc.
+# Copyright (C) 2008-2022 Volt Active Data Inc.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -30,6 +30,8 @@ re_voltdb_jar = re.compile('^voltdb(client)?-[.0-9]+[.]([\w]+\.)*jar$')
 
 config_name = 'volt.cfg'
 config_name_local = 'volt_local.cfg'
+# This is for k8s environment which wish to provide external jars for jdbc driver and such.
+voltdb_etc = '/etc/voltdb/'
 
 # Filled in during startup.
 standalone   = None
@@ -39,6 +41,7 @@ command_dir  = None
 command_name = None
 voltdb_jar   = None
 classpath    = None
+java_gc_opts = None
 
 # Location of third_party/python if available.
 third_party_python = None
@@ -60,12 +63,20 @@ else:
     jar = utility.find_in_path('jar')
 if not java:
     utility.abort('Could not find java in environment, set JAVA_HOME or put java in the path.')
-java_version = utility.get_java_version(java)
+java_version = utility.get_java_version_major(java)
 java_opts = []
 
-#If this is a large memory system commit the full heap
+# Indicator we're running in something like kubernetes.
+# This should be set only by the container image.
+voltdb_container = os.environ.get('VOLTDB_CONTAINER')
+
+# Should we commit the full heap on JVM startup?
+# 1. Obey explicit instruction from environment variable
+# 2. Otherwise only on non-container 'large memory' systems
 specifyMinimumHeapSize = False
-if platform.system() == "Linux":
+if 'VOLTDB_HEAPCOMMIT' in os.environ:
+    specifyMinimumHeapSize = os.environ['VOLTDB_HEAPCOMMIT'].lower() == 'true'
+elif platform.system() == "Linux" and not voltdb_container:
     memory = os.popen("free -m")
     try:
         totalMemory = int(memory.readlines()[1].split()[1])
@@ -81,6 +92,7 @@ if 'VOLTDB_HEAPMAX' in os.environ:
             java_opts.append('-XX:+AlwaysPreTouch')
     except ValueError:
         java_opts.append(os.environ.get('VOLTDB_HEAPMAX'))
+
 if 'VOLTDB_OPTS' in os.environ:
     java_opts.extend(shlex.split(os.environ['VOLTDB_OPTS']))
 if 'JAVA_OPTS' in os.environ:
@@ -91,9 +103,12 @@ if not [opt for opt in java_opts if opt.startswith('-Xmx')]:
         java_opts.append('-Xms2048m')
         java_opts.append('-XX:+AlwaysPreTouch')
 
+if 'VOLTDB_GC_OPTS' in os.environ:
+    java_gc_opts =shlex.split(os.environ.get('VOLTDB_GC_OPTS'))
+
 # Find the temp directory which is going to be used by java
 tmpDir = '/tmp'
-for opt in filter(lambda o: o.startswith('-Djava.io.tmpdir='), java_opts):
+for opt in [o for o in java_opts if o.startswith('-Djava.io.tmpdir=')]:
     tmpDir = opt.split('=', 1)[1]
 
 # Set common options now.
@@ -104,30 +119,45 @@ java_opts.append('-Dsun.net.inetaddr.ttl=300')
 java_opts.append('-Dsun.net.inetaddr.negative.ttl=3600')
 java_opts.append('-XX:+HeapDumpOnOutOfMemoryError')
 java_opts.append('-XX:HeapDumpPath=/tmp')
-java_opts.append('-XX:+UseConcMarkSweepGC')
-java_opts.append('-XX:+CMSParallelRemarkEnabled')
 java_opts.append('-XX:+UseTLAB')
-java_opts.append('-XX:CMSInitiatingOccupancyFraction=75')
-java_opts.append('-XX:+UseCMSInitiatingOccupancyOnly')
 java_opts.append('-XX:+UseCondCardMark')
 java_opts.append('-Dsun.rmi.dgc.server.gcInterval=9223372036854775807')
 java_opts.append('-Dsun.rmi.dgc.client.gcInterval=9223372036854775807')
-java_opts.append('-XX:CMSWaitDuration=120000')
-java_opts.append('-XX:CMSMaxAbortablePrecleanTime=120000')
 java_opts.append('-XX:+ExplicitGCInvokesConcurrent')
-java_opts.append('-XX:+CMSScavengeBeforeRemark')
-java_opts.append('-XX:+CMSClassUnloadingEnabled')
+
+if java_version=="17":
+    if java_gc_opts is None:
+        java_opts.append('-XX:+UseG1GC')
+    else:
+        java_opts.extend(java_gc_opts)
+else:
+    if java_gc_opts is None:
+        java_opts.append('-XX:+UseConcMarkSweepGC')
+        java_opts.append('-XX:+CMSParallelRemarkEnabled')
+        java_opts.append('-XX:CMSInitiatingOccupancyFraction=75')
+        java_opts.append('-XX:+UseCMSInitiatingOccupancyOnly')
+        java_opts.append('-XX:CMSWaitDuration=120000')
+        java_opts.append('-XX:CMSMaxAbortablePrecleanTime=120000')
+        java_opts.append('-XX:+CMSScavengeBeforeRemark')
+        java_opts.append('-XX:+CMSClassUnloadingEnabled')
+    else:
+        java_opts.extend(java_gc_opts)
 
 # skip PermSize in Java 8 and above
-if "1.7" in java_version:
+if java_version=="7":
     java_opts.append('-XX:PermSize=64m')
 
 # Suppress Illegal reflective access warning
-if "11." in java_version:
+if java_version=="11" or java_version=="17":
     java_opts.extend(['--add-opens', 'java.base/java.lang=ALL-UNNAMED'])
     java_opts.extend(['--add-opens', 'java.base/sun.nio.ch=ALL-UNNAMED'])
     java_opts.extend(['--add-opens', 'java.base/java.net=ALL-UNNAMED'])
     java_opts.extend(['--add-opens', 'java.base/java.nio=ALL-UNNAMED'])
+if java_version=="17":
+    java_opts.extend(['--add-opens', 'java.base/sun.net.www.protocol.http=ALL-UNNAMED'])
+    java_opts.extend(['--add-opens', 'java.base/sun.net.www.protocol.https=ALL-UNNAMED'])
+    java_opts.extend(['--add-opens', 'java.base/sun.net.www.protocol.file=ALL-UNNAMED'])
+    java_opts.extend(['--add-opens', 'java.base/sun.net.www.protocol.ftp=ALL-UNNAMED'])
 
 def _is_tmpfs(path):
     '''
@@ -234,18 +264,8 @@ def initialize(standalone_arg, command_name_arg, command_dir_arg, version_arg):
 
     pro_version = utility.is_pro_version(voltdb_jar)
     utility.debug('VoltDB Pro Version: %s' % pro_version)
-    # LOG4J configuration
-    if 'LOG4J_CONFIG_PATH' not in os.environ:
-        for chk_dir in ('$VOLTDB_LIB/../src/frontend', '$VOLTDB_VOLTDB'):
-            path = os.path.join(os.path.realpath(os.path.expandvars(chk_dir)), 'log4j.xml')
-            if os.path.exists(path):
-                os.environ['LOG4J_CONFIG_PATH'] = path
-                utility.debug('LOG4J_CONFIG_PATH=>%s' % os.environ['LOG4J_CONFIG_PATH'])
-                break
-        else:
-            utility.abort('Could not find log4j configuration file or LOG4J_CONFIG_PATH variable.')
 
-    for var in ('VOLTDB_LIB', 'VOLTDB_VOLTDB', 'LOG4J_CONFIG_PATH'):
+    for var in ('VOLTDB_LIB', 'VOLTDB_VOLTDB'):
         utility.verbose_info('Environment: %s=%s' % (var, os.environ[var]))
 
     # Classpath is the voltdb jar and all the jars in VOLTDB_LIB, and if present,
@@ -256,4 +276,8 @@ def initialize(standalone_arg, command_name_arg, command_dir_arg, version_arg):
         classpath.append(path)
     for path in glob.glob(os.path.join(os.environ['VOLTDB_LIB'], 'extension', '*.jar')):
         classpath.append(path)
+    # If we are in container env and /etc/voltdb/extension has any jars include them.
+    if os.environ.get('VOLTDB_CONTAINER') and os.path.isdir(voltdb_etc):
+        for path in glob.glob(os.path.join(voltdb_etc, 'extension', '*.jar')):
+            classpath.append(path)
     utility.verbose_info('Classpath: %s' % ':'.join(classpath))

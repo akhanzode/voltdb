@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -45,6 +45,7 @@ import java.util.TimerTask;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.After;
 import org.junit.Before;
@@ -59,6 +60,7 @@ import org.voltdb.utils.BinaryDeque.TruncatorResponse;
 import org.voltdb.utils.BinaryDequeReader.SeekErrorRule;
 
 import com.google_voltpatches.common.collect.Sets;
+import org.apache.commons.io.FileUtils;
 
 public class TestPersistentBinaryDeque {
 
@@ -92,12 +94,7 @@ public class TestPersistentBinaryDeque {
     }
 
     public static void setupTestDir() throws IOException {
-        if (TEST_DIR.exists()) {
-            for (File f : TEST_DIR.listFiles()) {
-                VoltFile.recursivelyDelete(f);
-            }
-            TEST_DIR.delete();
-        }
+        FileUtils.deleteDirectory(TEST_DIR);
         TEST_DIR.mkdir();
     }
 
@@ -212,9 +209,9 @@ public class TestPersistentBinaryDeque {
 
     @Test (timeout = 10_000)
     public void testRetentionThreads() {
-        PersistentBinaryDeque.setupRetentionPolicyMgr(2);
+        PersistentBinaryDeque.setupRetentionPolicyMgr(2, 1);
         assertEquals(2, PersistentBinaryDeque.getRetentionPolicyMgr().getRetentionThreadPoolSize());
-        PersistentBinaryDeque.setupRetentionPolicyMgr(5);
+        PersistentBinaryDeque.setupRetentionPolicyMgr(5, 1);
         assertEquals(5, PersistentBinaryDeque.getRetentionPolicyMgr().getRetentionThreadPoolSize());
     }
 
@@ -1232,7 +1229,7 @@ public class TestPersistentBinaryDeque {
         m_pbd = PersistentBinaryDeque.builder(TEST_NONCE, TEST_DIR, logger)
                 .initialExtraHeader(m_metadata, SERIALIZER).build();
         BinaryDequeReader<ExtraHeaderMetadata> reader = m_pbd.openForRead(CURSOR_ID);
-        int cnt = reader.getNumObjects();
+        long cnt = reader.getNumObjects();
         assertEquals(cnt, 96);
 
         for (int ii = 96; ii < 192; ii++) {
@@ -1278,7 +1275,7 @@ public class TestPersistentBinaryDeque {
         small_pbd = PersistentBinaryDeque.builder(SMALL_TEST_NONCE, TEST_DIR, logger)
                 .initialExtraHeader(m_metadata, SERIALIZER).build();
         BinaryDequeReader<ExtraHeaderMetadata> reader = small_pbd.openForRead(CURSOR_ID);
-        int cnt = reader.getNumObjects();
+        long cnt = reader.getNumObjects();
         assertEquals(cnt, 10);
 
         for (int ii = 10; ii < 20; ii++) {
@@ -1329,7 +1326,7 @@ public class TestPersistentBinaryDeque {
         m_pbd = PersistentBinaryDeque.builder(TEST_NONCE, TEST_DIR, logger).compression(true)
                 .initialExtraHeader(m_metadata, SERIALIZER).build();
         BinaryDequeReader<ExtraHeaderMetadata> reader = m_pbd.openForRead(CURSOR_ID);
-        int cnt = reader.getNumObjects();
+        long cnt = reader.getNumObjects();
         assertEquals(cnt, 96);
         for (int ii = 96; ii < 192; ii++) {
             m_pbd.offer(DBBPool.wrapBB(getFilledBuffer(ii)));
@@ -1716,6 +1713,91 @@ public class TestPersistentBinaryDeque {
         m_pbd.closeCursor(CURSOR_ID + 1);
 
         assertEquals(3, getSortedDirectoryListing().size());
+    }
+
+    @Test
+    public void testSegmentTTL() throws IOException, InterruptedException {
+        int segmentCount = m_pbd.numberOfSegments();
+        segmentCount = segmentCount == 0 ? 1 : segmentCount;
+        m_pbd.setSegmentRollTimeLimit(TimeUnit.SECONDS.toNanos(2));
+        // write 1 segment
+        for (int i = 0; i < 10; i++) {
+            m_pbd.offer(defaultContainer());
+        }
+        assertEquals(segmentCount, m_pbd.numberOfSegments());
+
+        Thread.sleep(2000);
+
+        // after 4 seconds, a new segment should be added.
+        for (int i = 0; i < 10; i++) {
+            m_pbd.offer(defaultContainer());
+        }
+        segmentCount++;
+        assertEquals(segmentCount, m_pbd.numberOfSegments());
+        // update max segment open time
+        m_pbd.setSegmentRollTimeLimit(TimeUnit.SECONDS.toNanos(4));
+        Thread.sleep(2000);
+        for (int i = 0; i < 10; i++) {
+            m_pbd.offer(defaultContainer());
+        }
+        // No new segment should be created
+        assertEquals(segmentCount, m_pbd.numberOfSegments());
+
+        Thread.sleep(3000);
+        for (int i = 0; i < 10; i++) {
+            m_pbd.offer(defaultContainer());
+        }
+        // Another segment should be added
+        segmentCount++;
+        assertEquals(segmentCount, m_pbd.numberOfSegments());
+    }
+
+    /*
+     * Test that when poll entry is provided with a max size and an entry exceeds that value null is returned and if the
+     * entry does not exceed that value it is returned
+     */
+    @Test
+    public void pollMaxSize() throws Exception {
+        m_pbd.offer(DBBPool.wrapBB(getFilledSmallBuffer(798464565L)));
+        m_pbd.offer(defaultContainer());
+        m_pbd.offer(DBBPool.wrapBB(getFilledSmallBuffer(-798464565L)));
+        m_pbd.offer(defaultContainer());
+
+        BinaryDequeReader<?> reader = m_pbd.openForRead(CURSOR_ID);
+
+        BinaryDequeReader.Entry<?> entry = reader.pollEntry(PersistentBinaryDeque.UNSAFE_CONTAINER_FACTORY,
+                1 * 1024 * 1024);
+        assertNotNull(entry);
+        entry.release();
+
+        // Second entry should be too big to poll at 1MB max
+        entry = reader.pollEntry(PersistentBinaryDeque.UNSAFE_CONTAINER_FACTORY, 1 * 1024 * 1024);
+        assertNull(entry);
+
+        // Should now be able to poll at 2MB
+        entry = reader.pollEntry(PersistentBinaryDeque.UNSAFE_CONTAINER_FACTORY, 2 * 1024 * 1024);
+        assertNotNull(entry);
+        entry.release();
+
+        // Go really small for third entry
+        entry = reader.pollEntry(PersistentBinaryDeque.UNSAFE_CONTAINER_FACTORY, 512);
+        assertNull(entry);
+
+        // Can be polled at exact size
+        entry = reader.pollEntry(PersistentBinaryDeque.UNSAFE_CONTAINER_FACTORY, 1024);
+        assertNotNull(entry);
+        entry.release();
+
+        // Can poll last large entry
+        entry = reader.pollEntry(PersistentBinaryDeque.UNSAFE_CONTAINER_FACTORY, 4 * 1024 * 1024);
+        assertNotNull(entry);
+        entry.release();
+
+        // No more entries in the PBD
+        entry = reader.pollEntry(PersistentBinaryDeque.UNSAFE_CONTAINER_FACTORY);
+        assertNull(entry);
+
+        m_pbd.closeCursor(CURSOR_ID);
     }
 
     private int openSegmentReaderCount(String cursorId) {

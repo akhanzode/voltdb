@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -157,6 +157,9 @@ public class ExecutionEngineJNI extends ExecutionEngine {
             final String hostname,
             final int drClusterId,
             final int defaultDrBufferSize,
+            final boolean drIgnoreConflicts,
+            final int drCrcErrorIgnoreMax,
+            final boolean drCrcErrorIgnoreFatal,
             final int tempTableMemory,
             final HashinatorConfig hashinatorConfig,
             final boolean isLowestSiteId)
@@ -187,6 +190,9 @@ public class ExecutionEngineJNI extends ExecutionEngine {
                     getStringBytes(hostname),
                     drClusterId,
                     defaultDrBufferSize,
+                    drIgnoreConflicts,
+                    drCrcErrorIgnoreMax,
+                    drCrcErrorIgnoreFatal,
                     tempTableMemory * 1024 * 1024,
                     isLowestSiteId,
                     EE_COMPACTION_THRESHOLD);
@@ -1179,6 +1185,30 @@ public class ExecutionEngineJNI extends ExecutionEngine {
     @Override
     public void deleteExpiredTopicsOffsets(long undoToken, TimestampType deleteOlderThan) {
         checkErrorCode(nativeDeleteExpiredTopicsOffsets(pointer, undoToken, deleteOlderThan.getTime()));
+    }
+
+    @Override
+    public void setReplicableTables(int clusterId, String[] tables) {
+        byte[][] tableNames = null;
+        if (tables != null) {
+            tableNames = new byte[tables.length][];
+
+            for (int i = 0; i < tables.length; ++i) {
+                tableNames[i] = tables[i].getBytes(Constants.UTF8ENCODING);
+            }
+        }
+
+        checkErrorCode(nativeSetReplicableTables(pointer, clusterId, tableNames));
+    }
+
+    @Override
+    public void clearAllReplicableTables() {
+        checkErrorCode(nativeClearAllReplicableTables(pointer));
+    }
+
+    @Override
+    public void clearReplicableTables(int clusterId) {
+        checkErrorCode(nativeClearReplicableTables(pointer, clusterId));
     }
 
     private byte[] readVarbinary(FastDeserializer defaultDeserializer) throws IOException {

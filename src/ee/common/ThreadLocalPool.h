@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -181,6 +181,9 @@ public:
     static void resetStateForTest();
     static int32_t* getThreadPartitionIdForTest();
     static void setThreadPartitionIdForTest(int32_t* partitionId);
+#ifdef VOLT_POOL_CHECKING
+    void shutdown();
+#endif
 private:
     #ifdef VOLT_POOL_CHECKING
         friend class SynchronizedThreadLock;
@@ -197,6 +200,7 @@ private:
         using SizeBucketMap_t = std::unordered_map<std::size_t, AllocTraceMap_t> ;
         using PartitionBucketMap_t = std::unordered_map<int32_t, SizeBucketMap_t> ;
         static PartitionBucketMap_t s_allocations;
+        bool m_shutdown = false;
     #endif
 };
 }

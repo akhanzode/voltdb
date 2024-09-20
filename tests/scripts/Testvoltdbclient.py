@@ -1,8 +1,8 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8
 
 # This file is part of VoltDB.
-# Copyright (C) 2008-2020 VoltDB Inc.
+# Copyright (C) 2008-2022 Volt Active Data Inc.
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -24,6 +24,14 @@
 # OTHER DEALINGS IN THE SOFTWARE.
 
 import sys
+import os
+
+# ensure version 3.6+ of python
+if sys.hexversion < 0x03060000:
+    sys.stderr.write("Python version 3.6 or greater is required.\n" +
+                     "Please install a more recent Python release and retry.\n")
+    sys.exit(-1)
+
 # add the path to the volt python client, just based on knowing
 # where we are now
 sys.path.append('../../lib/python')
@@ -47,7 +55,7 @@ decimal.getcontext().prec = 19
 def signalHandler(server, signum, frame):
     server.shutdown()
     server.join()
-    raise Exception, "Interrupted by SIGINT."
+    raise Exception("Interrupted by SIGINT.")
 
 class EchoServer(threading.Thread):
     def __init__(self, cmd, lock):
@@ -58,14 +66,14 @@ class EchoServer(threading.Thread):
         self.__start = lock
 
     def run(self):
-        server = subprocess.Popen(self.__server_cmd, shell = True)
+        server = subprocess.Popen(self.__server_cmd, shell=True, encoding='utf-8')
 
         time.sleep(1)
         self.__start.set()
         self.__lock.wait()
 
         # Get the server pid
-        jps = subprocess.Popen("jps", stdout = subprocess.PIPE, shell = True)
+        jps = subprocess.Popen("jps", stdout=subprocess.PIPE, shell=True, encoding='utf-8')
         (stdout, stderr) = jps.communicate()
         pid = None
         lines = stdout.split("\n")
@@ -75,11 +83,10 @@ class EchoServer(threading.Thread):
         if pid == None:
             return
         # Should kill the server now
-        killer = subprocess.Popen("kill -9 %s" % (pid), shell = True)
+        killer = subprocess.Popen("kill -9 %s" % (pid), shell=True, encoding='utf-8')
         killer.communicate()
         if killer.returncode != 0:
-            print >> sys.stderr, \
-                "Failed to kill the server process %d" % (server.pid)
+            sys.stderr.write("Failed to kill the server process %d\n" % server.pid)
             return
 
         server.communicate()
@@ -94,7 +101,7 @@ class TestFastSerializer(unittest.TestCase):
     int64Array = [None, -52423, 2147483647, -9223372036854775807]
     floatArray = [None, float("-inf"), float("nan"), -0.009999999776482582]
     stringArray = [None, u"hello world", u"ça"]
-    binArray = [None, array.array('c', ['c', 'f', 'q'])]
+    binArray = [None, array.array('B', [0, 128, 255])]
     dateArray = [None, datetime.datetime.now(),
                  datetime.datetime.utcfromtimestamp(0),
                  datetime.datetime.utcnow()]

@@ -1,44 +1,29 @@
 #!/usr/bin/env bash
 
-APPNAME="voter"
+###
+# Uses the version of 'voter' source from test_apps/voter
+# (including the schema file, ddl.sql)
+###
 
-# find voltdb binaries in either installation or distribution directory.
-if [ -n "$(which voltdb 2> /dev/null)" ]; then
+# find voltdb binaries
+if [ -e ../../../bin/voltdb ]; then
+    # assume this is the tests/test_apps/voter-daemons directory
+    VOLTDB_BIN="$(dirname $(dirname $(dirname $(pwd))))/bin"
+elif [ -n "$(which voltdb 2> /dev/null)" ]; then
+    # assume we're using voltdb from the path
     VOLTDB_BIN=$(dirname "$(which voltdb)")
 else
-    VOLTDB_BIN="$(dirname $(dirname $(pwd)))/bin"
-    echo "The VoltDB scripts are not in your PATH."
-    echo "For ease of use, add the VoltDB bin directory: "
-    echo
-    echo $VOLTDB_BIN
-    echo
-    echo "to your PATH."
-    echo
-fi
-# installation layout has all libraries in $VOLTDB_ROOT/lib/voltdb
-if [ -d "$VOLTDB_BIN/../lib/voltdb" ]; then
-    VOLTDB_BASE=$(dirname "$VOLTDB_BIN")
-    VOLTDB_LIB="$VOLTDB_BASE/lib/voltdb"
-    VOLTDB_VOLTDB="$VOLTDB_LIB"
-# distribution layout has libraries in separate lib and voltdb directories
-else
-    VOLTDB_BASE=$(dirname "$VOLTDB_BIN")
-    VOLTDB_LIB="$VOLTDB_BASE/lib"
-    VOLTDB_VOLTDB="$VOLTDB_BASE/voltdb"
+    echo "Unable to find VoltDB installation."
+    echo "Please add VoltDB's bin directory to your path."
+    exit -1
 fi
 
-APPCLASSPATH=$CLASSPATH:$({ \
-    \ls -1 "$VOLTDB_VOLTDB"/voltdb-*.jar; \
-    \ls -1 "$VOLTDB_LIB"/*.jar; \
-    \ls -1 "$VOLTDB_LIB"/extension/*.jar; \
-} 2> /dev/null | paste -sd ':' - )
-CLIENTCLASSPATH=$CLASSPATH:$({ \
-    \ls -1 "$VOLTDB_VOLTDB"/voltdbclient-*.jar; \
-} 2> /dev/null | paste -sd ':' - )
-VOLTDB="$VOLTDB_BIN/voltdb"
+# call script to set up paths, including
+# java classpaths and binary paths
+source $VOLTDB_BIN/voltenv
+
 LOG4J="$VOLTDB_VOLTDB/log4j.xml"
-LICENSE="$VOLTDB_VOLTDB/license.xml"
-HOST="localhost"
+VOTER_BASE=../voter
 
 function _run() {
     if [ "$DRYRUN" = "true" ]; then
@@ -46,17 +31,6 @@ function _run() {
     else
         echo "Command: $@"
         "$@"
-    fi
-}
-
-function populate() {
-    # Prefer to use rsync so that modifications are not overridden.
-    if command -v rsync > /dev/null 2>&1; then
-        rsync -ur ../../../examples/voter/ddl.sql .
-        rsync -ur ../../../examples/voter/src .
-    else
-        cp -afv ../../../examples/voter/ddl.sql .
-        cp -afv ../../../examples/voter/src .
     fi
 }
 
@@ -80,32 +54,27 @@ function _checkarg() {
 
 # remove build artifacts
 function clean() {
-    rm -rf obj debugoutput $APPNAME.jar s[12] d[12].xml statement-plans catalog-report.html log voltdb_crash*.txt
-    rm -f ~/.voltdb_server/*
+    rm -rf voter-client.jar voter-procs.jar obj s[12] d[12].xml
+    rm -f ~/.voltdb_server/* voltdb_crash*.txt
 }
 
-# remove build artifacts and copied source
-function clean-all() {
-    clean
-    rm -rf src ddl.sql
+# compile the source code for procedures and the client into jarfiles
+# (local dir used for classes, so can't use jars target from base voter)
+function jars() {
+    mkdir -p obj/procs/voter obj/client/voter
+    # compile java source
+    javac -cp $APPCLASSPATH -d obj/procs $VOTER_BASE/procedures/voter/*.java
+    javac -cp $CLIENTCLASSPATH -d obj/client $VOTER_BASE/client/voter/*.java
+    # build procedure and client jars
+    jar cf voter-procs.jar -C obj/procs voter
+    jar cf voter-client.jar -C obj/client voter
+    # remove compiled .class files
+    rm -rf obj
 }
 
-# compile the source code for procedures and the client
+# older synonym
 function srccompile() {
-    populate
-    mkdir -p obj
-    javac -classpath $APPCLASSPATH -d obj \
-        src/voter/*.java \
-        src/voter/procedures/*.java || exit 1
-}
-
-# build an application catalog
-function catalog() {
-    srccompile
-    if ! ($VOLTDB compile --classpath obj -o $APPNAME.jar ddl.sql > /dev/null); then
-        echo "Catalog compilation failed"
-        exit 1
-    fi
+    jars
 }
 
 # Usage: deployment INSTANCE
@@ -121,8 +90,8 @@ function deployment() {
     <paths>
         <voltdbroot path=\"s$1/voltdbroot\" />
         <snapshots path=\"snapshots\" />
-        <commandlog path=\"commandlog\" />
-        <commandlogsnapshot path=\"commandlog/snapshots\" />
+        <commandlog path=\"command_log\" />
+        <commandlogsnapshot path=\"command_log_snapshots\" />
     </paths>
 </deployment>
 " > d$1.xml
@@ -132,35 +101,44 @@ function deployment() {
 function server() {
     _checkarg server "$@"
     deployment $1
-    test -f $APPNAME.jar || catalog
-    test -d s$1/voltdbroot || mkdir -p s$1/voltdbroot
+    if [ ! -e voter-procs.jar ] || [ ! -e voter-client.jar ]; then
+        srccompile;
+    fi
+    test -d s$1 || mkdir s$1
+
+    local CMD1="voltdb init --force --dir=s$1 --config=d$1.xml"
+    _info "Initializing VoltDB daemon $1 ..."
+    _run $CMD1
+
     # Replication port needs to be the last assigned port #, including
     # the RMI port, because it consumes more than one port number.
-    local CMD="$VOLTDB create -B \
--d d$1.xml \
--l $LICENSE \
--H localhost:$(_port $1 1) \
---internal=$(_port $1 2) \
---zookeeper=$(_port $1 3) \
---http=$(_port $1 4) \
---admin=$(_port $1 5) \
---client=$(_port $1 6) \
---replication=$(_port $1 8) \
-$APPNAME.jar"
+    local CMD2="voltdb start --background --instance=$1 \
+    --dir=s$1 \
+    --host=localhost:$(_port 1 2),localhost:$(_port 2 2) \
+    --count=2 \
+    --internal=$(_port $1 2) \
+    --zookeeper=$(_port $1 3) \
+    --http=$(_port $1 4) \
+    --admin=$(_port $1 5) \
+    --client=$(_port $1 6) \
+    --replication=$(_port $1 8)"
     local VOLTDB_OPTS=-Dvolt.rmi.agent.port=$(_port $1 7)
-    _info "Starting VoltDB daemon $1 (VOLTDB_OPTS=$VOLTDB_OPTS)..."
-    VOLTDB_OPTS=$VOLTDB_OPTS _run $CMD
+    _info "Starting VoltDB daemon $1 ..."
+    VOLTDB_OPTS=$VOLTDB_OPTS _run $CMD2
 }
 
 function watch() {
-    _run tail -F ~/.voltdb_server/localhost_200[01]1*.out
+    _run tail -F ~/.voltdb_server/server_[12].out
 }
 
 # Usage: client INSTANCE
 function client() {
     _checkarg client "$@"
-    test -d obj || srccompile
-    _run java -classpath obj:$CLIENTCLASSPATH:obj -Dlog4j.configuration=file://$LOG4J \
+    if [ ! -e voter-procs.jar ] || [ ! -e voter-client.jar ]; then
+        srccompile;
+    fi
+    sqlcmd --port=$(_port $1 6) < $VOTER_BASE/ddl.sql
+    _run java -classpath voter-client.jar:$CLIENTCLASSPATH -Dlog4j.configuration=file://$LOG4J \
         voter.AsyncBenchmark \
         --displayinterval=5 \
         --warmup=5 \
@@ -173,11 +151,19 @@ function client() {
 # Usage: stop INSTANCE
 function stop() {
     _checkarg stop "$@"
-    _run $VOLTDB stop -H localhost:$(_port $1 1)
+    # argument is internal port, --host is admin port
+    _run voltadmin stop --host=localhost:$(_port $1 5) localhost:$(_port $1 2)
 }
 
 function help() {
-    echo "Usage: ./run.sh {clean|clean-all|catalog|server N|client N|stop N|watch}"
+    echo "
+  Usage: ./run.sh OPTION
+
+  Options:
+      clean | jars |
+      server N | client N | stop N |
+      watch
+"
 }
 
 if [ "$1" = "-n" -o "$1" = "--dry-run" ]; then
@@ -188,6 +174,6 @@ else
 fi
 
 # Run the target passed as the first arg on the command line
-# If no first arg, run server
+# If no first arg, run help
 if [ $# -eq 0 ]; then help; exit; fi
 "$@"

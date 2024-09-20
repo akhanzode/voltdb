@@ -61,7 +61,7 @@ def checkoutCode(voltdbGit, proGit, gitloc):
         # pro repos so user gets status on both checkouts
         message = ""
         if voltdbGit:
-            repo = gitloc + "/voltdb.git"
+            repo = gitloc + "/internal.git"
             checkout_succeeded = repoCheckout(repo, voltdbGit)
             if not checkout_succeeded:
                 message += "\nCheckout of '%s' from %s repository failed." % (voltdbGit, repo)
@@ -74,7 +74,7 @@ def checkoutCode(voltdbGit, proGit, gitloc):
         if len(message) > 0:
             abort(message)
 
-        return run("cat voltdb/version.txt").strip()
+        return run("cat internal/version.txt").strip()
 
 ################################################
 # MAKE A RELEASE DIR
@@ -91,21 +91,50 @@ def makeReleaseDir(releaseDir):
 
 
 ################################################
+# CHANGES FOR A WHITELABEL BUILD
+################################################
+
+def changesWhitelabel(builddir, package_mac):
+    uifile = (builddir + "/pro/tools/whitelabel-logo.png")
+    uifinalfile = (builddir + "/internal/src/frontend/org/voltdb/dbmonitor/images/whitelabel-logo.png")
+    indexfile = (builddir + "/internal/src/frontend/org/voltdb/dbmonitor/index.htm")
+    asciifile = (builddir + "/internal/src/frontend/org/voltdb/utils/voltdb_logstrings.properties")
+    buildpro = (builddir + "/pro/tools/jenkins-pipelines/buildupdate.sh")
+    antcommunity = (builddir + "/internal/build.xml")
+    antpro = (builddir + "/pro/mmt.xml")
+    run("cp -rf %s %s" % (uifile, uifinalfile))
+    #Replace values in index.htm for UI changes
+    run("chmod 775 %s" %(buildpro))
+    run("sh %s %s %s %s" % (buildpro, indexfile, antcommunity, antpro))
+    #Replace ascii start logo
+    if package_mac:
+        f="-i ''"
+    else:
+        f="-i"
+    run("sed %s '/^\host_VoltDB_StartupString = /s/=.*$/= REPLACE HERE/g' %s" % (f, asciifile)) 
+    run(r"sed -E %s 's#REPLACE HERE# Initializing VoltDB...\\\\n\\\\n   _____ __                                  __              \\\\n  / ___// /_  __  ______ _____  ____ _____  / /_  ____ _____ \\\\n  \\\\\\\\\\__ \\\\\\\\\\/ __ \\\\\\\\\\/ / / / __ `/ __ \\\\\\\\\\/ __ `/_  / / __ \\\\\\\\\\/ __ `/ __ \\\\\\\\\\ \\\\n ___/ / / / / /_/ / /_/ / / / / /_/ / / /_/ / / / /_/ / /_/ /\\\\n/____/_/ /_/\\\\\\\\\\__,_/\\\\\\\\\\__,_/_/ /_/\\\\\\\\\\__, / /___/_/ /_/\\\\\\\\\\__,_/\\\\\\\\\\____/ \\\\n                             /____/                          \\\\n\\\\n--------------------------------------------------------------#g'  %s" % (f, asciifile))
+
+
+################################################
 # BUILD THE COMMUNITY VERSION
 ################################################
 
-def buildCommunity(ee_only=False):
+def buildCommunity(edition_type, ee_only=False):
     if build_mac:
         packageMacLib="true"
     else:
         packageMacLib="false"
-    with cd(builddir + "/voltdb"):
+    if build_whitelabel:
+        whitelabel_type="true"
+    else:
+        whitelabel_type="false"
+    with cd(builddir + "/internal"):
         run("pwd")
         run("git status")
         if ee_only:
-            run("ant -Djmemcheck=NO_MEMCHECK -Dkitbuild=%s %s clean ee" % (packageMacLib,  build_args))
+            run("ant -Dvoltdb_editiontype=%s -Djmemcheck=NO_MEMCHECK -Dkitbuild=%s -Dvoltdb_whitelabeltype=%s %s clean ee" % (edition_type, packageMacLib, whitelabel_type, build_args))
         else:
-            run("ant -Djmemcheck=NO_MEMCHECK -Dkitbuild=%s %s clean default dist" % (packageMacLib,  build_args))
+            run("ant -Dvoltdb_editiontype=%s -Djmemcheck=NO_MEMCHECK -Dkitbuild=%s -Dvoltdb_whitelabeltype=%s %s clean default dist" % (edition_type, packageMacLib, whitelabel_type, build_args))
 
 
 ################################################
@@ -118,16 +147,20 @@ def buildEnterprise(version):
         packageMacLib="true"
     else:
         packageMacLib="false"
+    if build_whitelabel:
+        whitelabel_type="true"
+    else:
+        whitelabel_type="false"
     with cd(builddir + "/pro"):
         run("pwd")
         run("git status")
-        run("VOLTCORE=../voltdb ant -f mmt.xml \
+        run("VOLTCORE=../internal ant -f mmt.xml \
         -Djmemcheck=NO_MEMCHECK \
         -DallowDrReplication=true -DallowDrActiveActive=true \
         -Dlicensedays=%d -Dlicensee='%s' \
-        -Dkitbuild=%s %s \
+        -Dkitbuild=%s -Dvoltdb_whitelabeltype=%s %s \
         clean dist.pro" \
-            % (defaultlicensedays, licensee, packageMacLib, build_args))
+            % (defaultlicensedays, licensee, packageMacLib, whitelabel_type, build_args))
 
 
 ################################################
@@ -137,14 +170,16 @@ def buildEnterprise(version):
 #downloads for internal use only
 
 # Must be called after buildEnterprise has been done
+# Modified for V3 license format
 def makeTrialLicense(licensee, days=30, dr_and_xdcr="true", nodes=12):
     timestring = datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S")
     filename = 'trial_' + timestring + '.xml'
+    drtype = 'XDCR' if dr_and_xdcr else 'none'
     with cd(builddir + "/pro"):
         run("ant -f licensetool.xml createlicense \
-        -Dfilename=%s -Dlicensetype=t -Dhardexpire=true \
-        -DallowDrReplication=%s -DallowDrActiveActive=%s\
-        -Dlicensedays=%d -Dlicensee='%s'" % (filename, dr_and_xdcr, dr_and_xdcr, days, licensee))
+        -Dfilename=%s -Dlicensetype='Trial' -DisTrial=true \
+        -DdrType=%s -Dlicensedays=%d -Dlicensee='%s' \
+        -Dnote='VoltDB Internal Use Only'" % (filename, drtype, days, licensee))
         return filename
 
 ################################################
@@ -152,8 +187,12 @@ def makeTrialLicense(licensee, days=30, dr_and_xdcr="true", nodes=12):
 ################################################
 
 def makeSHA256SUM(version, type):
+    if build_whitelabel:
+        dir_base="shinetech"
+    else:
+        dir_base="voltdb"
     with cd(builddir + "/pro/obj/pro"):
-        kitname="voltdb-" +  type + "-" + version
+        kitname= dir_base + "-" +  type + "-" + version
         run("sha256sum -b %s.tar.gz > %s.SHA256SUM" % (kitname, kitname))
 
 ################################################
@@ -161,9 +200,9 @@ def makeSHA256SUM(version, type):
 ################################################
 
 def makeMavenJars():
-    with cd(builddir + "/voltdb"):
-        run("VOLTCORE=../voltdb ant -f build.xml maven-jars")
-        run("VOLTCORE=../voltdb ant -f build-client.xml maven-jars")
+    with cd(builddir + "/internal"):
+        run("VOLTCORE=../internal ant -f build.xml maven-jars")
+        run("VOLTCORE=../internal ant -f build-client.xml maven-jars")
 
 ################################################
 # COPY FILES
@@ -175,22 +214,32 @@ def copyFilesToReleaseDir(releaseDir, version, type=None):
         typeString="-" + type
     else:
         typeString=""
-    get("%s/pro/obj/pro/voltdb%s-%s.tar.gz" % (builddir, typeString, version),
-        "%s/voltdb%s-%s.tar.gz" % (releaseDir, typeString, version))
-    get("%s/pro/obj/pro/voltdb%s-%s.SHA256SUM" % (builddir, typeString, version),
-        "%s/voltdb%s-%s.SHA256SUM" % (releaseDir, typeString, version))
+
+    if build_whitelabel:
+        dir_base="shinetech"
+    else:
+        dir_base="voltdb"
+
+    get("%s/pro/obj/pro/%s%s-%s.tar.gz" % (builddir, dir_base, typeString, version),
+        "%s/%s%s-%s.tar.gz" % (releaseDir, dir_base, typeString, version))
+    get("%s/pro/obj/pro/%s%s-%s.SHA256SUM" % (builddir, dir_base, typeString, version),
+        "%s/%s%s-%s.SHA256SUM" % (releaseDir, dir_base, typeString, version))
     # make don't allow group memebers to delete the directory, the default
     # permissions are 664
     local("chmod 755 %s" % releaseDir)
 
-def copyCommunityFilesToReleaseDir(releaseDir, version, operatingsys):
-    get("%s/voltdb/obj/release/voltdb-community-%s.tar.gz" % (builddir, version),
-        "%s/voltdb-community-%s.tar.gz" % (releaseDir, version))
+def copyCommunityFilesToReleaseDir(releaseDir, version, edition_type, operatingsys):
+    if build_whitelabel:
+        dir_base="shinetech"
+    else:
+        dir_base="voltdb"
+    get("%s/internal/obj/release/%s-%s-%s.tar.gz" % (builddir, dir_base, edition_type, version),
+        "%s/%s-%s-%s.tar.gz" % (releaseDir, dir_base, edition_type, version))
 
     # add stripped symbols
     if operatingsys == "LINUX":
         os.makedirs(releaseDir + "/other")
-        get("%s/voltdb/obj/release/voltdb-%s.sym" % (builddir, version),
+        get("%s/internal/obj/release/voltdb-%s.sym" % (builddir, version),
             "%s/other/%s-voltdb-voltkv-%s.sym" % (releaseDir, operatingsys, version))
 
 def copyTrialLicenseToReleaseDir(licensefile, releaseDir):
@@ -204,25 +253,25 @@ def copyMavenJarsToReleaseDir(releaseDir, version):
         os.makedirs(mavenProjectDir)
 
     #Get the upload.gradle file
-    get("%s/voltdb/tools/kit_tools/upload.gradle" % (builddir),
+    get("%s/internal/tools/kit_tools/upload.gradle" % (builddir),
         "%s/upload.gradle" % (mavenProjectDir))
 
     #Get the voltdbclient-n.n.jar from the recently built community build
-    get("%s/voltdb/obj/release/dist-client-java/voltdb/voltdbclient-%s.jar" % (builddir, version),
+    get("%s/internal/obj/release/dist-client-java/voltdb/voltdbclient-%s.jar" % (builddir, version),
         "%s/voltdbclient-%s.jar" % (mavenProjectDir, version))
     #Get the client's src and javadoc .jar files
-    get("%s/voltdb/obj/release/voltdbclient-%s-javadoc.jar" % (builddir, version),
+    get("%s/internal/obj/release/voltdbclient-%s-javadoc.jar" % (builddir, version),
         "%s/voltdbclient-%s-javadoc.jar" % (mavenProjectDir, version))
-    get("%s/voltdb/obj/release/voltdbclient-%s-sources.jar" % (builddir, version),
+    get("%s/internal/obj/release/voltdbclient-%s-sources.jar" % (builddir, version),
         "%s/voltdbclient-%s-sources.jar" % (mavenProjectDir, version))
 
     #Get the voltdb-n.n.jar from the recently built community build
-    get("%s/voltdb/voltdb/voltdb-%s.jar" % (builddir, version),
+    get("%s/internal/voltdb/voltdb-%s.jar" % (builddir, version),
         "%s/voltdb-%s.jar" % (mavenProjectDir, version))
     #Get the server's src and javadoc .jar files
-    get("%s/voltdb/obj/release/voltdb-%s-javadoc.jar" % (builddir, version),
+    get("%s/internal/obj/release/voltdb-%s-javadoc.jar" % (builddir, version),
         "%s/voltdb-%s-javadoc.jar" % (mavenProjectDir, version))
-    get("%s/voltdb/obj/release/voltdb-%s-sources.jar" % (builddir, version),
+    get("%s/internal/obj/release/voltdb-%s-sources.jar" % (builddir, version),
         "%s/voltdb-%s-sources.jar" % (mavenProjectDir, version))
 
 ################################################
@@ -268,6 +317,7 @@ if __name__ == "__main__":
     parser.add_argument('-g','--gitloc', default="git@github.com:VoltDB", help="Repository location. For example: /home/github-mirror")
     parser.add_argument('--nomac', action='store_true', help="Don't build Mac OSX")
     parser.add_argument('--nocommunity', action='store_true', help="Don't build community")
+    parser.add_argument('--whitelabel', action='store_true', help="Do a whitelabel build")
     parser.add_argument('-l','--includelicense', action='store_true', help="Include a trial license in the Enterprise kit")
     args = parser.parse_args()
 
@@ -279,6 +329,7 @@ if __name__ == "__main__":
 
     build_community = not args.nocommunity
     build_mac = not args.nomac
+    build_whitelabel = args.whitelabel
 
     #If anything is missing we're going to dump this in oneoffs dir.
     build_all = build_community and build_mac
@@ -303,6 +354,7 @@ if __name__ == "__main__":
 
     build_errors=False
 
+    editionType = "developer"
     versionCentos = "unknown"
     versionMac = "unknown"
     releaseDir = "unknown"
@@ -316,8 +368,18 @@ if __name__ == "__main__":
     if build_mac or build_community:
         try:
             with settings(user=username,host_string=MacSSHInfo[1],disable_known_hosts=True,key_filename=MacSSHInfo[0]):
-                versionMac = checkoutCode(voltdbTreeish, None, args.gitloc)
-                buildCommunity(ee_only=True)
+                if build_whitelabel:
+                    try:
+                       package_mac = True
+                       versionMac = checkoutCode(voltdbTreeish, proTreeish, args.gitloc)
+                       changesWhitelabel(builddir, package_mac)
+                    except Exception as e:
+                        print traceback.format_exc()
+                        print "Could not do changes for a whitelabel build"
+                        build_errors=True
+                else:
+                    versionMac = checkoutCode(voltdbTreeish, None, args.gitloc)
+                buildCommunity(editionType, ee_only=True)
         except Exception as e:
             print traceback.format_exc()
             print "Could not build MAC kit. Exception: " + str(e) + ", Type: " + str(type(e))
@@ -337,9 +399,17 @@ if __name__ == "__main__":
                 releaseDir = os.getenv('HOME') + "/releases/" + voltdbTreeish
             makeReleaseDir(releaseDir)
             #print "VERSION: " + versionCentos
+            if build_whitelabel:
+                try:
+                    package_mac = False
+                    changesWhitelabel(builddir, package_mac)
+                except Exception as e:
+                    print traceback.format_exc()
+                    print "Could not do changes for a whitelabel build"
+                    build_errors=True
             if build_community:
-                buildCommunity()
-                copyCommunityFilesToReleaseDir(releaseDir, versionCentos, "LINUX")
+                buildCommunity(editionType)
+                copyCommunityFilesToReleaseDir(releaseDir, versionCentos, editionType, "LINUX")                
                 makeMavenJars()
                 copyMavenJarsToReleaseDir(releaseDir, versionCentos)
             buildEnterprise(versionCentos)

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -54,7 +54,6 @@ public class TestSnapshotDaemonLeaderElection extends TestSnapshotDaemon {
     @Test
     public void testLeaderElectionAndEverythingElse() throws Exception {
         getSnapshotDaemon(false);
-        m_daemon.m_truncationGatheringPeriod = 1;
 
         ZooKeeper zk = m_mockVoltDB.getHostMessenger().getZK();
         zk.create(VoltZK.snapshot_truncation_master, null, Ids.OPEN_ACL_UNSAFE,
@@ -117,7 +116,7 @@ public class TestSnapshotDaemonLeaderElection extends TestSnapshotDaemon {
                         "",
                         32,
                         Collections.<Integer, Long>emptyMap(),
-                        true, /*DRProducerProtocol.PROTOCOL_VERSION*/0,
+                        true, false, /*DRProducerProtocol.PROTOCOL_VERSION*/0,
                         VoltDB.instance().getClusterCreateTime())).await();
         assertTrue(m_initiator.procedureName.equals("@SnapshotDelete"));
 

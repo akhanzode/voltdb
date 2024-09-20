@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -22,16 +22,13 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.net.BindException;
 import java.net.ServerSocket;
-import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.text.SimpleDateFormat;
 import java.util.Arrays;
-import java.util.Calendar;
 import java.util.Collection;
 import java.util.Date;
 import java.util.Deque;
-import java.util.GregorianCalendar;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -47,6 +44,7 @@ import org.voltcore.logging.VoltLogger;
 import org.voltcore.utils.CoreUtils;
 import org.voltcore.utils.DeferredSerialization;
 import org.voltdb.PrivateVoltTableFactory;
+import org.voltdb.RealVoltDB;
 import org.voltdb.StartAction;
 import org.voltdb.StoredProcedureInvocation;
 import org.voltdb.TheHashinator;
@@ -56,10 +54,7 @@ import org.voltdb.VoltType;
 import org.voltdb.client.Client;
 import org.voltdb.client.ClientResponse;
 import org.voltdb.common.Constants;
-import org.voltdb.compiler.deploymentfile.DrRoleType;
 import org.voltdb.iv2.TxnEgo;
-import org.voltdb.licensetool.LicenseApi;
-import org.voltdb.licensetool.LicenseException;
 
 import com.google_voltpatches.common.base.Supplier;
 import com.google_voltpatches.common.collect.ArrayListMultimap;
@@ -108,375 +103,6 @@ public class MiscUtils {
      */
     public static byte[] fileToBytes(File path) throws IOException {
         return Files.readAllBytes(path.toPath());
-    }
-
-    /**
-     * Instantiate the license api impl based on enterprise/community editions
-     * @return a valid API for community and pro editions, or null on error.
-     */
-    public static LicenseApi createLicenseApi(String pathToLicense) {
-
-        if (MiscUtils.isPro() == false) {
-            return new LicenseApi() {
-                @Override
-                public boolean initializeFromFile(File license) {
-                    return true;
-                }
-
-                @Override
-                public boolean isAnyKindOfTrial() {
-                    return false;
-                }
-
-                @Override
-                public boolean isProTrial() {
-                    return false;
-                }
-
-                @Override
-                public boolean isEnterpriseTrial() {
-                    return false;
-                }
-
-                @Override
-                public int maxHostcount() {
-                    return Integer.MAX_VALUE;
-                }
-
-                @Override
-                public Calendar expires() {
-                    Calendar result = Calendar.getInstance();
-                    result.add(Calendar.YEAR, 20); // good enough?
-                    return result;
-                }
-
-                @Override
-                public boolean verify() {
-                    return true;
-                }
-
-                @Override
-                public boolean isDrReplicationAllowed() {
-                    return false;
-                }
-
-                @Override
-                public boolean isDrActiveActiveAllowed() {
-                    return false;
-                }
-
-                @Override
-                public boolean isCommandLoggingAllowed() {
-                    return false;
-                }
-
-                @Override
-                public boolean isAWSMarketplace() {
-                    return false;
-                }
-
-                @Override
-                public boolean isEnterprise() {
-                    return false;
-                }
-
-                @Override
-                public boolean isPro() {
-                    return false;
-                }
-
-                @Override
-                public String licensee() {
-                    return "VoltDB Community Edition User";
-                }
-
-                @Override
-                public Calendar issued() {
-                    Calendar result = Calendar.getInstance();
-                    return result;
-                }
-
-                @Override
-                public String note() {
-                    return "";
-                }
-
-                @Override
-                public boolean hardExpiration() {
-                    return false;
-                }
-
-                @Override
-                public boolean secondaryInitialization() {
-                    return true;
-                }
-
-                @Override
-                public String getSignature() {
-                    return null;
-                }
-
-                @Override
-                public String getLicenseType() {
-                    return "Community Edition";
-                }
-
-                @Override
-                public boolean isUnrestricted() {
-                    return false;
-                }
-
-                @Override
-                public String getIssuerCompany()
-                {
-                    return null;
-                }
-
-                @Override
-                public String getIssuerUrl()
-                {
-                    return null;
-                }
-
-                @Override
-                public String getIssuerEmail()
-                {
-                    return null;
-                }
-
-                @Override
-                public String getIssuerPhone()
-                {
-                    return null;
-                }
-
-                @Override
-                public int getVersion()
-                {
-                    return 0;
-                }
-
-                @Override
-                public int getScheme()
-                {
-                    return 0;
-                }
-            };
-        }
-
-        LicenseApi licenseApi = ProClass
-                .<LicenseApi>load("org.voltdb.licensetool.LicenseApiImpl", "License API", hostLog::fatal)
-                .errorHandler(hostLog::fatal).newInstance();
-        if (licenseApi == null) {
-            return null;
-        }
-
-        // verify the license file exists.
-        File licenseFile = new File(pathToLicense);
-        if (licenseFile.exists() == false) {
-            return null;
-        }
-
-        // Initialize the API. This parses the file but does NOT verify signatures.
-        if (licenseApi.initializeFromFile(licenseFile) == false) {
-            hostLog.fatal("Unable to load license file: could not parse license.");
-            return null;
-        }
-
-        // Perform signature verification - detect modified files
-        try
-        {
-            if (licenseApi.verify() == false) {
-                hostLog.fatal("Unable to load license file: could not verify license signature.");
-                return null;
-            }
-        }
-        catch (LicenseException lex)
-        {
-            hostLog.fatal(lex.getMessage());
-            return null;
-        }
-
-        return licenseApi;
-    }
-
-    public static String[] buildDefaultLicenseDirs(File voltdbroot) {
-        // First starts from voltdbroot directory
-        File licenseF = new VoltFile(voltdbroot, Constants.LICENSE_FILE_NAME);
-        String vdbrt = licenseF.getAbsolutePath();
-        // Then search current directory
-        String crt = System.getProperty("user.dir") + File.separator + Constants.LICENSE_FILE_NAME;
-        // Then search jar file directory
-        String jar = null;
-        try {
-            String jarLoc = VoltDB.class.getProtectionDomain().getCodeSource().getLocation().toURI().getPath();
-            // Strip of file name
-            int lastSlashOff = jarLoc.lastIndexOf(File.separator);
-            if (lastSlashOff == -1) {
-                // Jar is at root directory
-                jar = File.separator + Constants.LICENSE_FILE_NAME;
-            }
-            else {
-                jar = jarLoc.substring(0, lastSlashOff+1) + Constants.LICENSE_FILE_NAME;
-            }
-        } catch (URISyntaxException dontcare) {}
-        // Last search user home directory
-        String home = System.getProperty("user.home") + File.separator + Constants.LICENSE_FILE_NAME;
-
-        return new String[] {vdbrt, crt, jar, home};
-    }
-
-    /**
-     * Validate the signature and business logic enforcement for a license.
-     * @return true if the licensing constraints are met
-     */
-    public static boolean validateLicense(LicenseApi licenseApi, int numberOfNodes, DrRoleType replicationRole,
-            StartAction startAction)
-    {
-        // Delay the handling of an invalid license file until here so
-        // that the leader can terminate the full cluster.
-        if (licenseApi == null) {
-            hostLog.fatal("VoltDB license is not valid.");
-            return false;
-        }
-
-        // do some extra initialization here
-        if (!licenseApi.secondaryInitialization()) {
-            return false;
-        }
-
-        Calendar now = GregorianCalendar.getInstance();
-        SimpleDateFormat sdf = new SimpleDateFormat("MMM d, yyyy");
-        String expiresStr = sdf.format(licenseApi.expires().getTime());
-        boolean valid = true;
-
-        // make it really expire tomorrow to deal with timezone whiners
-        Calendar yesterday = GregorianCalendar.getInstance();
-        yesterday.add(Calendar.DATE, -1);
-
-        if (yesterday.after(licenseApi.expires())) {
-            if (licenseApi.hardExpiration()) {
-                if (licenseApi.isAnyKindOfTrial()) {
-                    hostLog.fatal("VoltDB trial license expired on " + expiresStr + ".");
-                }
-                else {
-                    hostLog.fatal("VoltDB license expired on " + expiresStr + ".");
-                }
-                hostLog.fatal("Please contact sales@voltdb.com to request a new license.");
-                return false;
-            }
-            else {
-                // Expired commercial licenses are allowed but generate log messages.
-                hostLog.error("Warning, VoltDB commercial license expired on " + expiresStr + ".");
-                valid = false;
-            }
-        }
-
-        // enforce DR replication constraint
-        if (licenseApi.isDrReplicationAllowed() == false) {
-            if (replicationRole != DrRoleType.NONE) {
-                hostLog.fatal("Warning, VoltDB license does not allow use of DR replication.");
-                return false;
-            }
-        } else if (licenseApi.isDrActiveActiveAllowed() == false) {
-            if (replicationRole == DrRoleType.XDCR) {
-                hostLog.fatal("Warning, VoltDB license does not allow use of XDCR.");
-                return false;
-            }
-        }
-
-        // check node count
-        if (licenseApi.maxHostcount() < numberOfNodes) {
-            hostLog.fatal("Attempting to " + (startAction.doesJoin() ? "join" : "start") + " with too many nodes ("
-                    + numberOfNodes + "). " + "Current license only supports " + licenseApi.maxHostcount()
-                    + ". Please contact VoltDB at info@voltdb.com.");
-            return false;
-        }
-
-        // If this is a commercial license, and there is less than or equal to 30 days until expiration,
-        // issue a "days remaining" warning message.
-        long diff = licenseApi.expires().getTimeInMillis() - now.getTimeInMillis();
-        // The original license is only a whole data (no minutes/millis).
-        // There should thus be no issue with daylight savings time,
-        // but just in case, if the diff is a negative number, round up to zero.
-        if (diff < 0) {
-            diff = 0;
-        }
-        long diffDays = diff / (24 * 60 * 60 * 1000);
-
-        // print out trial success message
-        if (licenseApi.isAnyKindOfTrial()) {
-            consoleLog.info("Starting VoltDB with trial license. License expires on " + expiresStr + " (" + diffDays + " days remaining).");
-            return true;
-        }
-
-        if (licenseApi.isAWSMarketplace()) {
-            return true;
-        }
-
-        // print out a warning within a month for other licenses
-        if ((diff > 0) && (diff <= 30))
-        {
-            String msg = "Warning: VoltDB license expires in " + diffDays + " day(s).";
-            consoleLog.info(msg);
-        }
-
-        // this gets printed even if there are non-fatal problems, so it
-        // injects the word "invalid" to make it clear this is the case
-        String msg = String.format("Starting VoltDB with %scommercial license. " +
-                                   "License for %d nodes expires on %s.",
-                                   (valid ? "" : "invalid "),
-                                   licenseApi.maxHostcount(),
-                                   expiresStr);
-        consoleLog.info(msg);
-
-        return true;
-    }
-
-    /**
-     * Compare the new and current license, see if the difference is allowed to be updated in live database.
-     * <p>Currently only following types of change is allowed in live cluster:
-     * <li>expiration date, and</li>
-     * <li>max host count</li>
-     * </p>
-     * <p>Ignore differences like license version/scheme, issuer information and licensee name.</p>
-     * @param newLicense
-     * @param currentLicense
-     * @return error message if change is disallowed, null string if change is allowed.
-     */
-    public static String isLicenseChangeAllowed(LicenseApi newLicense, LicenseApi currentLicense) {
-        if ( !newLicense.getLicenseType().equalsIgnoreCase(currentLicense.getLicenseType()) ) {
-            return "Change license type from " + currentLicense.getLicenseType() + " to " + newLicense.getLicenseType() + " is disallowed. " +
-                    "A maintenance window is needed to do that change.";
-        }
-        // Commandlogging is always allowed in enterprise/trail/pro license, check for extra caution
-        if (newLicense.isCommandLoggingAllowed() != currentLicense.isCommandLoggingAllowed()) {
-            return (newLicense.isCommandLoggingAllowed() ? "add" : "remove") + " feature command logging is disallowed. " +
-                    "A maintenance window is needed to do that change.";
-        }
-        if ( newLicense.isDrActiveActiveAllowed() != currentLicense.isDrActiveActiveAllowed()) {
-            return (newLicense.isDrActiveActiveAllowed() ? "add" : "remove") + " feature XDCR is disallowed. " +
-                    "A maintenance window is needed to do that change.";
-        }
-        if (newLicense.isDrReplicationAllowed() != currentLicense.isDrReplicationAllowed() ) {
-            return (newLicense.isDrReplicationAllowed() ? "add" : "remove") + " feature DR is disallowed. " +
-                    "A maintenance window is needed to do that change.";
-        }
-        if ( newLicense.hardExpiration() != currentLicense.hardExpiration() ) {
-            return "Can not change license from " +
-                    (currentLicense.hardExpiration() ? "hard expiration" : "soft expiration") +
-                    " to " + (newLicense.hardExpiration() ? "hard expiration" : "soft expiration");
-        }
-        if ( newLicense.isUnrestricted() != currentLicense.isUnrestricted()) {
-            return "Can not change license from " +
-                    (currentLicense.isUnrestricted() ? "unrestricted" : "restricted") +
-                    " to " + (newLicense.isUnrestricted() ? "unrestricted" : "restricted");
-        }
-        return null;
-    }
-
-    public static boolean isCommunity(LicenseApi api) {
-        return !api.isEnterprise() && !api.isPro() && !api.isAnyKindOfTrial() && !api.isAWSMarketplace();
     }
 
     /**
@@ -642,17 +268,18 @@ public class MiscUtils {
         return "";
     }
 
-    // cache whether we're running pro code
+    // Cache whether we're running Pro code.
     private static Boolean m_isPro = null;
-    // check if we're running pro code
+
+    // Check for Pro build.
     public static boolean isPro() {
         if (m_isPro == null) {
-            //Allow running pro kit as community.
-            if (!Boolean.parseBoolean(System.getProperty("community", "false"))) {
-                m_isPro = ProClass.load("org.voltdb.CommandLogImpl", "Command logging", ProClass.HANDLER_IGNORE)
-                        .hasProClass();
-            } else {
-                m_isPro = false;
+            m_isPro = ProClass.load("org.voltdb.CommandLogImpl", "Command logging", ProClass.HANDLER_IGNORE)
+                              .hasProClass();
+            // It used to be possible to pretend Pro code was Community, but that
+            // hasn't worked correctly since about V10. Ignore but warn.
+            if (m_isPro && Boolean.parseBoolean(System.getProperty("community", "false"))) {
+                hostLog.warn("Property 'community' is set but has no effect on Pro code");
             }
         }
         return m_isPro.booleanValue();
@@ -660,38 +287,103 @@ public class MiscUtils {
 
     /**
      * @param server String containing a hostname/ip, or a hostname/ip:port.
-     * @param defaultPort If a port isn't specified, use this one.
+     *               IPv6 addresses must be enclosed in brackets.
      * @return hostname or textual ip representation.
+     *         IPv6 address will not have brackets.
      */
     public static String getHostnameFromHostnameColonPort(String server) {
-        return HostAndPort.fromString(server).getHostText();
+        return HostAndPort.fromString(server).requireBracketsForIPv6().getHostText();
     }
 
     /**
      * @param server String containing a hostname/ip, or a hostname/ip:port.
+     *               IPv6 addresses must be enclosed in brackets.
      * @param defaultPort If a port isn't specified, use this one.
      * @return port number.
      */
     public static int getPortFromHostnameColonPort(String server, int defaultPort) {
-        return HostAndPort.fromString(server).getPortOrDefault(defaultPort);
+        return HostAndPort.fromString(server).requireBracketsForIPv6().getPortOrDefault(defaultPort);
     }
 
     /**
      * @param server String containing a hostname/ip, or a hostname/ip:port.
+     *               IPv6 addresses must be enclosed in brackets.
      * @param defaultPort If a port isn't specified, use this one.
      * @return HostAndPort number.
      */
     public static HostAndPort getHostAndPortFromHostnameColonPort(String server, int defaultPort) {
-        return HostAndPort.fromString(server).withDefaultPort(defaultPort);
+        return HostAndPort.fromString(server).withDefaultPort(defaultPort).requireBracketsForIPv6();
     }
 
     /**
      * @param server String containing a hostname/ip, or a hostname/ip:port.
+     *               IPv6 addresses must be enclosed in brackets.
      * @param defaultPort If a port isn't specified, use this one.
      * @return String in hostname/ip:port format.
+     *         IPv6 address will be enclosed in brackets.
      */
     public static String getHostnameColonPortString(String server, int defaultPort) {
-        return HostAndPort.fromString(server).withDefaultPort(defaultPort).toString();
+        return getHostAndPortFromHostnameColonPort(server, defaultPort).toString();
+    }
+
+    /**
+     * Used to parse many of the --fubar=[interface][:port] command options.
+     * This differs from the other 'host and port' methods in that it treats
+     * a spec that consists only of decimal digits as a port number. Note that
+     * brackets are required around IPv6 addresses to remove ambiguity about
+     * whether there is a port number.
+     *
+     * Expected forms: (brackets are literal here)
+     *    portnum
+     *    hostname       hostname:portnum
+     *    ip4address    ip4address:portnum
+     *    [ip6address]  [ip6address]:portnum
+     *
+     * @param spec one of: port, hostname, hostname:port, ipaddr, ipaddr:port
+     * @param defaultHost: if spec is port number, this is used as the host
+     * @param defaultPort: if a port isn't specified, use this
+     * @return HostAndPort number.
+     * @throws IllegalArgumentException
+     */
+    public static HostAndPort getHostAndPortFromInterfaceSpec(String spec, String defaultHost, int defaultPort) {
+        spec = (spec == null ? "" : spec.trim());
+        if (spec.matches("^[0-9]+$")) {
+            return HostAndPort.fromParts(defaultHost, Integer.parseInt(spec));
+        }
+        else {
+            return HostAndPort.fromString(spec).withDefaultPort(defaultPort).requireBracketsForIPv6();
+        }
+    }
+
+    /**
+     * Handles interface addresses that are not supposed to contain a port
+     * number (which is checked). Strips brackets that may be around an
+     * IPv6 address, returning the bare address.
+     *
+     * @param host - one of hostname, ip4 address, ip6 address, [ip6 address]
+     * @return input with brackets removed
+     * @throws IllegalArgumentException
+     */
+    public static String getAddressOfInterface(String host) {
+        host = (host == null ? "" : host.trim());
+        return HostAndPort.fromHost(host).getHost();
+    }
+
+    /**
+     * Combines an address/hostname and port number into an "interface spec",
+     * taking care of adding brackets as necessary for IPv6 addresses.
+     * Both host and port are required here.
+     *
+     * @param host - one of hostname, ip4 address, ip6 address
+     * @param port - port number
+     * @return host and port as string
+     */
+    public static String makeInterfaceSpec(String host, int port) {
+        host = (host == null ? "" : host.trim());
+        if (host.contains(":") && host.charAt(0) != '[') {
+            host = "[" + host + "]";
+        }
+        return host + ":" + port;
     }
 
     /**
@@ -765,16 +457,16 @@ public class MiscUtils {
         return result;
     }
 
-    public static void deleteRecursively( File file) {
+    public static boolean deleteRecursively( File file) {
         if (file == null || !file.exists() || !file.canRead() || !file.canWrite()) {
-            return;
+            return false;
         }
         if (file.isDirectory() && file.canExecute()) {
             for (File f: file.listFiles()) {
                 deleteRecursively(f);
             }
         }
-        file.delete();
+        return file.delete();
     }
 
     /**
@@ -988,6 +680,9 @@ public class MiscUtils {
 
     public static String formatUptime(long uptimeInMs)
     {
+        if (uptimeInMs < 0) {
+            return "unknown";
+        }
         long remainingMs = uptimeInMs;
         long days = TimeUnit.MILLISECONDS.toDays(remainingMs);
         remainingMs -= TimeUnit.DAYS.toMillis(days);

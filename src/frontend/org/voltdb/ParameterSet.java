@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -105,7 +105,7 @@ public class ParameterSet implements JSONString {
 
             if (ByteBuffer.class.isAssignableFrom(cls)) {
                 ByteBuffer bb = (ByteBuffer)obj;
-                size += 4 + bb.capacity();
+                size += 4 + bb.remaining();
                 continue;
             } else if (cls.isArray()) {
                 if (obj instanceof byte[]) {
@@ -708,9 +708,10 @@ public class ParameterSet implements JSONString {
             if (ByteBuffer.class.isAssignableFrom(cls)) {
                 ByteBuffer bb = (ByteBuffer)obj;
                 buf.put(VoltType.VARBINARY.getValue());
-                buf.putInt(bb.capacity());
-                final byte[] b = bb.array();
-                buf.put(b);
+                buf.putInt(bb.remaining());
+                int pos = bb.position();
+                buf.put(bb);
+                bb.position(pos);
                 continue;
             }
 

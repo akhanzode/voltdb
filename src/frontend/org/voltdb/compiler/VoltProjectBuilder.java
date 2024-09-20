@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -17,6 +17,10 @@
 
 package org.voltdb.compiler;
 
+import javax.xml.bind.JAXBContext;
+import javax.xml.bind.JAXBElement;
+import javax.xml.bind.JAXBException;
+import javax.xml.bind.Marshaller;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
@@ -25,6 +29,7 @@ import java.io.UnsupportedEncodingException;
 import java.net.URL;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -33,12 +38,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
-
-import javax.xml.bind.JAXBContext;
-import javax.xml.bind.JAXBElement;
-import javax.xml.bind.JAXBException;
-import javax.xml.bind.Marshaller;
-
+import com.google_voltpatches.common.collect.ImmutableMap;
+import org.apache.commons.lang3.StringUtils;
 import org.voltdb.BackendTarget;
 import org.voltdb.ProcedurePartitionData;
 import org.voltdb.VoltDB;
@@ -47,6 +48,7 @@ import org.voltdb.common.Constants;
 import org.voltdb.compiler.deploymentfile.ClusterType;
 import org.voltdb.compiler.deploymentfile.CommandLogType;
 import org.voltdb.compiler.deploymentfile.ConnectionType;
+import org.voltdb.compiler.deploymentfile.ConsumerLimitType;
 import org.voltdb.compiler.deploymentfile.DeploymentType;
 import org.voltdb.compiler.deploymentfile.DiskLimitType;
 import org.voltdb.compiler.deploymentfile.DrRoleType;
@@ -66,6 +68,7 @@ import org.voltdb.compiler.deploymentfile.KeyOrTrustStoreType;
 import org.voltdb.compiler.deploymentfile.PartitionDetectionType;
 import org.voltdb.compiler.deploymentfile.PathsType;
 import org.voltdb.compiler.deploymentfile.PathsType.Voltdbroot;
+import org.voltdb.compiler.deploymentfile.PriorityPolicyType;
 import org.voltdb.compiler.deploymentfile.PropertyType;
 import org.voltdb.compiler.deploymentfile.ResourceMonitorType;
 import org.voltdb.compiler.deploymentfile.ResourceMonitorType.Memorylimit;
@@ -79,6 +82,8 @@ import org.voltdb.compiler.deploymentfile.SnmpType;
 import org.voltdb.compiler.deploymentfile.SslType;
 import org.voltdb.compiler.deploymentfile.SystemSettingsType;
 import org.voltdb.compiler.deploymentfile.SystemSettingsType.Temptables;
+import org.voltdb.compiler.deploymentfile.ThreadPoolsType;
+import org.voltdb.compiler.deploymentfile.TopicType;
 import org.voltdb.compiler.deploymentfile.TopicsType;
 import org.voltdb.compiler.deploymentfile.UsersType;
 import org.voltdb.compiler.deploymentfile.UsersType.User;
@@ -86,8 +91,6 @@ import org.voltdb.export.ExportDataProcessor;
 import org.voltdb.export.ExportManagerInterface;
 import org.voltdb.export.ExportManagerInterface.ExportMode;
 import org.voltdb.utils.NotImplementedException;
-
-import com.google_voltpatches.common.collect.ImmutableMap;
 
 /**
  * Alternate (programmatic) interface to VoltCompiler. Give the class all of
@@ -271,6 +274,7 @@ public class VoltProjectBuilder {
     boolean m_jsonApiEnabled = true;
     boolean m_sslEnabled = false;
     boolean m_sslExternal = false;
+    boolean m_sslInternal = false;
     boolean m_sslDR = false;
 
     String m_keystore;
@@ -295,6 +299,8 @@ public class VoltProjectBuilder {
 
     private Integer m_heartbeatTimeout = null;
 
+    private Duration clockSkewInterval = null;
+
     private String m_internalSnapshotPath;
     private String m_commandLogPath;
     private Boolean m_commandLogSync;
@@ -313,7 +319,7 @@ public class VoltProjectBuilder {
     private List<String> m_diagnostics;
 
     private List<HashMap<String, Object>> m_ilImportConnectors = new ArrayList<>();
-    private List<ExportConfigurationType> m_exportConfigs = new ArrayList<>();
+    private ExportType m_exportsConfiguration;
 
     private Integer m_deadHostTimeout = null;
 
@@ -327,17 +333,27 @@ public class VoltProjectBuilder {
     private Map<FeatureNameType, String> m_featureDiskLimits;
     private Map<FeatureNameType, String> m_snmpFeatureDiskLimits;
     private FlushIntervalType m_flushIntervals = null;
+    private PriorityPolicyType m_priorityPolicy = null;
 
     private boolean m_useDDLSchema = false;
 
     private String m_drMasterHost;
+    private String m_drBuffers;
     private Integer m_preferredSource;
     private Boolean m_drConsumerConnectionEnabled = null;
     private String m_drConsumerSslPropertyFile = null;
     private Boolean m_drProducerEnabled = null;
     private DrRoleType m_drRole = DrRoleType.MASTER;
+    private String m_drConflictRetention;
+
     private FeaturesType m_featureOptions;
     private TopicsType m_topicsConfiguration;
+    private ThreadPoolsType m_threadPoolsConfiguration;
+
+    public VoltProjectBuilder setClockSkewInterval(Duration interval) {
+        clockSkewInterval = interval;
+        return this;
+    }
 
     public VoltProjectBuilder setQueryTimeout(int target) {
         m_queryTimeout = target;
@@ -409,12 +425,26 @@ public class VoltProjectBuilder {
         m_featureOptions.getFeature().add(exportFeature);
     }
 
+    public ExportType getExportsConfiguration() {
+        if (m_exportsConfiguration == null) {
+            m_exportsConfiguration = new ExportType();
+        }
+        return m_exportsConfiguration;
+    }
+
     public TopicsType getTopicsConfiguration() {
         if (m_topicsConfiguration == null) {
             // Note - Topics feature is enabled by default
             m_topicsConfiguration = new TopicsType();
         }
         return m_topicsConfiguration;
+    }
+
+    public ThreadPoolsType getThreadPoolsConfiguration() {
+        if (m_threadPoolsConfiguration == null) {
+            m_threadPoolsConfiguration = new ThreadPoolsType();
+        }
+        return m_threadPoolsConfiguration;
     }
 
     public boolean isTopicsEnabled() {
@@ -579,7 +609,7 @@ public class VoltProjectBuilder {
     }
 
     public void addStmtProcedure(String name, String sql) {
-        addStmtProcedure(name, sql, new ProcedurePartitionData());
+        addStmtProcedure(name, sql, new ProcedurePartitionData(ProcedurePartitionData.Type.MULTI));
     }
 
     // compatible with old deprecated syntax for test ONLY
@@ -718,6 +748,10 @@ public class VoltProjectBuilder {
         m_sslExternal = enabled;
     }
 
+    public void setSslInternal(final boolean enabled) {
+        m_sslInternal = enabled;
+    }
+
     public void setSslDR(final boolean enabled) {
         m_sslDR = enabled;
     }
@@ -780,6 +814,14 @@ public class VoltProjectBuilder {
         m_flushIntervals.setExport(exportFlush);
     }
 
+    // Return a priority policy that can be modified in place prior to compiling the project
+    public PriorityPolicyType getPriorityPolicy() {
+        if (m_priorityPolicy == null) {
+            m_priorityPolicy = new PriorityPolicyType();
+        }
+        return m_priorityPolicy;
+    }
+
     public void addImport(boolean enabled, String importType, String importFormat, String importBundle, Properties config) {
          addImport(enabled, importType, importFormat, importBundle, config, new Properties());
     }
@@ -808,7 +850,7 @@ public class VoltProjectBuilder {
 
     // Use this to update deployment with new or modified export targets
     public void clearExports() {
-        m_exportConfigs.clear();
+        getExportsConfiguration().getConfiguration().clear();
     }
 
     public void addExport(boolean enabled) {
@@ -856,7 +898,33 @@ public class VoltProjectBuilder {
             configProperties.add(prop);
         }
 
-        m_exportConfigs.add(exportConfig);
+        getExportsConfiguration().getConfiguration().add(exportConfig);
+    }
+
+    public TopicType addTopic(String topicName) {
+        return addTopic(topicName, null, null);
+    }
+
+    public TopicType addTopic(String topicName, String procName, Map<String, String> properties) {
+        assert !StringUtils.isBlank(topicName);
+        TopicType topic = new TopicType();
+        topic.setName(topicName);
+
+        if (procName != null) {
+            topic.setProcedure(procName);
+        }
+
+        if (properties != null) {
+            properties.forEach((k, v) -> {
+                PropertyType prop = new PropertyType();
+                prop.setName(k);
+                prop.setValue(v);
+                topic.getProperty().add(prop);
+            });
+        }
+
+        getTopicsConfiguration().getTopic().add(topic);
+        return topic;
     }
 
     public void setCompilerDebugPrintStream(final PrintStream out) {
@@ -870,6 +938,10 @@ public class VoltProjectBuilder {
 
     public void setDRMasterHost(String drMasterHost) {
         m_drMasterHost = drMasterHost;
+    }
+
+    public void setDRBuffers(String drBuffers) {
+        m_drBuffers = drBuffers;
     }
 
     public void setPreferredSource(int preferredSource) {
@@ -908,6 +980,10 @@ public class VoltProjectBuilder {
 
     public void setXDCR() {
         m_drRole = DrRoleType.XDCR;
+    }
+
+    public void setDrConflictRetention(String retention) {
+        m_drConflictRetention = retention;
     }
 
     public boolean compile(final String jarPath) {
@@ -1290,6 +1366,7 @@ public class VoltProjectBuilder {
         deployment.setSsl(ssl);
         ssl.setEnabled(m_sslEnabled);
         ssl.setExternal(m_sslExternal);
+        ssl.setInternal(m_sslInternal);
         ssl.setDr(m_sslDR);
         if (m_keystore!=null) {
             KeyOrTrustStoreType store = factory.createKeyOrTrustStoreType();
@@ -1323,12 +1400,7 @@ public class VoltProjectBuilder {
         }
 
         // <export>
-        ExportType export = factory.createExportType();
-        deployment.setExport(export);
-
-        for (ExportConfigurationType exportConfig : m_exportConfigs) {
-            export.getConfiguration().add(exportConfig);
-        }
+        deployment.setExport(getExportsConfiguration());
 
         // <import>
         ImportType importt = factory.createImportType();
@@ -1394,9 +1466,18 @@ public class VoltProjectBuilder {
             conn.setEnabled(m_drConsumerConnectionEnabled);
             conn.setSsl(m_drConsumerSslPropertyFile);
         }
+        if (m_drBuffers != null && !m_drBuffers.isEmpty()) {
+            ConsumerLimitType consumerLimitType = factory.createConsumerLimitType();
+            consumerLimitType.setMaxbuffers(Integer.parseInt(m_drBuffers));
+            dr.setConsumerlimit(consumerLimitType);
+        }
+        if (m_drConflictRetention != null) {
+            dr.setConflictretention(m_drConflictRetention);
+        }
 
         deployment.setFeatures(m_featureOptions);
         setTopicsConfiguration(deployment);
+        setThreadPoolsConfiguration(deployment);
 
         // Have some yummy boilerplate!
         File file = File.createTempFile("myAppDeployment", ".tmp");
@@ -1412,6 +1493,12 @@ public class VoltProjectBuilder {
     private void setTopicsConfiguration(DeploymentType deployment) {
         if (m_topicsConfiguration != null) {
             deployment.setTopics(m_topicsConfiguration);
+        }
+    }
+
+    private void setThreadPoolsConfiguration(DeploymentType deployment) {
+        if (m_threadPoolsConfiguration != null) {
+            deployment.setThreadpools(m_threadPoolsConfiguration);
         }
     }
 
@@ -1447,8 +1534,9 @@ public class VoltProjectBuilder {
             systemSettingType.setProcedure(procedure);
         }
 
-        // <flushIntervals>
+        // Flush intervals and transaction policy
         systemSettingType.setFlushinterval(m_flushIntervals);
+        systemSettingType.setPriorities(m_priorityPolicy);
 
         if (m_rssLimit != null || m_snmpRssLimit != null) {
             ResourceMonitorType monitorType = initializeResourceMonitorType(systemSettingType, factory);
@@ -1466,6 +1554,12 @@ public class VoltProjectBuilder {
             ResourceMonitorType monitorType = initializeResourceMonitorType(systemSettingType, factory);
             monitorType.setFrequency(m_resourceCheckInterval);
         }
+
+        SystemSettingsType.Clockskew clockSkewType = factory.createSystemSettingsTypeClockskew();
+        if (clockSkewInterval != null) {
+            clockSkewType.setInterval((int) clockSkewInterval.toMinutes());
+        }
+        systemSettingType.setClockskew(clockSkewType);
 
         setupDiskLimitType(systemSettingType, factory);
 

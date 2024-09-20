@@ -1,8 +1,8 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This file contains original code and/or modifications of original code.
- * Any modifications made by VoltDB Inc. are licensed under the following
+ * Any modifications made by Volt Active Data Inc. are licensed under the following
  * terms and conditions:
  *
  * This program is free software: you can redistribute it and/or modify
@@ -68,6 +68,7 @@
 #endif // __USE_GNU
 #include <sched.h>
 #include <cerrno>
+#include <stdlib.h>
 #endif // LINUX
 #ifdef MACOSX
 #include <mach/task.h>
@@ -98,6 +99,7 @@
 #include "org_voltdb_jni_ExecutionEngine.h" // the header file output by javah
 #include "org_voltcore_utils_DBBPool.h" //Utility method for DBBContainer
 #include "org_voltdb_utils_PosixAdvise.h" //Utility method for invoking madvise/fadvise
+#include "org_voltdb_utils_DirectIoFileChannel.h" //Utility methods for working with direct IO
 
 #include "boost/shared_ptr.hpp"
 #include "boost/scoped_array.hpp"
@@ -319,6 +321,9 @@ SHAREDLIB_JNIEXPORT jint JNICALL Java_org_voltdb_jni_ExecutionEngine_nativeIniti
     jbyteArray hostname,
     jint drClusterId,
     jint defaultDrBufferSize,
+    jboolean drIgnoreConflicts,
+    jint drCrcErrorIgnoreMax,
+    jboolean drCrcErrorIgnoreFatal,
     jlong tempTableMemory,
     jboolean createDrReplicatedStream,
     jint compactionThreshold)
@@ -347,6 +352,9 @@ SHAREDLIB_JNIEXPORT jint JNICALL Java_org_voltdb_jni_ExecutionEngine_nativeIniti
                            hostString,
                            drClusterId,
                            defaultDrBufferSize,
+                           drIgnoreConflicts,
+                           drCrcErrorIgnoreMax,
+                           drCrcErrorIgnoreFatal,
                            tempTableMemory,
                            createDrReplicatedStream,
                            static_cast<int32_t>(compactionThreshold));
@@ -1414,12 +1422,14 @@ SHAREDLIB_JNIEXPORT jlong JNICALL Java_org_voltdb_jni_ExecutionEngine_nativeGetR
 
 /*
  * Class:     org_voltcore_utils_DBBPool
- * Method:    nativeDeleteCharArrayMemory
+ * Method:    nativeFreeMemory
  * Signature: (J)V
  */
-SHAREDLIB_JNIEXPORT void JNICALL Java_org_voltcore_utils_DBBPool_nativeDeleteCharArrayMemory
+SHAREDLIB_JNIEXPORT void JNICALL Java_org_voltcore_utils_DBBPool_nativeFreeMemory
   (JNIEnv *env, jclass clazz, jlong ptr) {
-    delete[] reinterpret_cast<char*>(ptr);
+    // Used to free memory allocated by nativeAllocateUnsafeByteBuffer and nativeAlignedAllocateUnsafeByteBuffer
+    // nativeAlignedAllocateUnsafeByteBuffer has to use a low level allocation so malloc and free must be used
+    ::free(reinterpret_cast<void*>(ptr));
 }
 
 /*
@@ -1429,11 +1439,16 @@ SHAREDLIB_JNIEXPORT void JNICALL Java_org_voltcore_utils_DBBPool_nativeDeleteCha
  */
 SHAREDLIB_JNIEXPORT jobject JNICALL Java_org_voltcore_utils_DBBPool_nativeAllocateUnsafeByteBuffer
   (JNIEnv *jniEnv, jclass, jlong size) {
-    char *memory = new char[size];
-    jobject buffer = jniEnv->NewDirectByteBuffer( memory, size);
-    if (buffer == NULL) {
-        jniEnv->ExceptionDescribe();
-        throw std::exception();
+    jobject buffer = nullptr;
+
+    // See nativeFreeMemory for why malloc is being used
+    void *memory = ::malloc(size);
+    if (memory != nullptr) {
+        buffer = jniEnv->NewDirectByteBuffer( memory, size);
+        if (buffer == NULL) {
+            jniEnv->ExceptionDescribe();
+            throw std::exception();
+        }
     }
     return buffer;
 }
@@ -1507,6 +1522,50 @@ SHAREDLIB_JNIEXPORT jlong JNICALL Java_org_voltdb_utils_PosixAdvise_fallocate
     return posix_fallocate(getFdFromFileDescriptor(env,fdObject), static_cast<off_t>(offset), static_cast<off_t>(length));
 #endif
 }
+
+/*
+ * Class:     Java_org_voltdb_utils_DirectIoFileChannel
+ * Method:    nativeOpen
+ * Signature: ([B)I
+ */
+SHAREDLIB_JNIEXPORT jint JNICALL Java_org_voltdb_utils_DirectIoFileChannel_nativeOpen
+        (JNIEnv *env, jclass, jbyteArray pathArray) {
+#ifdef MACOSX
+    return -ENOTSUP;
+#else
+    jbyte* pathBytes = env->GetByteArrayElements(pathArray, nullptr);
+    int length = env->GetArrayLength(pathArray);
+
+    std::string path(reinterpret_cast<char*>(pathBytes), length);
+    int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_DIRECT, S_IRUSR | S_IWUSR | S_IRGRP);
+
+    return fd >= 0 ? fd : -errno;
+#endif
+}
+
+/*
+ * Class:     org_voltcore_utils_DBBPool
+ * Method:    nativeAllocateAlignedUnsafeByteBuffer
+ * Signature: (II)Ljava/nio/ByteBuffer;
+ */
+SHAREDLIB_JNIEXPORT jobject JNICALL Java_org_voltcore_utils_DBBPool_nativeAllocateAlignedUnsafeByteBuffer
+  (JNIEnv *jniEnv, jclass, jint alignment, jint size) {
+    jobject buffer = nullptr;
+
+#ifdef LINUX
+    void *memory = ::aligned_alloc(alignment, size);
+    if (memory != nullptr) {
+        buffer = jniEnv->NewDirectByteBuffer(memory, size);
+        if (buffer == NULL) {
+            jniEnv->ExceptionDescribe();
+            throw std::exception();
+        }
+    }
+#endif
+
+    return buffer;
+}
+
 
 SHAREDLIB_JNIEXPORT jlong JNICALL
 Java_org_voltdb_jni_ExecutionEngine_nativeApplyBinaryLog (
@@ -1767,4 +1826,71 @@ SHAREDLIB_JNIEXPORT jint JNICALL Java_org_voltdb_jni_ExecutionEngine_nativeDelet
     }
     return 1;
 }
+
+/*
+ * Class:     org_voltdb_jni_ExecutionEngine
+ * Method:    nativeSetReplicableTables
+ * Signature: (JI[[B)I
+ */
+SHAREDLIB_JNIEXPORT jint JNICALL Java_org_voltdb_jni_ExecutionEngine_nativeSetReplicableTables
+  (JNIEnv *env, jclass clazz, jlong pointer, jint clusterId, jobjectArray tables) {
+    auto engine = castToEngine(pointer);
+    Topend *topend = static_cast<JNITopend*>(engine->getTopend())->updateJNIEnv(env);
+    try {
+        if (tables == nullptr) {
+            return engine->setReplicableTables(clusterId, nullptr);
+        }
+
+        std::vector<std::string> replicableTables;
+
+        jsize size = env->GetArrayLength(tables);
+        for (int i = 0; i < size; ++i) {
+            jbyteArray tableName = static_cast<jbyteArray>(env->GetObjectArrayElement(tables, i));
+            jbyte* tableNameBytes = env->GetByteArrayElements(tableName, nullptr);
+            replicableTables.emplace_back(reinterpret_cast<char*>(tableNameBytes), env->GetArrayLength(tableName));
+        }
+
+        return engine->setReplicableTables(clusterId, &replicableTables);
+    } catch (const FatalException &e) {
+        topend->crashVoltDB(e);
+    }
+    return 1;
+}
+
+/*
+ * Class:     org_voltdb_jni_ExecutionEngine
+ * Method:    nativeClearAllReplicableTables
+ * Signature: (J)I
+ */
+SHAREDLIB_JNIEXPORT jint JNICALL Java_org_voltdb_jni_ExecutionEngine_nativeClearAllReplicableTables
+  (JNIEnv *env, jclass clazz, jlong pointer) {
+    auto engine = castToEngine(pointer);
+    Topend *topend = static_cast<JNITopend*>(engine->getTopend())->updateJNIEnv(env);
+    try {
+        engine->clearAllReplicableTables();
+        return 0;
+    } catch (const FatalException &e) {
+        topend->crashVoltDB(e);
+    }
+    return 1;
+}
+
+/*
+ * Class:     org_voltdb_jni_ExecutionEngine
+ * Method:    nativeClearReplicableTables
+ * Signature: (J)I
+ */
+SHAREDLIB_JNIEXPORT jint JNICALL Java_org_voltdb_jni_ExecutionEngine_nativeClearReplicableTables
+        (JNIEnv *env, jclass clazz, jlong pointer, jint clusterId) {
+    auto engine = castToEngine(pointer);
+    Topend *topend = static_cast<JNITopend*>(engine->getTopend())->updateJNIEnv(env);
+    try {
+        engine->clearReplicableTables(clusterId);
+        return 0;
+    } catch (const FatalException &e) {
+        topend->crashVoltDB(e);
+    }
+    return 1;
+}
+
 /** @} */ // end of JNI doxygen group

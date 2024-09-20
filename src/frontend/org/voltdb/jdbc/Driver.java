@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -35,6 +35,7 @@ import java.util.Properties;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
 
+import org.voltdb.client.Priority;
 import org.voltcore.utils.ssl.SSLConfiguration;
 
 public class Driver implements java.sql.Driver
@@ -42,13 +43,21 @@ public class Driver implements java.sql.Driver
     public static final String JDBC_PROP_FILE_ENV = "VOLTDB_JDBC_PROPERTIES";
     public static final String JDBC_PROP_FILE_PROP = "voltdb.jdbcproperties";
     public static final String DEFAULT_PROP_FILENAME = "voltdb.properties";
+
+    public static final String SSL_PROP= "ssl";
+    public static final String TRUSTSTORE_CONFIG_PROP = "truststore";
+    public static final String TRUSTSTORE_PASSWORD_PROP = "truststorepassword";
+    public static final String KERBEROS_CONFIG_PROP = "kerberos";
+    public static final String TOPOLOGY_CHANGE_AWARE_PROP = "topologychangeaware";
+    public static final String RECONNECT_ON_CONNECTION_LOSS_PROP = "autoreconnect";
+    public static final String MAX_OUTSTANDING_TXNS_PROP = "maxoutstandingtxns";
+    public static final String HEAVYWEIGHT_PROP = "heavyweight";
+    public static final String USER_PROP = "user";
+    public static final String PASSWORD_PROP = "password";
+    public static final String PRIORITY_PROP = "priority";
+
     //Driver URL prefix.
     private static final String URL_PREFIX = "jdbc:voltdb:";
-
-    static final String SSL_PROP= "ssl";
-    static final String TRUSTSTORE_CONFIG_PROP = "truststore";
-    static final String TRUSTSTORE_PASSWORD_PROP = "truststorepassword";
-    static final String KERBEROS_CONFIG_PROP = "kerberos";
 
     // Static so it's unit-testable, yes, lazy me
     static String[] getServersFromURL(String url) {
@@ -144,37 +153,48 @@ public class Driver implements java.sql.Driver
                 String truststorePath = null;
                 String truststorePassword = null;
                 String kerberosConfig = null;
+                boolean topologyChangeAware = false;
+                int priority = -1;
 
                 for (Enumeration<?> e = info.propertyNames(); e.hasMoreElements();)
                 {
                     String key = (String) e.nextElement();
                     String value = info.getProperty(key);
-                    if (key.toLowerCase().equals("user"))
+                    if (key.equalsIgnoreCase(USER_PROP))
                         user = value;
-                    else if (key.toLowerCase().equals("password"))
+                    else if (key.equalsIgnoreCase(PASSWORD_PROP))
                         password = value;
-                    else if (key.toLowerCase().equals("heavyweight"))
-                        heavyweight = (value.toLowerCase().equals("true") || value.toLowerCase().equals("yes") ||
-                                value.toLowerCase().equals("1"));
-                    else if (key.toLowerCase().equals("maxoutstandingtxns"))
+                    else if (key.equalsIgnoreCase(HEAVYWEIGHT_PROP))
+                        heavyweight = (value.equalsIgnoreCase("true") || value.toLowerCase().equals("yes") ||
+                                value.equalsIgnoreCase("1"));
+                    else if (key.equalsIgnoreCase(MAX_OUTSTANDING_TXNS_PROP))
                         maxoutstandingtxns = Integer.parseInt(value);
-                    else if ("autoreconnect".equals(key)) {
+                    else if (RECONNECT_ON_CONNECTION_LOSS_PROP.equals(key)) {
                         reconnectOnConnectionLoss = ("true".equalsIgnoreCase(value) || "yes".equalsIgnoreCase(value) || "1".equals(value));
                     }
-                    else if (key.toLowerCase().equals(SSL_PROP)) {
-                        enableSSL = value.toLowerCase().equals("true");
+                    else if (key.equalsIgnoreCase(SSL_PROP)) {
+                        enableSSL = value.equalsIgnoreCase("true");
                     }
-                    else if (key.toLowerCase().equals(TRUSTSTORE_CONFIG_PROP)) {
+                    else if (key.equalsIgnoreCase(TRUSTSTORE_CONFIG_PROP)) {
                         if ((value != null) && value.trim().length() > 0) {
                             truststorePath = value.trim();
                         }
                     }
-                    else if (key.toLowerCase().equals(TRUSTSTORE_PASSWORD_PROP)) {
+                    else if (key.equalsIgnoreCase(TRUSTSTORE_PASSWORD_PROP)) {
                         truststorePassword = value;
                     }
-                    else if (key.toLowerCase().equals(KERBEROS_CONFIG_PROP)) {
+                    else if (key.equalsIgnoreCase(KERBEROS_CONFIG_PROP)) {
                         if (value != null && value.trim().length() > 0) {
                             kerberosConfig = value.trim();
+                        }
+                    }
+                    else if (key.equalsIgnoreCase(TOPOLOGY_CHANGE_AWARE_PROP)){
+                        topologyChangeAware = Boolean.valueOf(value);
+                    }
+                    else if (key.equalsIgnoreCase(PRIORITY_PROP)){
+                        priority = Integer.valueOf(value);
+                        if (priority < Priority.HIGHEST_PRIORITY || priority > Priority.LOWEST_PRIORITY) {
+                            throw SQLError.get(SQLError.ILLEGAL_ARGUMENT);
                         }
                     }
                     // else - unknown; ignore
@@ -187,9 +207,11 @@ public class Driver implements java.sql.Driver
                 // Return JDBC connection wrapper for the client
                 return  new JDBC4Connection(JDBC4ClientConnectionPool.get(servers, user, password,
                                                                           heavyweight, maxoutstandingtxns, reconnectOnConnectionLoss, sslConfig,
-                                                                          kerberosConfig),
+                                                                          kerberosConfig, topologyChangeAware, priority),
                                             info);
 
+            } catch (SQLException x) {
+                throw x;
             } catch (Exception x) {
                 throw SQLError.get(x, SQLError.CONNECTION_UNSUCCESSFUL);
             }

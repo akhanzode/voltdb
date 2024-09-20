@@ -1,8 +1,8 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This file contains original code and/or modifications of original code.
- * Any modifications made by VoltDB Inc. are licensed under the following
+ * Any modifications made by Volt Active Data Inc. are licensed under the following
  * terms and conditions:
  *
  * This program is free software: you can redistribute it and/or modify
@@ -70,7 +70,18 @@ std::string TableTuple::debug(const std::string& tableName, bool skipNonInline) 
             StringRef* sr = *reinterpret_cast<StringRef**>(getWritableDataPtr(colInfo));
             buffer << "<non-inlined value @" << static_cast<void*>(sr) << ">";
         } else {
-            buffer << getNValue(ctr).debug();
+            try {
+                buffer << getNValue(ctr).debug();
+            } catch (SQLException const& e) {      // hack: help get away with corrupted data in exception path
+                char b[128];
+                strncpy(b, e.what(), 128);
+                b[sizeof b - 1] = '\0';
+                buffer << "{?? [" << ctr << "] Got SQLException: "
+                    << b << (strlen(e.what()) > sizeof b ? "..." : "")
+                    << " ??}";
+                buffer << " @" << static_cast<void const*>(address());
+                return buffer.str();
+            }
         }
         buffer << ")";
     }
@@ -80,8 +91,8 @@ std::string TableTuple::debug(const std::string& tableName, bool skipNonInline) 
 
         for (int ctr = 0; ctr < m_schema->hiddenColumnCount(); ctr++) {
             buffer << "(";
-            const TupleSchema::HiddenColumnInfo* colInfo = m_schema->getHiddenColumnInfo(ctr);
-            vassert(!isVariableLengthType(colInfo->getVoltType()));
+            vassert(! isVariableLengthType(
+                        m_schema->getHiddenColumnInfo(ctr)->getVoltType()));
             buffer << getHiddenNValue(ctr).debug() << ")";
         }
     }

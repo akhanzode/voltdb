@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -21,7 +21,6 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 
-
 package org.voltdb;
 
 import java.io.File;
@@ -38,19 +37,20 @@ import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 
+import org.apache.commons.io.FileUtils;
 import org.apache.log4j.Level;
 import org.apache.log4j.Logger;
 import org.apache.log4j.net.SocketAppender;
+import org.voltdb.SiteStatsSource.SiteStats;
+import org.voltdb.StatsSource.StatsCommon;
 import org.voltdb.client.Client;
-import org.voltdb.client.ClientImpl;
 import org.voltdb.client.ClientResponse;
 import org.voltdb.compiler.VoltProjectBuilder;
-import org.voltdb.importer.ImporterStatsCollector;
+import org.voltdb.importer.ImporterStatsCollector.Import;
 import org.voltdb.regressionsuites.LocalCluster;
 import org.voltdb.regressionsuites.MultiConfigSuiteBuilder;
 import org.voltdb.regressionsuites.RegressionSuite;
 import org.voltdb.regressionsuites.TestSQLTypesSuite;
-import org.voltdb.utils.VoltFile;
 
 /**
  * Import statistics tests using the socket importer and a test log4j importer.
@@ -73,7 +73,7 @@ public class TestImportStatistics extends RegressionSuite {
     @Override
     public void setUp() throws Exception
     {
-        VoltFile.recursivelyDelete(new File("/tmp/" + System.getProperty("user.name")));
+        FileUtils.deleteDirectory(new File("/tmp/" + System.getProperty("user.name")));
         File f = new File("/tmp/" + System.getProperty("user.name"));
         f.mkdirs();
 
@@ -297,9 +297,9 @@ public class TestImportStatistics extends RegressionSuite {
         boolean foundLog4j = false;
         for (int i=0; i<stats.getRowCount(); i++) {
             VoltTableRow row = stats.fetchRow(i);
-            String name = row.getString(ImporterStatsCollector.IMPORTER_NAME_COL);
+            String name = row.getString(Import.IMPORTER_NAME.name());
             long expectedFailures = 0;
-            String procName = row.getString(ImporterStatsCollector.PROC_NAME_COL);
+            String procName = row.getString(Import.PROCEDURE_NAME.name());
             if (SERVER_SOCKET_IMPORTER_NAME.equals(name)) {
                 expectedFailures = m_expectedSocketFailures.get(procName);
                 numSocketsFound++;
@@ -310,15 +310,15 @@ public class TestImportStatistics extends RegressionSuite {
             } else {
                 continue;
             }
-            assertEquals(procName, row.getString(ImporterStatsCollector.PROC_NAME_COL));
-            assertEquals(expectedFailures, row.getLong(ImporterStatsCollector.FAILURE_COUNT_COL));
-            assertEquals(count-expectedFailures, row.getLong(ImporterStatsCollector.SUCCESS_COUNT_COL));
-            assertEquals(0, row.getLong(ImporterStatsCollector.PENDING_COUNT_COL));
-            assertEquals(0, row.getLong(ImporterStatsCollector.RETRY_COUNT_COL));
-            assertNotNull(row.getLong("TIMESTAMP"));
-            assertNotNull(row.getLong(VoltSystemProcedure.CNAME_HOST_ID));
-            assertNotNull(row.getString("HOSTNAME"));
-            assertNotNull(row.getLong(VoltSystemProcedure.CNAME_SITE_ID));
+            assertEquals(procName, row.getString(Import.PROCEDURE_NAME.name()));
+            assertEquals(expectedFailures, row.getLong(Import.FAILURES.name()));
+            assertEquals(count-expectedFailures, row.getLong(Import.SUCCESSES.name()));
+            assertEquals(0, row.getLong(Import.OUTSTANDING_REQUESTS.name()));
+            assertEquals(0, row.getLong(Import.RETRIES.name()));
+            assertNotNull(row.getLong(StatsCommon.TIMESTAMP.name()));
+            assertNotNull(row.getLong(StatsCommon.HOST_ID.name()));
+            assertNotNull(row.getString(StatsCommon.HOSTNAME.name()));
+            assertNotNull(row.getLong(SiteStats.SITE_ID.name()));
         }
 
         assertTrue(numSocketsFound==2 && foundLog4j);
@@ -331,11 +331,11 @@ public class TestImportStatistics extends RegressionSuite {
         boolean foundLog4j = false;
         for (int i=0; i<stats.getRowCount(); i++) {
             VoltTableRow row = stats.fetchRow(i);
-            String name = row.getString(ImporterStatsCollector.IMPORTER_NAME_COL);
+            String name = row.getString(Import.IMPORTER_NAME.name());
             long expectedFailures = 0;
             long lastFailures = 0;
             long lastSuccesses = 0;
-            String procName = row.getString(ImporterStatsCollector.PROC_NAME_COL);
+            String procName = row.getString(Import.PROCEDURE_NAME.name());
             if (SERVER_SOCKET_IMPORTER_NAME.equals(name)) {
                 expectedFailures = m_expectedSocketFailures.get(procName);
                 lastFailures = m_lastSocketFailures.containsKey(procName) ? m_lastSocketFailures.get(procName) : 0;
@@ -350,21 +350,21 @@ public class TestImportStatistics extends RegressionSuite {
             } else {
                 continue;
             }
-            assertEquals(procName, row.getString(ImporterStatsCollector.PROC_NAME_COL));
-            assertEquals(expectedFailures-lastFailures, row.getLong(ImporterStatsCollector.FAILURE_COUNT_COL));
-            assertEquals(count-expectedFailures-lastSuccesses, row.getLong(ImporterStatsCollector.SUCCESS_COUNT_COL));
+            assertEquals(procName, row.getString(Import.PROCEDURE_NAME.name()));
+            assertEquals(expectedFailures-lastFailures, row.getLong(Import.FAILURES.name()));
+            assertEquals(count-expectedFailures-lastSuccesses, row.getLong(Import.SUCCESSES.name()));
             if (SERVER_SOCKET_IMPORTER_NAME.equals(name)) {
                 m_lastSocketFailures.put(procName, expectedFailures);
                 m_lastSocketSuccesses.put(procName, count-expectedFailures);
             } else if (name.equals("Log4jSocketHandlerImporter")) {
                 m_lastLog4jSuccesses = count;
             }
-            assertEquals(0, row.getLong(ImporterStatsCollector.PENDING_COUNT_COL));
-            assertEquals(0, row.getLong(ImporterStatsCollector.RETRY_COUNT_COL));
-            assertNotNull(row.getLong("TIMESTAMP"));
-            assertNotNull(row.getLong(VoltSystemProcedure.CNAME_HOST_ID));
-            assertNotNull(row.getString("HOSTNAME"));
-            assertNotNull(row.getLong(VoltSystemProcedure.CNAME_SITE_ID));
+            assertEquals(0, row.getLong(Import.OUTSTANDING_REQUESTS.name()));
+            assertEquals(0, row.getLong(Import.RETRIES.name()));
+            assertNotNull(row.getLong(StatsCommon.TIMESTAMP.name()));
+            assertNotNull(row.getLong(StatsCommon.HOST_ID.name()));
+            assertNotNull(row.getString(StatsCommon.HOSTNAME.name()));
+            assertNotNull(row.getLong(SiteStats.SITE_ID.name()));
         }
 
         assertTrue(numSocketsFound==2 && foundLog4j);
@@ -374,9 +374,8 @@ public class TestImportStatistics extends RegressionSuite {
         m_expectedSocketFailures.clear();
 
         Client client = getClient();
-        while (!((ClientImpl) client).isHashinatorInitialized()) {
-            Thread.sleep(1000);
-            System.out.println("Waiting for hashinator to be initialized...");
+        if (!client.waitForTopology(60_000)) {
+            throw new RuntimeException("Timed out waiting for topology info");
         }
 
         pushDataToImporters(100, 1);
@@ -401,9 +400,8 @@ public class TestImportStatistics extends RegressionSuite {
         m_expectedSocketFailures.clear();
 
         Client client = getClient();
-        while (!((ClientImpl) client).isHashinatorInitialized()) {
-            Thread.sleep(1000);
-            System.out.println("Waiting for hashinator to be initialized...");
+        if (!client.waitForTopology(60_000)) {
+            throw new RuntimeException("Timed out waiting for topology info");
         }
 
         pushDataToImporters(100, 2);
@@ -427,9 +425,8 @@ public class TestImportStatistics extends RegressionSuite {
     // leave this disabled because this is not perfectly reliable and is slow. Enable and run manually as needed.
     public void donttestPending() throws Exception {
         Client client = getClient();
-        while (!((ClientImpl) client).isHashinatorInitialized()) {
-            Thread.sleep(1000);
-            System.out.println("Waiting for hashinator to be initialized...");
+        if (!client.waitForTopology(60_000)) {
+            throw new RuntimeException("Timed out waiting for topology info");
         }
 
         pushDataToImporters(100, 1, true);
@@ -441,19 +438,19 @@ public class TestImportStatistics extends RegressionSuite {
         boolean found = false;
         for (int i=0; i<stats.getRowCount(); i++) {
             VoltTableRow row = stats.fetchRow(i);
-            String name = row.getString(ImporterStatsCollector.IMPORTER_NAME_COL);
-            String procName = row.getString(ImporterStatsCollector.PROC_NAME_COL);
+            String name = row.getString(Import.IMPORTER_NAME.name());
+            String procName = row.getString(Import.PROCEDURE_NAME.name());
             if (!SERVER_SOCKET_IMPORTER_NAME.equals(name)) {
                 continue;
             }
-            assertEquals(procName, row.getString(ImporterStatsCollector.PROC_NAME_COL));
-            assertEquals(0, row.getLong(ImporterStatsCollector.FAILURE_COUNT_COL));
-            long pending = row.getLong(ImporterStatsCollector.PENDING_COUNT_COL);
+            assertEquals(procName, row.getString(Import.PROCEDURE_NAME.name()));
+            assertEquals(0, row.getLong(Import.FAILURES.name()));
+            long pending = row.getLong(Import.OUTSTANDING_REQUESTS.name());
             if (pending > 0) {
                 found = true;
             }
-            assertEquals(100-pending, row.getLong(ImporterStatsCollector.SUCCESS_COUNT_COL));
-            assertEquals(0, row.getLong(ImporterStatsCollector.RETRY_COUNT_COL));
+            assertEquals(100-pending, row.getLong(Import.SUCCESSES.name()));
+            assertEquals(0, row.getLong(Import.RETRIES.name()));
             lastPending = pending;
         }
 
@@ -467,17 +464,17 @@ public class TestImportStatistics extends RegressionSuite {
             found = false;
             for (int i=0; i<stats.getRowCount(); i++) {
                 VoltTableRow row = stats.fetchRow(i);
-                String name = row.getString(ImporterStatsCollector.IMPORTER_NAME_COL);
+                String name = row.getString(Import.IMPORTER_NAME.name());
                 if (!SERVER_SOCKET_IMPORTER_NAME.equals(name)) {
                     continue;
                 }
-                assertEquals(0, row.getLong(ImporterStatsCollector.FAILURE_COUNT_COL));
-                long pending = row.getLong(ImporterStatsCollector.PENDING_COUNT_COL);
+                assertEquals(0, row.getLong(Import.FAILURES.name()));
+                long pending = row.getLong(Import.OUTSTANDING_REQUESTS.name());
                 if (pending < lastPending) {
                     lastPending = pending;
                     found = true;
-                    assertEquals(100-pending, row.getLong(ImporterStatsCollector.SUCCESS_COUNT_COL));
-                    assertEquals(0, row.getLong(ImporterStatsCollector.RETRY_COUNT_COL));
+                    assertEquals(100-pending, row.getLong(Import.SUCCESSES.name()));
+                    assertEquals(0, row.getLong(Import.RETRIES.name()));
                     break;
                 }
                 try {

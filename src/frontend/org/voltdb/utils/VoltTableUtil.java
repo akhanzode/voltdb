@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -82,9 +82,9 @@ public class VoltTableUtil {
 
     public static void toCSVWriter(CSVWriter csv, VoltTable vt, List<VoltType> columnTypes) throws IOException {
         final SimpleDateFormat sdf = m_sdf.get();
-        String[] fields = new String[vt.getColumnCount()];
+        String[] fields = new String[columnTypes.size()];
         while (vt.advanceRow()) {
-            for (int ii = 0; ii < vt.getColumnCount(); ii++) {
+            for (int ii = 0; ii < fields.length; ii++) {
                 final VoltType type = columnTypes.get(ii);
                 if (type == VoltType.BIGINT
                         || type == VoltType.INTEGER

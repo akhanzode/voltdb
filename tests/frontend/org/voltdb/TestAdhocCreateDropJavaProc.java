@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -128,8 +128,9 @@ public class TestAdhocCreateDropJavaProc extends AdhocDDLTestBase {
             }
             catch (ProcCallException pce) {
                 assertTrue(pce.getMessage(),
-                        pce.getMessage().contains("Classes not found in @UpdateClasses jar: "
-                                + "org.voltdb_testprocs.updateclasses.testImportProc"));
+                        pce.getMessage().contains("Invalid modification of classes: Class "
+                                + "org.voltdb_testprocs.updateclasses.testImportProc"
+                                + " cannot be removed, it is being used by procedure"));
             }
 
             // Make sure we didn't purge anything (even the extra dependency)

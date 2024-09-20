@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2019 VoltDB Inc.
+ * Copyright (C) 2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -129,7 +129,7 @@ void GroupStore::fetchOffsets(int16_t requestVersion, const NValue& groupId, Ser
     CheckedSerializeInput checkedIn(topicPartitions);
 
     int topicCount = checkedIn.readInt();
-    if (topicCount == 0) {
+    if (topicCount <= 0) {
         OffsetFetchResponseTopic* responseTopic = nullptr;
 
         GroupOffset::visitAll(*this, groupId, [&response, &responseTopic] (const GroupOffset& offset) {

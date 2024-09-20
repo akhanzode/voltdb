@@ -67,7 +67,8 @@ VOLTDB_ADD_COMPILE_OPTIONS(
   -fvisibility=default
   -DBOOST_SP_DISABLE_THREADS -DBOOST_DISABLE_THREADS -DBOOST_ALL_NO_LIB
   -Wno-deprecated-declarations  -Wno-unknown-pragmas
-  -Wno-ignored-qualifiers -fno-strict-aliasing
+  -Wno-ignored-qualifiers
+  -fno-strict-aliasing
   -DVOLT_LOG_LEVEL=${VOLT_LOG_LEVEL}
   -D_USE_MATH_DEFINES
 )
@@ -116,7 +117,7 @@ SET (VOLTDB_COMPILER_U14p04 "4.8.4")
 #
 #
 #
-MESSAGE("Using compiler ${CMAKE_CXX_COMPILER_ID}")
+MESSAGE("Using compiler ${CMAKE_CXX_COMPILER_ID} version ${CMAKE_CXX_COMPILER_VERSION}")
 IF (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   SET (VOLTDB_LINK_FLAGS ${VOLTDB_LINK_FLAGS} -pthread)
   SET (VOLTDB_IPC_LINK_FLAGS ${VOLTDB_LIB_LINK_FLAGS} -rdynamic)
@@ -150,8 +151,8 @@ IF (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     ENDIF()
   ENDIF()
 ELSEIF (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
-  # All versions of clang use C++11.
-  SET (CXX_VERSION_FLAG -std=c++11)
+  # All versions of clang use C++14.
+  SET (CXX_VERSION_FLAG -std=c++14)
   MESSAGE("CXX_VERSION_FLAG is ${CXX_VERSION_FLAG}")
   IF ( ( "3.4.0" VERSION_LESS CMAKE_CXX_COMPILER_VERSION )
        AND ( CMAKE_CXX_COMPILER_VERSION VERSION_LESS "4.0.0" ) )
@@ -164,6 +165,10 @@ ELSEIF (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL
   ENDIF()
   IF ( "9.0.0" VERSION_LESS ${CMAKE_CXX_COMPILER_VERSION} )
     VOLTDB_ADD_COMPILE_OPTIONS(-Wno-user-defined-warnings)
+  ENDIF()
+  IF ("13.1.5" VERSION_LESS ${CMAKE_CXX_COMPILER_VERSION} )
+    # Later updates require this flag
+    VOLTDB_ADD_COMPILE_OPTIONS(-Wno-deprecated-copy -Wno-unused-but-set-variable)
   ENDIF()
 ELSE()
   MESSAGE (FATAL_ERROR "Unknown compiler family ${CMAKE_CXX_COMPILER_ID}.  We only support GNU and Clang.")

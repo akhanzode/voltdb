@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -30,7 +30,6 @@ import org.voltdb.ClientResponseImpl;
 import org.voltdb.VoltTable;
 import org.voltdb.VoltType;
 import org.voltdb.client.Client;
-import org.voltdb.client.ClientImpl;
 import org.voltdb.client.ClientResponse;
 import org.voltdb.client.NoConnectionsException;
 import org.voltdb.client.ProcCallException;
@@ -128,18 +127,18 @@ public class CSVTupleDataLoader implements CSVDataLoader {
         }
     }
 
-    public CSVTupleDataLoader(ClientImpl client, String procName, BulkLoaderErrorHandler errHandler)
+    public CSVTupleDataLoader(Client client, String procName, BulkLoaderErrorHandler errHandler)
             throws IOException, ProcCallException
     {
-        this(client, procName, errHandler, null);
+        this(client, procName, errHandler, null, null);
     }
 
-    public CSVTupleDataLoader(ClientImpl client, String procName, BulkLoaderErrorHandler errHandler, ExecutorService callbackExecutor)
+    public CSVTupleDataLoader(Client client, String procName, BulkLoaderErrorHandler errHandler, ExecutorService callbackExecutor)
             throws IOException, ProcCallException {
         this(client, procName, errHandler, callbackExecutor, null);
     }
 
-    public CSVTupleDataLoader(ClientImpl client, String procName, BulkLoaderErrorHandler errHandler, ExecutorService callbackExecutor, BulkLoaderSuccessCallback successCallback)
+    public CSVTupleDataLoader(Client client, String procName, BulkLoaderErrorHandler errHandler, ExecutorService callbackExecutor, BulkLoaderSuccessCallback successCallback)
             throws IOException, ProcCallException
     {
         m_client = client;
@@ -169,12 +168,8 @@ public class CSVTupleDataLoader implements CSVDataLoader {
         }
         m_columnTypes = typeList.toArray(new VoltType[0]);
 
-        int sleptTimes = 0;
-        while (!client.isHashinatorInitialized() && sleptTimes < 120) {
-            try {
-                Thread.sleep(500);
-                sleptTimes++;
-            } catch (InterruptedException ex) {}
+        if (!m_client.waitForTopology(60_000)) {
+            throw new RuntimeException("Unable to start due to uninitialized Client.");
         }
     }
 

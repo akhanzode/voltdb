@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -44,14 +44,12 @@ public class TestCommandLine
         cl.setInitialHeap(2048);
         System.out.println(cl);
         assertTrue(cl.toString().contains("-DLOG_SEGMENT_SIZE"));
-        assertTrue(cl.toString().contains("-DVoltFilePrefix"));
         assertTrue(cl.toString().contains("MaxDirectMemorySize"));
         assertTrue(cl.toString().contains("timestampsalt"));
         assertFalse(cl.toString().contains("HeapDumpPath=/tmp"));
         assertFalse(cl.toString().contains("-Xms"));
         cl.addTestOptions(false);
         assertFalse(cl.toString().contains("-DLOG_SEGMENT_SIZE"));
-        assertFalse(cl.toString().contains("-DVoltFilePrefix"));
         assertFalse(cl.toString().contains("MaxDirectMemorySize"));
         assertFalse(cl.toString().contains("timestampsalt"));
         assertTrue(cl.toString().contains("HeapDumpPath=/tmp"));
@@ -72,7 +70,7 @@ public class TestCommandLine
         cl.javaLibraryPath("sweet");
         cl.rmiHostName("springsteen");
         cl.log4j("whats");
-        cl.voltFilePrefix("mine");
+        cl.voltSnapshotFilePrefix("mine");
         cl.setInitialHeap(470);
         cl.setMaxHeap(740);
         cl.classPath("say");
@@ -81,39 +79,6 @@ public class TestCommandLine
         cl.jmxHost("notreal");
         CommandLine cl2 = cl.makeCopy();
         assertEquals(cl.toString(), cl2.toString());
-    }
-
-    @Test
-    public void testStartCommand()
-    {
-        CommandLine cl = new CommandLine(StartAction.CREATE);
-        assertTrue(cl.toString().contains("create"));
-        cl.startCommand("RECOVER");
-        assertTrue(cl.toString().contains("recover"));
-        cl.startCommand("LIVE    REJOIN");
-        assertTrue(cl.toString().contains("live rejoin"));
-        cl.startCommand("RECOVER    SAFEMODE");
-        assertTrue(cl.toString().contains("recover safemode"));
-        try
-        {
-            cl.startCommand("NONSENSE");
-        }
-        catch (RuntimeException rte)
-        {
-            assertTrue(rte.getMessage().contains("Unknown action"));
-        }
-        try
-        {
-            cl.startCommand("start");
-        }
-        catch (RuntimeException rte)
-        {
-            assertTrue(rte.getMessage().contains("Unknown action"));
-        }
-        cl = new CommandLine(StartAction.LIVE_REJOIN);
-        assertTrue(cl.toString().contains("live rejoin"));
-        cl = new CommandLine(StartAction.SAFE_RECOVER);
-        assertTrue(cl.toString().contains("recover safemode"));
     }
 
     @Test

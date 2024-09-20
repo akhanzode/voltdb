@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -185,6 +185,10 @@ public class Iv2InitiateTaskMessage extends TransactionInfoBaseMessage {
         return m_shouldReturnResultTables;
     }
 
+    public void setShouldReturnResultTables(boolean shouldReturnResultTables) {
+        m_shouldReturnResultTables = shouldReturnResultTables;
+    }
+
     public StoredProcedureInvocation getStoredProcedureInvocation() {
         return m_invocation;
     }
@@ -226,7 +230,7 @@ public class Iv2InitiateTaskMessage extends TransactionInfoBaseMessage {
         return m_connectionId;
     }
 
-    public int[] getNParitionIds() {
+    public int[] getNPartitionIds() {
         return m_nPartitions;
     }
 

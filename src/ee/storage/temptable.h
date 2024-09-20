@@ -1,8 +1,8 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This file contains original code and/or modifications of original code.
- * Any modifications made by VoltDB Inc. are licensed under the following
+ * Any modifications made by Volt Active Data Inc. are licensed under the following
  * terms and conditions:
  *
  * This program is free software: you can redistribute it and/or modify
@@ -257,6 +257,10 @@ inline void TempTable::nextFreeTuple(TableTuple *tuple) {
     }
 
     std::pair<char*, int> pair = block->nextFreeTuple();
+    if (pair.first == NULL) {
+        block = allocateNextBlock();
+        pair = block->nextFreeTuple();
+    }
     tuple->moveAndInitialize(pair.first);
     ++m_tupleCount;
     return;

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -38,17 +38,22 @@ import com.google_voltpatches.common.collect.ImmutableMap;
 public class ImporterStatsCollector extends SiteStatsSource
     implements InternalConnectionStatsCollector {
 
-    public static final String IMPORTER_NAME_COL = "IMPORTER_NAME";
-    public static final String PROC_NAME_COL = "PROCEDURE_NAME";
-    public static final String SUCCESS_COUNT_COL = "SUCCESSES";
-    public static final String FAILURE_COUNT_COL = "FAILURES";
-    public static final String PENDING_COUNT_COL = "OUTSTANDING_REQUESTS";
-    public static final String RETRY_COUNT_COL = "RETRIES";
-
     // Holds stats info for each known importer-procname combination.
     // Using AtomicReferences with ImmutableMap to avoid locking and faster access
     private AtomicReference<ImmutableMap<String, AtomicReference<ImmutableMap<String, StatsInfo>>>> m_importerStats = new AtomicReference<>();
     private boolean m_isInterval;
+
+    public enum Import {
+        IMPORTER_NAME               (VoltType.STRING),
+        PROCEDURE_NAME              (VoltType.STRING),
+        SUCCESSES                   (VoltType.BIGINT),
+        FAILURES                    (VoltType.BIGINT),
+        OUTSTANDING_REQUESTS        (VoltType.BIGINT),
+        RETRIES                     (VoltType.BIGINT);
+
+        public final VoltType m_type;
+        Import(VoltType type) { m_type = type; }
+    }
 
     public ImporterStatsCollector(long siteId)
     {
@@ -150,16 +155,16 @@ public class ImporterStatsCollector extends SiteStatsSource
     }
 
     @Override
-    protected void updateStatsRow(Object rowKey, Object rowValues[]) {
+    protected int updateStatsRow(Object rowKey, Object rowValues[]) {
+        int offset = super.updateStatsRow(rowKey, rowValues);
         StatsInfo stats = (StatsInfo) rowKey;
-        rowValues[columnNameToIndex.get(IMPORTER_NAME_COL)] = stats.m_importerName;
-        rowValues[columnNameToIndex.get(PROC_NAME_COL)] = stats.m_procName;
-        rowValues[columnNameToIndex.get(SUCCESS_COUNT_COL)] = getSuccessCountUpdateLast(stats);
-        rowValues[columnNameToIndex.get(FAILURE_COUNT_COL)] = getFailureCountUpdateLast(stats);
-        rowValues[columnNameToIndex.get(PENDING_COUNT_COL)] = getPendingCountUpdateLast(stats);
-        rowValues[columnNameToIndex.get(RETRY_COUNT_COL)] = getRetryCountUpdateLast(stats);
-
-        super.updateStatsRow(rowKey, rowValues);
+        rowValues[offset + Import.IMPORTER_NAME.ordinal()] = stats.m_importerName;
+        rowValues[offset + Import.PROCEDURE_NAME.ordinal()] = stats.m_procName;
+        rowValues[offset + Import.SUCCESSES.ordinal()] = getSuccessCountUpdateLast(stats);
+        rowValues[offset + Import.FAILURES.ordinal()] = getFailureCountUpdateLast(stats);
+        rowValues[offset + Import.OUTSTANDING_REQUESTS.ordinal()] = getPendingCountUpdateLast(stats);
+        rowValues[offset + Import.RETRIES.ordinal()] = getRetryCountUpdateLast(stats);
+        return offset + Import.values().length;
     }
 
     private long getSuccessCountUpdateLast(StatsInfo stats) {
@@ -208,6 +213,18 @@ public class ImporterStatsCollector extends SiteStatsSource
         return value;
     }
 
+    // Used by graceful shutdown
+    public long getTotalPendingCount() {
+        long total = 0;
+        StatsInfoIterator sii = new StatsInfoIterator();
+        while (sii.hasNext()) {
+            long ct = ((StatsInfo)sii.next()).m_pendingCount.get();
+            if (ct > 0) { // negative possible: ignore
+                total += ct;
+            }
+        }
+        return total;
+    }
 
     @Override
     protected Iterator<Object> getStatsRowKeyIterator(boolean interval) {
@@ -217,13 +234,7 @@ public class ImporterStatsCollector extends SiteStatsSource
 
     @Override
     protected void populateColumnSchema(ArrayList<ColumnInfo> columns) {
-        super.populateColumnSchema(columns);
-        columns.add(new ColumnInfo(IMPORTER_NAME_COL, VoltType.STRING));
-        columns.add(new ColumnInfo(PROC_NAME_COL, VoltType.STRING));
-        columns.add(new ColumnInfo(SUCCESS_COUNT_COL, VoltType.BIGINT));
-        columns.add(new ColumnInfo(FAILURE_COUNT_COL, VoltType.BIGINT));
-        columns.add(new ColumnInfo(PENDING_COUNT_COL, VoltType.BIGINT));
-        columns.add(new ColumnInfo(RETRY_COUNT_COL, VoltType.BIGINT));
+        super.populateColumnSchema(columns, Import.class);
     }
 
     private class StatsInfo

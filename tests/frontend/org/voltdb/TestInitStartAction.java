@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -38,6 +38,7 @@ import java.io.InputStreamReader;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Files;
+import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.Map.Entry;
 import java.util.concurrent.atomic.AtomicReference;
@@ -56,7 +57,6 @@ import org.voltdb.compiler.VoltCompiler;
 import org.voltdb.compiler.VoltProjectBuilder;
 import org.voltdb.utils.CatalogUtil;
 import org.voltdb.utils.InMemoryJarfile;
-import org.voltdb.utils.VoltFile;
 import org.voltdb_testprocs.fakeusecase.greetings.GetGreetingBase;
 
 import com.google_voltpatches.common.base.Joiner;
@@ -155,7 +155,7 @@ final public class TestInitStartAction {
     @Test
     public void testInitStartAction() throws Exception {
 
-        File deplFH = new VoltFile(new VoltFile(new VoltFile(rootDH, "voltdbroot"), "config"), "deployment.xml");
+        File deplFH = new File(new File(new File(rootDH, "voltdbroot"), "config"), "deployment.xml");
         Configuration c1 = new Configuration(
                 new String[]{"initialize", "voltdbroot", rootDH.getPath(), "force", "deployment", legacyDeploymentFH.getPath()});
         ServerThread server = new ServerThread(c1);
@@ -213,40 +213,55 @@ final public class TestInitStartAction {
         VoltDB.wasCrashCalled = false;
         VoltDB.crashMessage = null;
         serverException.set(null);
+    }
 
-        c1 = new Configuration(new String[]{"create", "deployment", legacyDeploymentFH.getPath(), "host", "localhost"});
-        server = new ServerThread(c1);
-        server.setUncaughtExceptionHandler(handleUncaught);
+    @Test
+    public void testObsoleteStartActions() throws Exception {
 
-        server.start();
-        server.join();
+        // This tests which actions should be considered legal on command line
+        // though it's got a whiff of testing that the code we wrote is the code we wrote
+        EnumSet<StartAction> currentOnes = EnumSet.of(StartAction.INITIALIZE, StartAction.PROBE, StartAction.GET);
+        System.out.println("Current command options: " + currentOnes);
+        EnumSet<StartAction> obsoleteOnes = EnumSet.of(StartAction.CREATE, StartAction.RECOVER, StartAction.SAFE_RECOVER,
+                                                       StartAction.REJOIN, StartAction.LIVE_REJOIN, StartAction.JOIN);
+        System.out.println("Obsolete command options: " + obsoleteOnes);
 
-        assertNotNull(serverException.get());
-        assertTrue(serverException.get() instanceof AssertionError);
-        assertTrue(VoltDB.wasCrashCalled);
-        assertTrue(VoltDB.crashMessage.contains("Cannot use legacy start action"));
+        // Check for completeness
+        assertEquals(currentOnes, EnumSet.complementOf(obsoleteOnes));
+        assertEquals(obsoleteOnes, EnumSet.complementOf(currentOnes));
 
-        if (!c1.m_isEnterprise) {
-            return;
+        // Check our definitions match StartAction filter
+        assertTrue(currentOnes.stream().allMatch(StartAction::isAllowedCommandOption));
+        assertTrue(obsoleteOnes.stream().noneMatch(StartAction::isAllowedCommandOption));
+
+        // Obsolete command-line strings equivalent to obsolete start actions
+        // NOTE: obsolete command "create" is still permitted for now.
+        String[] obsCmdList = new String[] { /*"create",*/ "recover", "recover safemode",
+                                             "rejoin", "live rejoin", "add" };
+
+        // Make sure obsolete options are rejected on command line
+        System.out.println("Testing options:");
+        String[] stdOpts = new String[] { "deployment", legacyDeploymentFH.getPath(), "host", "localhost" };
+        for (String cmd : obsCmdList) {
+            String[] tmp = cmd.split("\\s+");
+            String[] args = Arrays.copyOf(stdOpts, stdOpts.length + tmp.length);
+            for (int j=0; j<tmp.length; j++) args[stdOpts.length+j] = tmp[j];
+
+            boolean accepted = false;  int status = 0;
+            try {
+                Configuration cf = new Configuration(args);
+                accepted = true;
+            } catch (VoltDB.SimulatedExitException e) {
+                status = e.getStatus();
+                accepted = false;
+            }
+
+            System.out.printf("*** '%s'  accepted=%b  status=%d%n",
+                              cmd, accepted, status);
+            assertEquals("failed to reject '" + cmd + "'  ", false, accepted);
+            assertEquals("rejected, but bad status " + status, -1, status);
         }
-
-        clearCrash();
-
-        c1 = new Configuration(new String[]{"recover", "deployment", legacyDeploymentFH.getPath(), "host", "localhost"});
-        server = new ServerThread(c1);
-        server.setUncaughtExceptionHandler(handleUncaught);
-
-        server.start();
-        server.join();
-
-        assertNotNull(serverException.get());
-        assertTrue(serverException.get() instanceof AssertionError);
-        assertTrue(VoltDB.wasCrashCalled);
-        assertTrue(VoltDB.crashMessage.contains("Cannot use legacy start action"));
-
-        // this test which action should be considered legacy
-        EnumSet<StartAction> legacyOnes = EnumSet.complementOf(EnumSet.of(StartAction.INITIALIZE,StartAction.PROBE, StartAction.GET));
-        assertTrue(legacyOnes.stream().allMatch(StartAction::isLegacy));
+        System.out.println("Done");
     }
 
     /*
@@ -288,7 +303,7 @@ final public class TestInitStartAction {
         referenceCatalog.execute(CatalogUtil.getSerializedCatalogStringFromJar(referenceCatalogJar));
 
         // verify that the staged catalog is identical
-        File stagedJarFile = new VoltFile(RealVoltDB.getStagedCatalogPath(rootDH.getPath() + File.separator + "voltdbroot"));
+        File stagedJarFile = new File(RealVoltDB.getStagedCatalogPath(rootDH.getPath() + File.separator + "voltdbroot"));
         assertTrue(stagedJarFile.isFile());
         InMemoryJarfile stagedCatalogJar = new InMemoryJarfile(stagedJarFile);
         Catalog stagedCatalog = new Catalog();

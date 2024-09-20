@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -21,7 +21,6 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 
-import org.voltcore.logging.Level;
 import org.voltcore.messaging.Mailbox;
 import org.voltcore.utils.CoreUtils;
 import org.voltdb.DependencyPair;
@@ -43,7 +42,6 @@ import org.voltdb.messaging.FragmentTaskMessage;
 import org.voltdb.planner.ActivePlanRepository;
 import org.voltdb.rejoin.TaskLog;
 import org.voltdb.utils.Encoder;
-import org.voltdb.utils.LogKeys;
 import org.voltdb.utils.MiscUtils;
 import org.voltdb.utils.VoltTableUtil;
 import org.voltdb.utils.VoltTrace;
@@ -377,15 +375,13 @@ public class FragmentTask extends FragmentTaskBase
                     }
 
                     if (hostLog.isTraceEnabled()) {
-                        hostLog.l7dlog(Level.TRACE,
-                           LogKeys.org_voltdb_ExecutionSite_SendingDependency.name(),
-                           new Object[] { outputDepId }, null);
+                        hostLog.traceFmt("Sending dependency %s", outputDepId);
                     }
                     currentFragResponse.addDependency(new DependencyPair.BufferDependencyPair(outputDepId, fullBacking, 0, tableSize));
                 }
             } catch (final EEException | SQLException | ReplicatedTableException | InterruptException e) {
                 if (!exceptionThrown) {
-                    hostLog.l7dlog( Level.TRACE, LogKeys.host_ExecutionSite_ExceptionExecutingPF.name(), new Object[] { Encoder.hexEncode(planHash) }, e);
+                    hostLog.traceFmt(e, "Unexpected exception while executing plan fragment %s", Encoder.hexEncode(planHash));
                     currentFragResponse.setStatus(FragmentResponseMessage.UNEXPECTED_ERROR, e);
                     if (currentFragResponse.getTableCount() == 0) {
                         // Make sure the response has at least 1 result with a valid DependencyId
@@ -442,6 +438,9 @@ public class FragmentTask extends FragmentTaskBase
         sb.append("  TXN ID: ").append(TxnEgo.txnIdToString(getTxnId()));
         sb.append("  SP HANDLE ID: ").append(TxnEgo.txnIdToString(getSpHandle()));
         sb.append("  ON HSID: ").append(CoreUtils.hsIdToString(m_initiator.getHSId()));
+        if (m_txnState != null) {
+            sb.append("  UNIQUI_ID: ").append(m_txnState.uniqueId);
+        }
         sb.append("  TIMESTAMP: ");
         MpRestartSequenceGenerator.restartSeqIdToString(getTimestamp(), sb);
         return sb.toString();

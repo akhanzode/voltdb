@@ -76,8 +76,9 @@
         <include name='commons-logging-1.1.3.jar' />
         <include name='slf4j-api-1.6.2.jar' />
         <include name='jaxb-api-2.3.0.jar' />
-        <include name='netty-all-4.1.43.Final.jar' />
-        <include name='netty-tcnative-boringssl-static-2.0.27.Final.jar' />
+        <include name='netty-all-4.1.53.Final.jar' />
+        <include name='netty-tcnative-boringssl-static-2.0.34.Final.jar' />
+        <include name='kafka-clients-3.1.0.jar' />
     </fileset>
     <pathelement path="${java.class.path}"/>
 </path>
@@ -106,6 +107,7 @@
                   org/voltcore/logging/VoltLogger.java
                   org/voltcore/logging/VoltNullLogger.java
                   org/voltcore/logging/VoltUtilLoggingLogger.java
+                  org/voltcore/logging/LogRateLimiter.java
                   org/voltcore/network/*.java
 
                   org/voltcore/utils/CoreUtils.java
@@ -179,7 +181,7 @@
 PRIMARY ENTRY POINTS
 ***************************************
 -->
-    
+
 <target name="default"
     depends="compile, voltdbclient.jar"
     description="Compile Java client classes builds the client/jdbc Jarfile."
@@ -222,11 +224,20 @@ DISTRIBUTION
             <include name="src/frontend/org/voltdb/client/ClientStatusListenerExt.java" />
             <include name="src/frontend/org/voltdb/client/ClientResponse.java" />
             <include name="src/frontend/org/voltdb/client/ClientStats.java" />
+            <include name="src/frontend/org/voltdb/client/ClientStatsUtil.java" />
             <include name="src/frontend/org/voltdb/client/ClientAffinityStats.java" />
             <include name="src/frontend/org/voltdb/client/ClientStatsContext.java" />
+            <include name="src/frontend/org/voltdb/client/Client2.java" />
+            <include name="src/frontend/org/voltdb/client/Client2Config.java" />
+            <include name="src/frontend/org/voltdb/client/Client2CallOptions.java" />
+            <include name="src/frontend/org/voltdb/client/Client2Notification.java" />
+            <include name="src/frontend/org/voltdb/client/GeneralException.java" />
+            <include name="src/frontend/org/voltdb/client/RequestLimitException.java" />
+            <include name="src/frontend/org/voltdb/client/UpdateClasses.java" />
             <include name="src/frontend/org/voltdb/types/TimestampType.java" />
             <include name="src/frontend/org/voltdb/types/GeographyPointValue.java" />
             <include name="src/frontend/org/voltdb/types/GeographyValue.java" />
+            <include name="src/frontend/org/voltdb/client/topics/VoltDBKafkaPartitioner.java" />
         </fileset>
     </javadoc>
 </target>
@@ -276,8 +287,8 @@ JAR BUILDING
   <loadfile property='dist.version' srcFile='version.txt'>
       <filterchain><striplinebreaks/></filterchain>
   </loadfile>
-  <exec dir="." executable="tools/getgitinfo.py">
-      <arg line='${dist.version}' />
+  <exec dir="." executable="python3">
+      <arg line='tools/getgitinfo.py ${dist.version}' />
   </exec>
 </target>
 
@@ -335,6 +346,7 @@ JAVA COMPILATION
 
     <invoke-javac-client srcdir="${build.clientsrc.dir}"/>
 </target>
+
 
 <!-- END PROJECT -->
 </project>

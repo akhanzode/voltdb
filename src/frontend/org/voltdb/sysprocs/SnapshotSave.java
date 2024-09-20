@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -26,6 +26,7 @@ import java.util.concurrent.Callable;
 
 import org.apache.zookeeper_voltpatches.CreateMode;
 import org.apache.zookeeper_voltpatches.KeeperException;
+import org.apache.zookeeper_voltpatches.ZooKeeper;
 import org.json_voltpatches.JSONArray;
 import org.json_voltpatches.JSONObject;
 import org.json_voltpatches.JSONStringer;
@@ -46,6 +47,8 @@ import org.voltdb.VoltTable;
 import org.voltdb.VoltTable.ColumnInfo;
 import org.voltdb.VoltType;
 import org.voltdb.VoltZK;
+import org.voltdb.client.ClientResponse;
+import org.voltdb.exceptions.SpecifiedException;
 import org.voltdb.iv2.MpInitiator;
 import org.voltdb.iv2.TxnEgo;
 import org.voltdb.sysprocs.saverestore.HashinatorSnapshotData;
@@ -79,6 +82,11 @@ public class SnapshotSave extends VoltSystemProcedure
         String hostname = CoreUtils.getHostnameOrAddress();
         if (fragmentId == SysProcFragmentId.PF_createSnapshotTargets)
         {
+            final int numLocalSites = context.getLocalActiveSitesCount();
+            if (numLocalSites == 0) {
+                throw new SpecifiedException(ClientResponse.GRACEFUL_FAILURE,
+                        String.format("All sites on host %d have been de-commissioned.", context.getHostId()));
+            }
             // Those plan fragments are created in performSnapshotCreationWork()
             VoltTable result = SnapshotUtil.constructNodeResultsTable();
 
@@ -181,6 +189,10 @@ public class SnapshotSave extends VoltSystemProcedure
         String formatStr = jsObj.optString(SnapshotUtil.JSON_FORMAT, SnapshotFormat.NATIVE.toString());
         final SnapshotFormat format = SnapshotFormat.getEnumIgnoreCase(formatStr);
         final String data = jsObj.optString(SnapshotUtil.JSON_DATA);
+        boolean terminus = false;
+        if (jsObj.has(SnapshotUtil.JSON_TERMINUS)) {
+            terminus = jsObj.getLong(SnapshotUtil.JSON_TERMINUS) != 0;
+        }
 
         String truncReqId = "";
         if (data != null && !data.isEmpty()) {
@@ -253,27 +265,31 @@ public class SnapshotSave extends VoltSystemProcedure
             return errorResults;
         }
 
-        // ensure the snapshot barrier is not blocked by replica decommissioning
-        String errorMessage = VoltZK.createActionBlocker(VoltDB.instance().getHostMessenger().getZK(), VoltZK.snapshotSetupInProgress,
-                CreateMode.EPHEMERAL, SNAP_LOG, "Set up snapshot");
-        if (errorMessage != null) {
-            VoltTable results[] = new VoltTable[] { new VoltTable(error_result_columns) };
-            results[0].addRow("FAILURE", errorMessage);
-            return results;
+        final ZooKeeper zk = VoltDB.instance().getHostMessenger().getZK();
+        VoltTable[] results;
+        final ZKUtil.StringCallback createCallback;
+        try {
+            // ensure the snapshot barrier is not blocked by replica decommissioning
+            String errorMessage = VoltZK.createActionBlocker(zk, VoltZK.snapshotSetupInProgress, CreateMode.EPHEMERAL,
+                    SNAP_LOG, "Set up snapshot");
+            if (errorMessage != null) {
+                results = new VoltTable[] { new VoltTable(error_result_columns) };
+                results[0].addRow("FAILURE", errorMessage);
+                return results;
+            }
+
+            boolean isTruncation = (stype == SnapshotPathType.SNAP_CL && !truncReqId.isEmpty());
+            // Asynchronously create the completion node
+            createCallback = SnapshotSaveAPI.createSnapshotCompletionNode(path, stype.toString(), nonce, txnId,
+                    isTruncation, terminus, truncReqId);
+
+            // For snapshot targets creation, see executePlanFragment() in this file.
+            results = performSnapshotCreationWork(path, stype.toString(), nonce, perPartitionTxnIds,
+                    (byte) (block ? 1 : 0), format, data, serializationData);
+        } finally {
+            VoltZK.removeActionBlocker(zk, VoltZK.snapshotSetupInProgress, SNAP_LOG);
         }
 
-        boolean isTruncation = (stype == SnapshotPathType.SNAP_CL && !truncReqId.isEmpty());
-        // Asynchronously create the completion node
-        final ZKUtil.StringCallback createCallback =
-                SnapshotSaveAPI.createSnapshotCompletionNode(path, stype.toString(), nonce, txnId,
-                        isTruncation, truncReqId);
-
-        // For snapshot targets creation, see executePlanFragment() in this file.
-        VoltTable[] results = performSnapshotCreationWork(path, stype.toString(), nonce, perPartitionTxnIds,
-                                              (byte)(block ? 1 : 0), format, data,
-                                              serializationData);
-
-        VoltZK.removeActionBlocker(VoltDB.instance().getHostMessenger().getZK(), VoltZK.snapshotSetupInProgress, SNAP_LOG);
         Set<Integer> participantHostIds = Sets.newHashSet();
         for (VoltTable result : results) {
             result.resetRowPosition();

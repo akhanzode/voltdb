@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -33,6 +33,8 @@ public class EstTimeUpdater {
     public static volatile boolean s_pause = false;
     public static final AtomicBoolean s_done = new AtomicBoolean(true);
 
+    private static final VoltLogger hostLog = new VoltLogger("HOST");
+
     private final static Runnable updaterRunnable = new Runnable() {
         @Override
         public void run() {
@@ -48,8 +50,11 @@ public class EstTimeUpdater {
                 }
                 if (s_pause) continue;
                 Long delta = EstTimeUpdater.update(System.currentTimeMillis());
-                if ( delta != null ) {
-                    new VoltLogger("HOST").info(delta +" estimated time update.");
+                if (delta != null) {
+                    hostLog.warnFmt("VoltDB's internal time-keeper thread has not been updated for %,.3f seconds." +
+                                    " This could be caused by contention, swapping, sleeping, or other environmental" +
+                                    " issues, and may lead to long transaction processing times and even node timeouts.",
+                                    delta / 1000.0);
                 }
             }
         }

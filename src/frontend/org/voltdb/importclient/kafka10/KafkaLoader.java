@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -40,7 +40,6 @@ import org.voltdb.client.AutoReconnectListener;
 import org.voltdb.client.Client;
 import org.voltdb.client.ClientConfig;
 import org.voltdb.client.ClientFactory;
-import org.voltdb.client.ClientImpl;
 import org.voltdb.client.ClientResponse;
 import org.voltdb.importer.ImporterLifecycle;
 import org.voltdb.utils.BulkLoaderErrorHandler;
@@ -237,26 +236,22 @@ public class KafkaLoader implements ImporterLifecycle {
         m_cliOptions.password = CLIConfig.readPasswordIfNeeded(m_cliOptions.user, m_cliOptions.password, "Enter password: ");
 
         // Create connection
-        final ClientConfig clientConfig;
-        AutoReconnectListener listener = new AutoReconnectListener();
-        if (m_cliOptions.stopondisconnect) {
-            clientConfig = new ClientConfig(m_cliOptions.user, m_cliOptions.password, null);
-            clientConfig.setReconnectOnConnectionLoss(false);
-        } else {
-            clientConfig = new ClientConfig(m_cliOptions.user, m_cliOptions.password, listener);
-            clientConfig.setReconnectOnConnectionLoss(true);
-        }
+        AutoReconnectListener listener = m_cliOptions.stopondisconnect ? null : new AutoReconnectListener();
+        final ClientConfig clientConfig = new ClientConfig(m_cliOptions.user, m_cliOptions.password, listener);
         if (m_cliOptions.ssl != null && !m_cliOptions.ssl.trim().isEmpty()) {
             clientConfig.setTrustStoreConfigFromPropertyFile(m_cliOptions.ssl);
             clientConfig.enableSSL();
         }
         clientConfig.setProcedureCallTimeout(0);
+        if (m_cliOptions.priority > 0) {
+            clientConfig.setRequestPriority(m_cliOptions.priority);
+        }
         m_client = getVoltClient(clientConfig, m_cliOptions.getVoltHosts());
 
         if (m_cliOptions.useSuppliedProcedure) {
-            m_loader = new CSVTupleDataLoader((ClientImpl) m_client, m_cliOptions.procedure, new KafkaBulkLoaderCallback());
+            m_loader = new CSVTupleDataLoader(m_client, m_cliOptions.procedure, new KafkaBulkLoaderCallback());
         } else {
-            m_loader = new CSVBulkDataLoader((ClientImpl) m_client, m_cliOptions.table, m_cliOptions.batch, m_cliOptions.update, new KafkaBulkLoaderCallback());
+            m_loader = new CSVBulkDataLoader(m_client, m_cliOptions.table, m_cliOptions.batch, m_cliOptions.update, new KafkaBulkLoaderCallback());
         }
         m_loader.setFlushInterval(m_cliOptions.flush, m_cliOptions.flush);
 
@@ -278,25 +273,21 @@ public class KafkaLoader implements ImporterLifecycle {
 
     /*
      * Create a Volt client from the supplied configuration and list of servers.
+     * Connects to the first available server, and uses the topology-awareness
+     * features to connect to the rest.
      */
-    private static Client getVoltClient(ClientConfig config, List<String> hosts) throws Exception {
+    private static Client getVoltClient(ClientConfig config, List<String> hosts)
+            throws IOException, InterruptedException {
         config.setTopologyChangeAware(true);
-        final Client client = ClientFactory.createClient(config);
-        for (String host : hosts) {
-            try {
-                client.createConnection(host);
-            }catch (IOException e) {
-                // Only swallow exceptions caused by Java network or connection problem
-                // Unresolved hostname exceptions will be thrown
-            }
+        Client client = ClientFactory.createClient(config);
+        try {
+            client.createAnyConnection(String.join(",", hosts));
+            return client;
         }
-        if (client.getConnectedHostList().isEmpty()) {
-            try {
-                client.close();
-            } catch (Exception ignore) {}
-            throw new Exception("Unable to connect to any servers");
+        catch (IOException | RuntimeException ex) {
+            client.close();
+            throw ex;
         }
-        return client;
     }
 
     public static void main(String[] args) {

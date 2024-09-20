@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -56,6 +56,7 @@ import org.voltdb.VoltDBInterface;
 import org.voltdb.VoltTable;
 import org.voltdb.VoltZK;
 import org.voltdb.client.ClientResponse;
+import org.voltdb.client.Priority;
 import org.voltdb.dtxn.TransactionState;
 import org.voltdb.exceptions.SerializableException;
 import org.voltdb.exceptions.TransactionRestartException;
@@ -239,7 +240,7 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
 
     @Override
     public void configureDurableUniqueIdListener(final DurableUniqueIdListener listener, final boolean install) {
-        m_tasks.offer(new SiteTaskerRunnable() {
+        SiteTaskerRunnable task = new SiteTaskerRunnable() {
             @Override
             void run()
             {
@@ -249,7 +250,10 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
                 taskInfo = listener.getClass().getSimpleName();
                 return this;
             }
-        }.init(listener));
+        }.init(listener);
+
+        Iv2Trace.logSiteTaskerQueueOffer(task);
+        m_tasks.offer(task);
     }
 
     @Override
@@ -513,8 +517,43 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
         long newSpHandle;
         long uniqueId = Long.MIN_VALUE;
         Iv2InitiateTaskMessage msg = message;
-        if (m_isLeader || message.isReadOnly()) {
 
+        /*
+         * Reset invocation priority to system (highest) priority: this initiate message has been
+         * taken from the queue and will be assigned transaction numbers. The original priority
+         * should be forgotten when this message is copied to downstream destinations: repair log,
+         * command log, replicas...
+         *
+         * Also check for a timed-out request, and unconditionally remove the timeout indicators
+         * from the procedure invocation. We must make the check before we reset the priority,
+         * since SYSTEM_PRIORITY tasks are considered to never time out.
+         *
+         * There is an abundance of caution here:
+         * - Only external clients set the request-timeout indicator
+         * - We don't check timeouts for replicas or replay
+         * - No timeout is ever reported if priority is SYSTEM_PRIORITY
+         * - We immediately clear the request-timeout indicator here
+         * - Any replica requests or repair logs we create will have
+         *   SYSTEM_PRIORITY and not have request-timeout indication
+         */
+        boolean hasTimedOut = false;
+        StoredProcedureInvocation spi = msg.getStoredProcedureInvocation();
+        if (spi != null) {
+            if (spi.hasRequestTimeout()) {
+                if (m_isLeader && !message.isForReplay()) {
+                    hasTimedOut = spi.requestHasTimedOut();
+                }
+                spi.clearRequestTimeout();
+            }
+            spi.setRequestPriority(Priority.SYSTEM_PRIORITY);
+        }
+
+        if (hasTimedOut) {
+            sendTimeoutResponse(msg, spi);
+            return;
+        }
+
+        if (m_isLeader || message.isReadOnly()) {
             /*
              * If this is for CL replay or DR, update the unique ID generator
              */
@@ -561,7 +600,8 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
             // Need to copy this or the other local sites handling
             // the same initiate task message will overwrite each
             // other's memory -- the message isn't copied on delivery
-            // to other local mailboxes.
+            // to other local mailboxes. This copy refers to the original
+            // SPI but we have reset the priority and request timeout.
             msg = new Iv2InitiateTaskMessage(
                     message.getInitiatorHSId(),
                     message.getCoordinatorHSId(),
@@ -571,12 +611,12 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
                     message.isReadOnly(),
                     message.isSinglePartition(),
                     message.isEveryPartition(),
-                    null,
+                    null, // nPartitions
                     message.getStoredProcedureInvocation(),
                     message.getClientInterfaceHandle(),
                     message.getConnectionId(),
                     message.isForReplay());
-
+            msg.setShouldReturnResultTables(message.shouldReturnResultTables());
             msg.setSpHandle(newSpHandle);
             logRepair(msg);
             // Also, if this is a vanilla single-part procedure, make the TXNID
@@ -593,7 +633,7 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
 
             // The leader will be responsible to replicate messages to replicas.
             // Don't replicate reads, no matter FAST or SAFE.
-            if (m_isLeader && (!msg.isReadOnly()) && IS_KSAFE_CLUSTER ) {
+            if (m_isLeader && !msg.isReadOnly() && IS_KSAFE_CLUSTER) {
                 for (long hsId : m_sendToHSIds) {
                     Iv2InitiateTaskMessage finalMsg = msg;
                     final VoltTrace.TraceEventBatch traceLog = VoltTrace.log(VoltTrace.Category.SPI);
@@ -618,6 +658,9 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
                             msg.getConnectionId(),
                             msg.isForReplay(),
                             true);
+                replmsg.setShouldReturnResultTables(false);
+                replmsg.getStoredProcedureInvocation().setKeepParamsImmutable(true);
+
                 // Update the handle in the copy since the constructor doesn't set it
                 replmsg.setSpHandle(newSpHandle);
                 // K-safety cluster doesn't always mean partition has replicas,
@@ -636,7 +679,7 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
                 safeAddToDuplicateCounterMap(new DuplicateCounterKey(msg.getTxnId(), newSpHandle), counter);
             }
         }
-        else {
+        else { // !(m_isLeader || message.isReadOnly())
             setMaxSeenTxnId(msg.getSpHandle());
             newSpHandle = msg.getSpHandle();
             logRepair(msg);
@@ -675,8 +718,7 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
         }
 
         final String procedureName = msg.getStoredProcedureName();
-        final SpProcedureTask task =
-            new SpProcedureTask(m_mailbox, procedureName, m_pendingTasks, msg);
+        final SpProcedureTask task = SpProcedureTask.create(m_mailbox, procedureName, m_pendingTasks, msg);
 
         ListenableFuture<Object> durabilityBackpressureFuture =
                 m_cl.log(msg, msg.getSpHandle(), null, m_durabilityListener, task);
@@ -694,6 +736,20 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
         if (m_cl.canOfferTask()) {
             m_pendingTasks.offer(task.setDurabilityBackpressureFuture(durabilityBackpressureFuture));
         }
+    }
+
+    /*
+     * Responds to a client request that has been found to have timed out while it
+     * was loitering in the site queue. Execution has not been started.
+     */
+    private void sendTimeoutResponse(Iv2InitiateTaskMessage task, StoredProcedureInvocation spi) {
+        ClientResponseImpl clientResp = new ClientResponseImpl(ClientResponseImpl.GRACEFUL_FAILURE,
+                                                               new VoltTable[0],
+                                                               "Request timed out at server before execution",
+                                                               spi.getClientHandle());
+        InitiateResponseMessage response = new InitiateResponseMessage(task);
+        response.setResults(clientResp);
+        m_mailbox.send(response.getInitiatorHSId(), response);
     }
 
     @Override
@@ -1008,6 +1064,11 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
                 }
             } else {
                 newSpHandle = getMaxScheduledTxnSpHandle();
+                // use the same sphandle for all readonly fragments
+                final TransactionState txn = m_outstandingTxns.get(message.getTxnId());
+                if (txn != null) {
+                    newSpHandle = txn.m_spHandle;
+                }
             }
 
             msg.setSpHandle(newSpHandle);
@@ -1163,7 +1224,7 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
                         uac.isReadOnly(),
                         uac.isSinglePartition(),
                         uac.isEveryPartition(),
-                        uac.getNParitionIds(),
+                        uac.getNPartitionIds(),
                         invocation,
                         uac.getClientInterfaceHandle(),
                         uac.getConnectionId(),
@@ -1195,6 +1256,11 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
             //Async command logging has to offer the task immediately with a Future for backpressure
             if (m_cl.canOfferTask()) {
                 m_pendingTasks.offer(task.setDurabilityBackpressureFuture(durabilityBackpressureFuture));
+                if( hostLog.isTraceEnabled() ) {
+                    hostLog.trace("SpScheduler.doLocalFragmentOffer() add " + (msg.isSysProcTask() ? "SysprocFragmentTask" : "FragmentTask")  +
+                            " with sync logging P" + this.m_partitionId + " mpId=" + msg.getUniqueId());
+                }
+
             } else {
                 /* Getting here means that the task is the first fragment of an MP txn and
                  * synchronous command logging is on, so create a backlog for future tasks of
@@ -1205,9 +1271,17 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
                  */
                 assert !m_mpsPendingDurability.containsKey(task.getTxnId());
                 m_mpsPendingDurability.put(task.getTxnId(), new ArrayDeque<TransactionTask>());
+                if( hostLog.isTraceEnabled() ) {
+                    hostLog.trace("SpScheduler.doLocalFragmentOffer() add " + (msg.isSysProcTask() ? "SysprocFragmentTask" : "FragmentTask") +
+                            " with async logging P" + this.m_partitionId + " mpId=" + msg.getUniqueId());
+                }
             }
         } else {
             queueOrOfferMPTask(task);
+            if( hostLog.isTraceEnabled() ) {
+                hostLog.trace("SpScheduler.doLocalFragmentOffer() add " + (msg.isSysProcTask() ? "SysprocFragmentTask" : "FragmentTask") +
+                        " P" + this.m_partitionId + " mpId=" + msg.getUniqueId());
+            }
         }
     }
 
@@ -1678,8 +1752,13 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
     {
         SettableFuture<Boolean> written = null;
         if (m_replayComplete) {
-            written = m_cl.logIv2Fault(m_mailbox.getHSId(),
-                new HashSet<Long>(m_replicaHSIds), m_partitionId, spHandle);
+            Set<Long> replicas = new HashSet<>();
+            if (isLeader()) {
+                replicas.addAll(m_replicaHSIds);
+            } else {
+                replicas.addAll(VoltDB.instance().getCartographer().getReplicasForPartition(m_partitionId));
+            }
+            written = m_cl.logIv2Fault(m_mailbox.getHSId(), replicas, m_partitionId, spHandle);
         }
         return written;
     }
@@ -1706,9 +1785,11 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
             }
         };
         if (InitiatorMailbox.SCHEDULE_IN_SITE_THREAD) {
-            if (hostLog.isDebugEnabled()) {
+            if (hostLog.isDebugEnabled() || Iv2Trace.IV2_QUEUE_TRACE_ENABLED) {
                 r.taskInfo = currentChecks.getClass().getSimpleName();
             }
+
+            Iv2Trace.logSiteTaskerQueueOffer(r);
             m_tasks.offer(r);
         } else {
             r.run();
@@ -1808,24 +1889,24 @@ public class SpScheduler extends Scheduler implements SnapshotCompletionInterest
                 synchronized (m_lock) {
                     if (m_lastSentTruncationHandle < newHandle) {
                         m_lastSentTruncationHandle = newHandle;
-                        m_repairLog.notifyTxnCommitInterests(m_lastSentTruncationHandle);
-                        if (m_sendToHSIds.length == 0) {
-                            return;
-                        }
 
                         final RepairLogTruncationMessage truncMsg = new RepairLogTruncationMessage(newHandle);
                         // Also keep the local repair log's truncation point up-to-date
                         // so that it can trigger the callbacks.
                         truncMsg.m_sourceHSId = m_mailbox.getHSId();
-                        m_mailbox.deliver(truncMsg);
-                        m_mailbox.send(m_sendToHSIds, truncMsg);
+                        m_repairLog.deliver(truncMsg);
+                        if (m_sendToHSIds.length > 0) {
+                            m_mailbox.send(m_sendToHSIds, truncMsg);
+                        }
                     }
                 }
             }
         };
-        if (hostLog.isDebugEnabled()) {
+        if (hostLog.isDebugEnabled() || Iv2Trace.IV2_QUEUE_TRACE_ENABLED) {
             r.taskInfo = "Repair Log Truncate Message Handle:" + TxnEgo.txnIdToString(m_repairLogTruncationHandle);
         }
+
+        Iv2Trace.logSiteTaskerQueueOffer(r);
         m_tasks.offer(r);
     }
 

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -19,20 +19,20 @@ package org.voltdb.iv2;
 
 import java.io.IOException;
 
-import org.voltcore.logging.Level;
+import org.apache.commons.lang3.StringUtils;
 import org.voltcore.messaging.Mailbox;
 import org.voltcore.utils.CoreUtils;
 import org.voltcore.utils.LatencyWatchdog;
 import org.voltdb.ClientResponseImpl;
 import org.voltdb.PartitionDRGateway;
 import org.voltdb.SiteProcedureConnection;
+import org.voltdb.StoredProcedureInvocation;
 import org.voltdb.VoltTable;
 import org.voltdb.client.BatchTimeoutOverrideType;
 import org.voltdb.client.ClientResponse;
 import org.voltdb.messaging.InitiateResponseMessage;
 import org.voltdb.messaging.Iv2InitiateTaskMessage;
 import org.voltdb.rejoin.TaskLog;
-import org.voltdb.utils.LogKeys;
 import org.voltdb.utils.MiscUtils;
 import org.voltdb.utils.VoltTrace;
 
@@ -49,10 +49,26 @@ public class SpProcedureTask extends ProcedureTask
         HOST_DEBUG_ENABLED = hostLog.isDebugEnabled();
     }
 
-    public SpProcedureTask(Mailbox initiator, String procName, TransactionTaskQueue queue,
-                  Iv2InitiateTaskMessage msg)
+    private final String m_traceLogName;
+
+    public static SpProcedureTask create(Mailbox initiator, String procName, TransactionTaskQueue queue,
+            Iv2InitiateTaskMessage msg) {
+        StoredProcedureInvocation spi = msg.getStoredProcedureInvocation();
+        return spi != null && spi.isBatchCall()
+                ? new BatchProcedureTask.SpBatch(initiator, procName, queue, msg)
+                : new SpProcedureTask(initiator, procName, queue, msg);
+    }
+
+    SpProcedureTask(Mailbox initiator, String procName, TransactionTaskQueue queue,
+            Iv2InitiateTaskMessage msg) {
+        this(initiator, procName, queue, msg, "runSpTask");
+    }
+
+    SpProcedureTask(Mailbox initiator, String procName, TransactionTaskQueue queue, Iv2InitiateTaskMessage msg,
+            String traceLogName)
     {
        super(initiator, procName, new SpTransactionState(msg), queue);
+       m_traceLogName = traceLogName;
     }
 
     @Override
@@ -76,7 +92,7 @@ public class SpProcedureTask extends ProcedureTask
         }
         final VoltTrace.TraceEventBatch traceLog = VoltTrace.log(VoltTrace.Category.SPI);
         if (traceLog != null) {
-            traceLog.add(() -> VoltTrace.beginDuration("runSpTask",
+            traceLog.add(() -> VoltTrace.beginDuration(m_traceLogName,
                                                        "txnId", TxnEgo.txnIdToString(getTxnId()),
                                                        "partition", Integer.toString(siteConnection.getCorrespondingPartitionId())));
         }
@@ -109,7 +125,7 @@ public class SpProcedureTask extends ProcedureTask
         }
         completeInitiateTask(siteConnection);
         if (traceLog != null) {
-            traceLog.add(() -> VoltTrace.endDuration("runSpTask",
+            traceLog.add(() -> VoltTrace.endDuration(m_traceLogName,
                                                        "txnId", TxnEgo.txnIdToString(getTxnId()),
                                                        "partition", Integer.toString(siteConnection.getCorrespondingPartitionId())));
         }
@@ -117,9 +133,14 @@ public class SpProcedureTask extends ProcedureTask
         if (txnState.m_initiationMsg != null && !(txnState.m_initiationMsg.isForReplica())) {
             response.setExecutedOnPreviousLeader(true);
         }
+
+        // Note: this call will re-queue the response to the site tasker queue,
+        // thus delaying the transmission of the response behind other tasks, e.g
+        // other invocations. Trying to deliver the response immediately to the network
+        // does not improve latencies. See ENG-21040.
         m_initiator.deliver(response);
         if (EXEC_TRACE_ENABLED) {
-            execLog.l7dlog( Level.TRACE, LogKeys.org_voltdb_ExecutionSite_SendingCompletedWUToDtxn.name(), null);
+            execLog.trace("ExecutionSite sending completed workunit to dtxn.");
         }
         if (HOST_DEBUG_ENABLED) {
             hostLog.debug("COMPLETE: " + this);
@@ -199,7 +220,7 @@ public class SpProcedureTask extends ProcedureTask
         }
         m_txnState.setDone();
         if (EXEC_TRACE_ENABLED) {
-            execLog.l7dlog( Level.TRACE, LogKeys.org_voltdb_ExecutionSite_SendingCompletedWUToDtxn.name(), null);
+            execLog.trace("ExecutionSite sending completed workunit to dtxn.", null);
         }
         if (HOST_DEBUG_ENABLED) {
             hostLog.debug("COMPLETE replaying txn: " + this);
@@ -228,7 +249,7 @@ public class SpProcedureTask extends ProcedureTask
                 "[SP][RW] with invalid undo token in completeInitiateTask.";
 
             // the truncation point token SHOULD be part of m_txn. However, the
-            // legacy interaces don't work this way and IV2 hasn't changed this
+            // legacy interfaces don't work this way and IV2 hasn't changed this
             // ownership yet. But truncateUndoLog is written assuming the right
             // eventual encapsulation.
             siteConnection.truncateUndoLog(m_txnState.needsRollback(), false,
@@ -243,7 +264,10 @@ public class SpProcedureTask extends ProcedureTask
     public String toString()
     {
         StringBuilder sb = new StringBuilder();
-        sb.append("SpProcedureTask:");
+        sb.append(getClass().getSimpleName()).append(':');
+        if (!StringUtils.isEmpty(m_procName)) {
+            sb.append("  PROCNAME: ").append(m_procName);
+        }
         sb.append("  TXN ID: ").append(TxnEgo.txnIdToString(getTxnId()));
         sb.append("  SP HANDLE ID: ").append(TxnEgo.txnIdToString(getSpHandle()));
         sb.append("  ON HSID: ").append(CoreUtils.hsIdToString(m_initiator.getHSId()));
@@ -256,6 +280,7 @@ public class SpProcedureTask extends ProcedureTask
         return sb.toString();
     }
 
+    @Override
     public boolean needCoordination() {
         return false;
     }

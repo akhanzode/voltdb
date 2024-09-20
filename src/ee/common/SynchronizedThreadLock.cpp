@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -118,7 +118,11 @@ void SynchronizedThreadLock::init(int32_t sitesPerHost, EngineLocals& newEngineL
     }
 }
 
-void SynchronizedThreadLock::resetMemory(int32_t partitionId) {
+void SynchronizedThreadLock::resetMemory(int32_t partitionId
+#ifdef VOLT_POOL_CHECKING
+      , bool shutdown
+#endif
+         ) {
     lockReplicatedResourceForInit();
     if (partitionId == s_mpMemoryPartitionId) {
         // This is being called twice. First when the lowestSite goes away and then
@@ -139,9 +143,11 @@ void SynchronizedThreadLock::resetMemory(int32_t partitionId) {
             s_mpEngine.allocated = nullptr;
             s_mpEngine.context = nullptr;
 #ifdef VOLT_POOL_CHECKING
+            std::lock_guard<std::mutex> guard(ThreadLocalPool::s_sharedMemoryMutex);
             ThreadLocalPool::SizeBucketMap_t& mapBySize = ThreadLocalPool::s_allocations[s_mpMemoryPartitionId];
             auto mapForAdd = mapBySize.begin();
             while (mapForAdd != mapBySize.end()) {
+                if (shutdown) break;
                 auto& allocMap = mapForAdd->second;
                 mapForAdd++;
                 if (!allocMap.empty()) {
@@ -267,6 +273,7 @@ void SynchronizedThreadLock::addUndoAction(bool synchronized, UndoQuantum *uq,
             realReleaseInterest = nullptr;
         }
         uq->registerSynchronizedUndoAction(realUndoAction, realReleaseInterest);
+        lockReplicatedResourceForInit();
         for (const SharedEngineLocalsType::value_type& enginePair : s_activeEnginesByPartitionId) {
             UndoQuantum* currUQ = enginePair.second.context->getCurrentUndoQuantum();
             VOLT_DEBUG("Local undo quantum is %p; Other undo quantum is %p", uq, currUQ);
@@ -275,6 +282,7 @@ void SynchronizedThreadLock::addUndoAction(bool synchronized, UndoQuantum *uq,
                 currUQ->registerSynchronizedUndoAction(dummyUndoAction, dummyReleaseInterest);
             }
         }
+        unlockReplicatedResourceForInit();
     } else {
         vassert(!table || !table->isReplicatedTable());
         uq->registerUndoAction(action, table);

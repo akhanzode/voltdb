@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -54,7 +54,6 @@ import org.voltdb.export.ExportLocalClusterBase;
 import org.voltdb.exportclient.SocketExporter;
 import org.voltdb.regressionsuites.JUnit4LocalClusterTest;
 import org.voltdb.regressionsuites.LocalCluster;
-import org.voltdb.utils.VoltFile;
 
 import au.com.bytecode.opencsv_voltpatches.CSVParser;
 
@@ -72,7 +71,6 @@ public class TestExportSPIMigration extends JUnit4LocalClusterTest
         ExportLocalClusterBase.resetDir();
         m_serverSocket = new ServerListener(5001);
         m_serverSocket.start();
-        VoltFile.resetSubrootForThisProcess();
         exportMessageSet = new HashSet<>();
         LocalCluster cluster = null;
         VoltProjectBuilder builder = null;
@@ -93,7 +91,6 @@ public class TestExportSPIMigration extends JUnit4LocalClusterTest
             builder.addExport(true, ServerExportEnum.CUSTOM, SocketExporter.class.getName(), props, "utopia");
 
             cluster = new LocalCluster("testFlushExportBuffer.jar", 2, 2, 1, BackendTarget.NATIVE_EE_JNI);
-            cluster.setNewCli(true);
             cluster.setHasLocalServer(false);
             cluster.setJavaProperty("DISABLE_MIGRATE_PARTITION_LEADER", "false");
             cluster.overrideAnyRequestForValgrind();
@@ -102,7 +99,6 @@ public class TestExportSPIMigration extends JUnit4LocalClusterTest
             cluster.startUp(true);
 
             ClientConfig config = new ClientConfig();
-            config.setClientAffinity(true);
             config.setTopologyChangeAware(true);
             config.setConnectionResponseTimeout(4*60*1000);
             config.setProcedureCallTimeout(4*60*1000);

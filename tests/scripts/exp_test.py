@@ -1,7 +1,7 @@
 #!/usr/bin/env python2.6
 
 # This file is part of VoltDB.
-# Copyright (C) 2008-2020 VoltDB Inc.
+# Copyright (C) 2008-2022 Volt Active Data Inc.
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -42,11 +42,11 @@ from xml.etree.ElementTree import Element, SubElement
 # where we are now
 sys.path.append('../../lib/python')
 try:
-    from voltdbclient import *
+    from voltdbclientpy2 import *
 except ImportError:
     sys.path.append('./lib/python')
-    from voltdbclient import *
-from Query import VoltQueryClient
+    from voltdbclientpy2 import *
+from QueryPy2 import VoltQueryClient
 from XMLUtils import prettify # To create a human readable xml file
 
 hostname = socket.gethostname()

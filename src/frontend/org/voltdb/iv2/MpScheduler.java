@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -34,14 +34,19 @@ import org.voltcore.messaging.TransactionInfoBaseMessage;
 import org.voltcore.messaging.VoltMessage;
 import org.voltcore.utils.CoreUtils;
 import org.voltdb.CatalogContext;
+import org.voltdb.ClientResponseImpl;
 import org.voltdb.CommandLog;
+import org.voltdb.StoredProcedureInvocation;
 import org.voltdb.SystemProcedureCatalog;
 import org.voltdb.VoltDB;
 import org.voltdb.VoltTable;
+import org.voltdb.VoltZK;
+import org.voltdb.client.Priority;
 import org.voltdb.dtxn.TransactionState;
 import org.voltdb.exceptions.SerializableException;
 import org.voltdb.exceptions.TransactionRestartException;
 import org.voltdb.iv2.DuplicateCounter.HashResult;
+import org.voltdb.iv2.MpTerm.RepairType;
 import org.voltdb.messaging.CompleteTransactionMessage;
 import org.voltdb.messaging.DummyTransactionTaskMessage;
 import org.voltdb.messaging.DumpMessage;
@@ -55,6 +60,7 @@ import org.voltdb.utils.MiscUtils;
 import org.voltdb.utils.ProClass;
 import org.voltdb.utils.VoltTrace;
 
+import com.google_voltpatches.common.base.Supplier;
 import com.google_voltpatches.common.collect.ImmutableList;
 import com.google_voltpatches.common.collect.Maps;
 import com.google_voltpatches.common.collect.Sets;
@@ -79,7 +85,7 @@ public class MpScheduler extends Scheduler
     // Leader migrated from one site to another
     private final Map<Long, Long> m_leaderMigrationMap;
 
-    private int m_nextBuddy = 0;
+    private volatile int m_nextBuddy = 0;
     //Generator of pre-IV2ish timestamp based unique IDs
     private final UniqueIdGenerator m_uniqueIdGenerator;
     final private MpTransactionTaskQueue m_pendingTasks;
@@ -91,7 +97,7 @@ public class MpScheduler extends Scheduler
     // since that's the first point we can be sure is safely agreed on by all nodes.
     // Let the one we can't be sure about linger here.  See ENG-4211 for more.
     long m_repairLogAwaitingTruncate = TransactionInfoBaseMessage.UNUSED_TRUNC_HANDLE;
-
+    private Object m_lock = new Object();
     MpScheduler(int partitionId, List<Long> buddyHSIds, SiteTaskerQueue taskQueue, int leaderId)
     {
         super(partitionId, taskQueue);
@@ -104,12 +110,26 @@ public class MpScheduler extends Scheduler
         m_leaderMigrationMap = Maps.newHashMap();
     }
 
+    private final Supplier<Long> m_buddySupplier = new Supplier<Long>() {
+        @Override
+        public Long get() {
+            //MP reads can be concurrently executed
+            synchronized(m_lock) {
+                Long buddy = m_buddyHSIds.get(m_nextBuddy);
+                m_nextBuddy = (m_nextBuddy + 1) % m_buddyHSIds.size();
+                return buddy;
+            }
+        }
+    };
+
     // reset buddy Hsid list if local sites decommissioned
-    void updateBuddyHSIds(List<Long> buddyHSIds) {
-        m_buddyHSIds = ImmutableList.<Long>builder().addAll(buddyHSIds).build();
-        // We need at least one available sites on the MPI host
-        assert(m_buddyHSIds.size() > 0);
-        m_nextBuddy = 0;
+    public void updateBuddyHSIds(List<Long> buddyHSIds) {
+        synchronized(m_lock) {
+            m_nextBuddy = 0;
+            m_buddyHSIds = ImmutableList.<Long>builder().addAll(buddyHSIds).build();
+            // We need at least one available sites on the MPI host
+            assert(m_buddyHSIds.size() > 0);
+        }
     }
 
     void setMpRoSitePool(MpRoSitePool sitePool)
@@ -135,7 +155,7 @@ public class MpScheduler extends Scheduler
         // the deliver lock held to be correct. The null task should
         // never run; the site thread is expected to be told to stop.
         m_pendingTasks.shutdown();
-        m_pendingTasks.repair(m_nullTask, m_iv2Masters, m_partitionMasters, false);
+        m_pendingTasks.repair(m_nullTask, m_iv2Masters, m_partitionMasters, RepairType.NORMAL);
         m_tasks.offer(m_nullTask);
     }
 
@@ -143,13 +163,13 @@ public class MpScheduler extends Scheduler
     public long[] updateReplicas(final List<Long> replicas, final Map<Integer, Long> partitionMasters,
             TransactionState snapshotTransactionState)
     {
-        return updateReplicas(replicas, partitionMasters, false, false);
+        return updateReplicas(replicas, partitionMasters, RepairType.NORMAL);
     }
 
     public long[] updateReplicas(final List<Long> replicas, final Map<Integer, Long> partitionMasters,
-            boolean balanceSPI, boolean skipRepair)
+            RepairType repairType)
     {
-        applyLeaderMigration(replicas, balanceSPI);
+        applyLeaderMigration(replicas, repairType.isMigrate());
 
         // Handle startup and promotion semi-gracefully
         m_iv2Masters.clear();
@@ -166,7 +186,7 @@ public class MpScheduler extends Scheduler
         // in this list for further processing.
 
         // Do not update DuplicateCounter upon leader migration
-        if (!balanceSPI) {
+        if (!repairType.isMigrate()) {
             List<Long> doneCounters = new LinkedList<Long>();
             for (Entry<Long, DuplicateCounter> entry : m_duplicateCounters.entrySet()) {
                 DuplicateCounter counter = entry.getValue();
@@ -193,15 +213,18 @@ public class MpScheduler extends Scheduler
                 }
             }
         }
-        // Determine if all the partition leaders are on live hosts, that is, all partitions have promoted
-        // their leaders.
-        Set<Integer> partitionLeaderHosts = CoreUtils.getHostIdsFromHSIDs(m_iv2Masters);
-        partitionLeaderHosts.removeAll(((MpInitiatorMailbox)m_mailbox).m_messenger.getLiveHostIds());
-
         // This is a non MPI Promotion (but SPI Promotion) path for repairing outstanding MP Txns
-        MpRepairTask repairTask = new MpRepairTask((InitiatorMailbox)m_mailbox, replicas, balanceSPI,
-                partitionLeaderHosts.isEmpty(), skipRepair);
-        m_pendingTasks.repair(repairTask, replicas, partitionMasters, skipRepair);
+        final InitiatorMailbox mailbox = (InitiatorMailbox)m_mailbox;
+        MpRepairTask repairTask = new MpRepairTask(mailbox, replicas, repairType);
+        m_pendingTasks.repair(repairTask, replicas, partitionMasters, repairType);
+
+        // At this point, all the repairs are completed. Remove the mp repair blocker if there exists
+        if (mailbox.m_messenger != null) {
+            Set<Integer> liveHostIds = mailbox.m_messenger.getLiveHostIds();
+            if (m_iv2Masters.stream().map(CoreUtils::getHostIdFromHSId).allMatch(liveHostIds::contains)) {
+                VoltZK.removeActionBlocker(mailbox.m_messenger.getZK(), VoltZK.mpRepairInProgress, tmLog);
+            }
+        }
         return new long[0];
     }
 
@@ -215,6 +238,10 @@ public class MpScheduler extends Scheduler
         Set<Long> previousLeaders = Sets.newHashSet();
         previousLeaders.addAll(m_iv2Masters);
         previousLeaders.removeAll(updatedReplicas);
+        // Update is triggered by manufactured callback
+        if (previousLeaders.isEmpty()) {
+            return;
+        }
          // Find the new leader
         Set<Long> currentLeaders = Sets.newHashSet();
         currentLeaders.addAll(updatedReplicas);
@@ -279,11 +306,46 @@ public class MpScheduler extends Scheduler
     public void handleIv2InitiateTaskMessage(Iv2InitiateTaskMessage message)
     {
         final String procedureName = message.getStoredProcedureName();
+
+        /*
+         * Reset invocation priority to system (highest) priority: this initiate message has been
+         * taken from the queue and will be assigned transaction numbers. The original priority
+         * should be forgotten when this message is copied to downstream destinations: repair log,
+         * command log, replicas...
+         *
+         * Also check for a timed-out request, and unconditionally remove the timeout indicators
+         * from the procedure invocation. We must make the check before we reset the priority,
+         * since SYSTEM_PRIORITY tasks are considered to never time out.
+         *
+         * There is an abundance of caution here:
+         * - Only external clients set the request-timeout indicator
+         * - We don't check timeouts for replay requests
+         * - No timeout is ever reported if priority is SYSTEM_PRIORITY
+         * - We immediately clear the request-timeout indicator here
+         * - Any every-site duplicate requests or repair logs we create will
+         *   have SYSTEM_PRIORITY and not have request-timeout indication
+         */
+        boolean hasTimedOut = false;
+        StoredProcedureInvocation spi = message.getStoredProcedureInvocation();
+        if (spi != null) {
+            if (spi.hasRequestTimeout()) {
+                if (!message.isForReplay()) {
+                    hasTimedOut = spi.requestHasTimedOut();
+                }
+                spi.clearRequestTimeout();
+            }
+            spi.setRequestPriority(Priority.SYSTEM_PRIORITY);
+        }
+
+        if (hasTimedOut) {
+            sendTimeoutResponse(message, spi);
+            return;
+        }
+
         /*
          * If this is CL replay, use the txnid from the CL and use it to update the current txnid
+         * Timestamp is actually a pre-IV2ish style time based transaction id
          */
-        long mpTxnId;
-        //Timestamp is actually a pre-IV2ish style time based transaction id
         long timestamp = Long.MIN_VALUE;
 
         // Update UID if it's for replay
@@ -295,7 +357,7 @@ public class MpScheduler extends Scheduler
         }
 
         TxnEgo ego = advanceTxnEgo();
-        mpTxnId = ego.getTxnId();
+        long mpTxnId = ego.getTxnId();
 
         final String threadName = Thread.currentThread().getName(); // Thread name has to be materialized here
         final VoltTrace.TraceEventBatch traceLog = VoltTrace.log(VoltTrace.Category.MPI);
@@ -328,7 +390,7 @@ public class MpScheduler extends Scheduler
                     message.isReadOnly(),
                     true, // isSinglePartition
                     true, // isEveryPartition
-                    null,
+                    null, // nPartitions
                     message.getStoredProcedureInvocation(),
                     message.getClientInterfaceHandle(),
                     message.getConnectionId(),
@@ -346,6 +408,7 @@ public class MpScheduler extends Scheduler
             m_pendingTasks.offer(eptask);
             return;
         }
+
         // Create a copy so we can overwrite the txnID so the InitiateResponse will be
         // correctly tracked.
         Iv2InitiateTaskMessage mp =
@@ -357,12 +420,13 @@ public class MpScheduler extends Scheduler
                     timestamp,
                     message.isReadOnly(),
                     message.isSinglePartition(),
-                    false,
-                    null,
+                    false, // isEveryPartition
+                    null,  // nPartitions
                     message.getStoredProcedureInvocation(),
                     message.getClientInterfaceHandle(),
                     message.getConnectionId(),
                     message.isForReplay());
+
         // Multi-partition initiation (at the MPI)
         MpProcedureTask task = null;
         if (isNpTxn(message) && NP_PROCEDURE_CLASS.hasProClass()) {
@@ -373,13 +437,13 @@ public class MpScheduler extends Scheduler
 
                 task = instantiateNpProcedureTask(m_mailbox, procedureName,
                         m_pendingTasks, mp, involvedPartitionMasters,
-                        m_buddyHSIds.get(m_nextBuddy), false, m_leaderId);
+                        m_buddySupplier, false, m_leaderId);
             }
 
             // if cannot figure out the involved partitions, run it as an MP txn
         }
 
-        int[] nPartitionIds = message.getNParitionIds();
+        int[] nPartitionIds = message.getNPartitionIds();
         if (nPartitionIds != null) {
             HashMap<Integer, Long> involvedPartitionMasters = new HashMap<>();
             for (int partitionId : nPartitionIds) {
@@ -388,19 +452,32 @@ public class MpScheduler extends Scheduler
 
             task = instantiateNpProcedureTask(m_mailbox, procedureName,
                     m_pendingTasks, mp, involvedPartitionMasters,
-                    m_buddyHSIds.get(m_nextBuddy), false, m_leaderId);
+                    m_buddySupplier, false, m_leaderId);
         }
 
 
         if (task == null) {
-            task = new MpProcedureTask(m_mailbox, procedureName,
+            task = MpProcedureTask.create(m_mailbox, procedureName,
                     m_pendingTasks, mp, m_iv2Masters, m_partitionMasters,
-                    m_buddyHSIds.get(m_nextBuddy), false, m_leaderId, false);
+                    m_buddySupplier, false, m_leaderId, false);
         }
 
-        m_nextBuddy = (m_nextBuddy + 1) % m_buddyHSIds.size();
         m_outstandingTxns.put(task.m_txnState.txnId, task.m_txnState);
         m_pendingTasks.offer(task);
+    }
+
+    /*
+     * Responds to a client request that has been found to have timed out while it
+     * was loitering in the site queue. Execution has not been started.
+     */
+    private void sendTimeoutResponse(Iv2InitiateTaskMessage task, StoredProcedureInvocation spi) {
+        ClientResponseImpl clientResp = new ClientResponseImpl(ClientResponseImpl.GRACEFUL_FAILURE,
+                                                               new VoltTable[0],
+                                                               "Request timed out at server before execution",
+                                                               spi.getClientHandle());
+        InitiateResponseMessage response = new InitiateResponseMessage(task);
+        response.setResults(clientResp);
+        m_mailbox.send(response.getInitiatorHSId(), response);
     }
 
     /**
@@ -475,19 +552,18 @@ public class MpScheduler extends Scheduler
 
                 task = instantiateNpProcedureTask(m_mailbox, procedureName,
                         m_pendingTasks, mp, involvedPartitionMasters,
-                        m_buddyHSIds.get(m_nextBuddy), true, m_leaderId);
+                        m_buddySupplier, true, m_leaderId);
             }
 
             // if cannot figure out the involved partitions, run it as an MP txn
         }
 
         if (task == null) {
-            task = new MpProcedureTask(m_mailbox, procedureName,
+            task = MpProcedureTask.create(m_mailbox, procedureName,
                     m_pendingTasks, mp, m_iv2Masters, m_partitionMasters,
-                    m_buddyHSIds.get(m_nextBuddy), true, m_leaderId, false);
+                    m_buddySupplier, true, m_leaderId, false);
         }
 
-        m_nextBuddy = (m_nextBuddy + 1) % m_buddyHSIds.size();
         m_outstandingTxns.put(task.m_txnState.txnId, task.m_txnState);
         m_pendingTasks.offer(task);
         if (repairLogger.isDebugEnabled()) {
@@ -647,7 +723,7 @@ public class MpScheduler extends Scheduler
                         MiscUtils.isPro() ? ProClass.HANDLER_LOG : ProClass.HANDLER_IGNORE)
                 .errorHandler(tmLog::error)
                 .useConstructorFor(Mailbox.class, String.class, TransactionTaskQueue.class,
-                        Iv2InitiateTaskMessage.class, Map.class, long.class, boolean.class, int.class);
+                        Iv2InitiateTaskMessage.class, Map.class, Supplier.class, boolean.class, int.class);
     }
 
     /**

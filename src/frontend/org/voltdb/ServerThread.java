@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -18,18 +18,27 @@
 package org.voltdb;
 
 import java.io.File;
+import java.io.IOException;
 import java.net.URL;
 
 import org.voltcore.common.Constants;
+import org.voltcore.network.LoopbackAddress;
 import org.voltcore.utils.InstanceId;
+import org.voltdb.client.ClientFactory;
 import org.voltdb.probe.MeshProber;
 import org.voltdb.utils.MiscUtils;
+
+import org.apache.commons.io.FileUtils;
 
 /**
  * Wraps VoltDB in a Thread
  */
 public class ServerThread extends Thread {
     VoltDB.Configuration m_config;
+
+    static {
+        ClientFactory.preserveResources();
+    }
 
     public ServerThread(VoltDB.Configuration config) {
         m_config = config;
@@ -127,7 +136,8 @@ public class ServerThread extends Thread {
         m_config.m_leader = MiscUtils.getHostnameColonPortString("localhost", leaderPort);
         m_config.m_coordinators = MeshProber.hosts(internalPort);
         m_config.m_internalPort = internalPort;
-        m_config.m_zkInterface = "127.0.0.1:" + zkPort;
+        m_config.m_zkInterface = LoopbackAddress.get();
+        m_config.m_zkPort = zkPort;
         VoltDB.instance().setMode(OperationMode.INITIALIZING);
 
         // Disable loading the EE if running against HSQL.
@@ -208,7 +218,7 @@ public class ServerThread extends Thread {
      */
     public static String getTestLicensePath() {
         // magic license stored in the voltdb enterprise code
-        URL resource = ServerThread.class.getResource("valid_dr_active_subscription.xml");
+        URL resource = ServerThread.class.getResource("v3_general_test_license.xml");
 
         // in the community edition, any non-empty string
         // should work fine here, as it won't be checked
@@ -222,5 +232,20 @@ public class ServerThread extends Thread {
     public InstanceId getInstanceId()
     {
         return VoltDB.instance().getHostMessenger().getInstanceId();
+    }
+
+    /**
+     * Convenient cleanup code for tests.
+     * A very big hammer.
+     */
+    public static void resetUserTempDir() {
+        try {
+            File dir = new File("/tmp/" + System.getProperty("user.name"));
+            FileUtils.deleteDirectory(dir);
+            dir.mkdirs();
+        }
+        catch (IOException ex) {
+            // ignored
+        }
     }
 }

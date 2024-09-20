@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -17,6 +17,7 @@
 
 package org.voltdb.utils;
 
+import java.io.Closeable;
 import java.io.IOException;
 
 import org.voltcore.utils.DBBPool;
@@ -25,7 +26,7 @@ import org.voltcore.utils.DBBPool;
  * Represents a reader for a segment. Multiple readers may be active
  * at any point in time, reading from different locations in the segment.
  */
-interface PBDSegmentReader<M> {
+interface PBDSegmentReader<M> extends Closeable {
     /**
      * Are there any more entries to read from this segment for this reader
      *
@@ -57,7 +58,7 @@ interface PBDSegmentReader<M> {
      * @return BBContainer with the bytes read or {@code null} if all entries have been consumed
      * @throws IOException
      */
-    public DBBPool.BBContainer poll(BinaryDeque.OutputContainerFactory factory) throws IOException;
+    public DBBPool.BBContainer poll(BinaryDeque.OutputContainerFactory factory, int maxSize) throws IOException;
 
     /**
      * @return A {@link DBBPool.BBContainer} with the extra header supplied for the segment or {@code null} if one was
@@ -71,10 +72,11 @@ interface PBDSegmentReader<M> {
     //diverge from object count on crash or power failure
     //although incredibly unlikely
     /**
-     * Returns the number of bytes that are left to read in this segment
-     * for this reader.
+     * Returns the number of bytes that are left to read in this segment for this reader.
+     *
+     * @throws IOException
      */
-    public int uncompressedBytesToRead();
+    public int uncompressedBytesToRead() throws IOException;
 
     /**
      * Returns the current read offset for this reader in this segment.
@@ -100,6 +102,7 @@ interface PBDSegmentReader<M> {
     /**
      * Close this reader and release any resources.
      */
+    @Override
     public void close() throws IOException;
 
     /**

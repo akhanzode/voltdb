@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -119,6 +119,19 @@ public class SnapshotCompletionMonitor {
              m_sequenceNumber = in.readLong();
              m_generationId = in.readLong();
          }
+
+         @Override
+         public String toString() {
+             return new StringBuilder(this.getClass().getSimpleName())
+                     .append("[ack ")
+                     .append(m_ackOffset)
+                     .append(", seq ")
+                     .append(m_sequenceNumber)
+                     .append(", gen ")
+                     .append(m_generationId)
+                     .append("]")
+                     .toString();
+         }
     }
 
     /*
@@ -203,6 +216,10 @@ public class SnapshotCompletionMonitor {
         }
     }
 
+    private boolean isTerminus(long terminus) {
+        return (terminus != 0L);
+    }
+
     private void processSnapshotData(byte data[]) throws Exception {
         if (data == null) {
             return;
@@ -214,6 +231,7 @@ public class SnapshotCompletionMonitor {
         SnapshotPathType stype = SnapshotPathType.valueOf(jsonObj.getString(SnapshotUtil.JSON_PATH_TYPE));
         String nonce = jsonObj.getString(SnapshotUtil.JSON_NONCE);
         boolean truncation = jsonObj.getBoolean("isTruncation");
+        long terminus = jsonObj.optLong(SnapshotUtil.JSON_TERMINUS, 0);
         boolean didSucceed = jsonObj.getBoolean("didSucceed");
         // A truncation request ID is not always provided. It's used for
         // snapshots triggered indirectly via ZooKeeper so that the
@@ -283,6 +301,13 @@ public class SnapshotCompletionMonitor {
                 drMixedClusterSizeConsumerState.put(consumerPartitionId, ExtensibleSnapshotDigestData.buildConsumerSiteDrIdTrackersFromJSON(siteInfo, false));
             }
 
+            // Create a new DrProducerCatalogCommands because we do not want to modify the one being used
+            JSONObject catalogCommands = jsonObj.getJSONObject(ExtensibleSnapshotDigestData.DR_CATALOG_COMMANDS);
+            DrProducerCatalogCommands drCatalogCommands = new DrProducerCatalogCommands();
+            drCatalogCommands.restore(catalogCommands);
+            Map<Byte, String[]> replicableTables = drCatalogCommands
+                    .calculateReplicableTables(VoltDB.instance().getCatalogContext().catalog);
+
             Iterator<SnapshotCompletionInterest> iter = m_interests.iterator();
             while (iter.hasNext()) {
                 SnapshotCompletionInterest interest = iter.next();
@@ -295,11 +320,14 @@ public class SnapshotCompletionMonitor {
                                 txnId,
                                 partitionTxnIdsMap,
                                 truncation,
+                                isTerminus(terminus),
                                 didSucceed,
                                 truncReqId,
                                 exportSequenceNumbers,
                                 Collections.unmodifiableMap(drSequenceNumbers),
                                 Collections.unmodifiableMap(drMixedClusterSizeConsumerState),
+                                drCatalogCommands.get(),
+                                Collections.unmodifiableMap(replicableTables),
                                 drVersion,
                                 clusterCreateTime));
                 } catch (Exception e) {

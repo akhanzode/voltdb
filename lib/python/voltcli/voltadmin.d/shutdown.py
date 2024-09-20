@@ -1,5 +1,5 @@
 # This file is part of VoltDB.
-# Copyright (C) 2008-2020 VoltDB Inc.
+# Copyright (C) 2008-2022 Volt Active Data Inc.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -54,18 +54,18 @@ def shutdown(runner):
         else:
             runner.info('Shutdown canceled.')
     else:
-        response = runner.call_proc('@SystemInformation',
+        runner.info('Cluster shutdown in progress.')
+        if not runner.opts.forcing:
+            response = runner.call_proc('@SystemInformation',
                                     [VOLT.FastSerializer.VOLTTYPE_STRING],
                                     ['OVERVIEW'])
 
-        # Convert @SystemInformation results to objects.
-        hosts = Hosts(runner.abort)
-        for tuple in response.table(0).tuples():
-            hosts.update(*tuple)
-        host = hosts.hosts_by_id.itervalues().next()
+            # Convert @SystemInformation results to objects.
+            hosts = Hosts(runner.abort)
+            for tuple in response.table(0).tuples():
+                hosts.update(*tuple)
+            host = next(iter(hosts.hosts_by_id.values()))
 
-        runner.info('Cluster shutdown in progress.')
-        if not runner.opts.forcing:
             if host.get('clustersafety') == "REDUCED":
                 runner.info('Since cluster is in reduced k safety mode, taking a final snapshot before shutdown.')
                 runner.opts.save = True
@@ -84,7 +84,7 @@ def shutdown(runner):
 
                 runner.info('Writing out all queued export data...')
                 status = runner.call_proc('@Quiesce', [], []).table(0).tuple(0).column_integer(0)
-                if status <> 0:
+                if status != 0:
                     runner.abort('The cluster has failed to be quiesce with status: %d' % status)
 
                 checkstats.check_clients(runner)
@@ -105,7 +105,7 @@ def shutdown(runner):
                    runner.info('Starting resolution of external commitments...')
                    checkstats.check_exporter(runner)
                    status = runner.call_proc('@Quiesce', [], []).table(0).tuple(0).column_integer(0)
-                   if status <> 0:
+                   if status != 0:
                        runner.abort('The cluster has failed to quiesce with status: %d' % status)
                    checkstats.check_dr_producer(runner)
                    runner.info('Saving a final snapshot, The cluster will shutdown after the snapshot is finished...')
@@ -122,5 +122,5 @@ def shutdown(runner):
                 runner.info(stateMessage)
                 runner.abort(actionMessage)
         response = runner.call_proc('@Shutdown', columns, shutdown_params, check_status=False)
-        print response
+        print(response)
 

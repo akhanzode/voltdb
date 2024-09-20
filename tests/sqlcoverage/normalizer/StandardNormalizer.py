@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 # This file is part of VoltDB.
-# Copyright (C) 2008-2020 VoltDB Inc.
+# Copyright (C) 2008-2022 Volt Active Data Inc.
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -37,7 +37,7 @@ from binascii import hexlify
 from NotANormalizer import NotANormalizer
 from SortNulls import SortNulls
 from SQLCoverageReport import generate_html_reports
-from voltdbclient import FastSerializer
+from voltdbclientpy2 import FastSerializer
 
 # lame, but it matches at least up to 6 ORDER BY columns
 __EXPR = re.compile(r"ORDER BY\s+((\w+\.)?(?P<column_1>\w+)(\s+\w+)?)"

@@ -1,8 +1,8 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This file contains original code and/or modifications of original code.
- * Any modifications made by VoltDB Inc. are licensed under the following
+ * Any modifications made by Volt Active Data Inc. are licensed under the following
  * terms and conditions:
  *
  * This program is free software: you can redistribute it and/or modify
@@ -97,7 +97,6 @@ PersistentTable::PersistentTable(int partitionColumn,
                                  char const* signature,
                                  bool isMaterialized,
                                  int tableAllocationTargetSize,
-                                 int tupleLimit,
                                  bool drEnabled,
                                  bool isReplicated,
                                  TableType tableType)
@@ -106,8 +105,6 @@ PersistentTable::PersistentTable(int partitionColumn,
     , m_iter(this, m_data.begin())
     , m_isMaterialized(isMaterialized)   // Other constructors are dependent on this one
     , m_allowNulls()
-    , m_tupleLimit(tupleLimit)
-    , m_purgeExecutorVector()
     , m_stats(this)
     , m_blocksNotPendingSnapshotLoad()
     , m_blocksPendingSnapshotLoad()
@@ -183,13 +180,24 @@ PersistentTable::~PersistentTable() {
     // delete all tuples to free strings
     TableIterator ti(this, m_data.begin());
     TableTuple tuple(m_schema);
-    while (ti.next(tuple)) {
-        tuple.freeObjectColumns();
-        tuple.setActiveFalse();
+#ifdef VOLT_POOL_CHECKING
+    auto engine = ExecutorContext::getEngine();
+    bool shutdown = engine == nullptr ? true : engine->isDestroying();
+    if (!shutdown) {
+#endif
+        while (ti.next(tuple)) {
+            tuple.freeObjectColumns();
+            tuple.setActiveFalse();
+        }
+#ifdef VOLT_POOL_CHECKING
     }
+#endif
 
     // clean up indexes
     BOOST_FOREACH (auto index, m_indexes) {
+#ifdef VOLT_POOL_CHECKING
+        index->shutdown(shutdown);
+#endif
         delete index;
     }
 
@@ -228,29 +236,46 @@ void PersistentTable::nextFreeTuple(TableTuple* tuple) {
         }
         std::pair<char*, int> retval = block->nextFreeTuple();
 
+        std::vector<TBPtr> fullBlocks;
+        while (retval.first == NULL) {
+            if (!block->hasFreeTuples())
+                fullBlocks.emplace_back(block);
+            if (++begin == m_blocksWithSpace.end())
+                break;
+            block = (*begin);
+            retval = block->nextFreeTuple();
+        }
+        for (auto& bk : fullBlocks) {
+            m_blocksWithSpace.erase(bk);
+        }
+
+        // We have a block which has space we want to use.
+        if (retval.first != NULL) {
+
         /**
          * Check to see if the block needs to move to a new bucket
          */
-        if (retval.second != NO_NEW_BUCKET_INDEX) {
-            //Check if if the block is currently pending snapshot
-            if (m_blocksNotPendingSnapshot.find(block) != m_blocksNotPendingSnapshot.end()) {
-                block->swapToBucket(m_blocksNotPendingSnapshotLoad[retval.second]);
-            //Check if the block goes into the pending snapshot set of buckets
-            } else if (m_blocksPendingSnapshot.find(block) != m_blocksPendingSnapshot.end()) {
-                block->swapToBucket(m_blocksPendingSnapshotLoad[retval.second]);
-            } else {
-                //In this case the block is actively being snapshotted and isn't eligible for merge operations at all
-                //do nothing, once the block is finished by the iterator, the iterator will return it
+            if (retval.second != NO_NEW_BUCKET_INDEX) {
+                //Check if if the block is currently pending snapshot
+                if (m_blocksNotPendingSnapshot.find(block) != m_blocksNotPendingSnapshot.end()) {
+                    block->swapToBucket(m_blocksNotPendingSnapshotLoad[retval.second]);
+                //Check if the block goes into the pending snapshot set of buckets
+                } else if (m_blocksPendingSnapshot.find(block) != m_blocksPendingSnapshot.end()) {
+                    block->swapToBucket(m_blocksPendingSnapshotLoad[retval.second]);
+                } else {
+                    //In this case the block is actively being snapshotted and isn't eligible for merge operations at all
+                    //do nothing, once the block is finished by the iterator, the iterator will return it
+                }
             }
-        }
 
-        tuple->moveAndInitialize(retval.first);
-        ++m_tupleCount;
-        if (!block->hasFreeTuples()) {
-            m_blocksWithSpace.erase(block);
+            tuple->moveAndInitialize(retval.first);
+            ++m_tupleCount;
+            if (!block->hasFreeTuples()) {
+                m_blocksWithSpace.erase(block);
+            }
+            vassert(m_columnCount == tuple->columnCount());
+            return;
         }
-        vassert(m_columnCount == tuple->columnCount());
-        return;
     }
 
     // if there are no tuples free, we need to grab another chunk of memory
@@ -525,13 +550,6 @@ void PersistentTable::truncateTable(VoltDBEngine* engine) {
         }
     }
 
-    // If there is a purge fragment on the old table, pass it on to the new one
-    if (hasPurgeFragment()) {
-        vassert(! emptyTable->hasPurgeFragment());
-        boost::shared_ptr<ExecutorVector> evPtr = getPurgeExecutorVector();
-        emptyTable->swapPurgeExecutorVector(evPtr);
-    }
-
     if (m_shadowStream != nullptr) {
         m_shadowStream->moveWrapperTo(emptyTable->m_shadowStream);
         engine->setStreamTableByName(m_name, emptyTable->m_shadowStream);
@@ -589,11 +607,7 @@ struct CompiledSwap {
     }
 };
 
-#ifdef NDEBUG
-static bool hasNameIntegrity(std::string const& tableName, std::vector<std::string> const& indexNames) {
-    return true;
-}
-#else
+#ifndef NDEBUG
 static bool hasNameIntegrity(std::string const& tableName, std::vector<std::string> const& indexNames) {
     // Validate that future queries will be able to resolve the table
     // name and its associated index names.
@@ -771,13 +785,7 @@ bool PersistentTable::insertTuple(TableTuple& source) {
     return true;
 }
 
-TableTuple PersistentTable::insertPersistentTuple(TableTuple& source, bool fallible, bool ignoreTupleLimit) {
-    if (!ignoreTupleLimit && fallible && visibleTupleCount() >= m_tupleLimit) {
-        std::ostringstream str;
-        str << "Table " << m_name << " exceeds table maximum row count " << m_tupleLimit;
-        throw ConstraintFailureException(this, source, str.str());
-    }
-
+TableTuple PersistentTable::insertPersistentTuple(TableTuple& source, bool fallible) {
     //
     // First get the next free tuple
     // This will either give us one from the free slot list, or
@@ -845,6 +853,24 @@ void PersistentTable::doInsertTupleCommon(TableTuple& source, TableTuple& target
     target.setInlinedDataIsVolatileFalse();
     target.setNonInlinedDataIsVolatileFalse();
 
+    // Prepare migrating work
+    bool migrating = isTableWithMigrate(m_tableType);
+    int64_t txnId = 0ll;
+    if (migrating) {
+        vassert(m_shadowStream != nullptr);
+        uint16_t colIndex = getMigrateColumnIndex();
+        NValue txnIdVal = target.getHiddenNValue(colIndex);
+        if(!txnIdVal.isNull()){
+            txnId = ValuePeeker::peekBigInt(txnIdVal);
+            if (txnId == 0) {
+                // MaterializedViewTriggerForInsert::processTupleInsert sends tuples
+                // initialized from a zeroed-out buffer. Prevent a txnId == 0 from
+                // being inserted in the migrating rows. Must do this before indexing.
+                target.setHiddenNValue(colIndex, NValue::getNullValue(ValueType::tBIGINT));
+                VOLT_DEBUG("Nulled out migrating txnId column %d at address %p", colIndex, target.address());
+            }
+        }
+    }
 
     TableTuple conflict(m_schema);
     try {
@@ -869,13 +895,11 @@ void PersistentTable::doInsertTupleCommon(TableTuple& source, TableTuple& target
         target.setDirtyFalse();
     }
 
-    // add it to migrating index when loading tuple from a recover or rejoin snapshot (only)
-     if (isTableWithMigrate(m_tableType)) {
-         vassert(m_shadowStream != nullptr);
-         NValue txnId = target.getHiddenNValue(getMigrateColumnIndex());
-         if(!txnId.isNull()){
-            migratingAdd(ValuePeeker::peekBigInt(txnId), target);
-         }
+    // If inserted tuple had hidden txnId, add to migrating index (must only be when loading tuple
+    // from a recover or rejoin snapshot)
+     if (migrating && txnId != 0ll) {
+         VOLT_DEBUG("Add recovered/rejoined migrating txnId %lld at address %p", txnId, target.address());
+         migratingAdd(txnId, target);
      }
 
     // this is skipped for inserts that are never expected to fail,
@@ -958,6 +982,7 @@ void PersistentTable::insertTupleForUndo(char* tuple) {
     if (isTableWithMigrate(m_tableType)) {
        NValue txnId = target.getHiddenNValue(getMigrateColumnIndex());
        if (!txnId.isNull()) {
+          VOLT_DEBUG("Re-add migrating txnId %lld at address %p", ValuePeeker::peekBigInt(txnId), target.address());
           migratingAdd(ValuePeeker::peekBigInt(txnId), target);
        }
     }
@@ -1019,15 +1044,26 @@ void PersistentTable::updateTupleWithSpecificIndexes(
 
     if (isTableWithMigrate(m_tableType)) {
        uint16_t migrateColumnIndex = getMigrateColumnIndex();
-       NValue txnId = sourceTupleWithNewValues.getHiddenNValue(migrateColumnIndex);
-       if (txnId.isNull()) {
+       NValue txnIdValue = sourceTupleWithNewValues.getHiddenNValue(migrateColumnIndex);
+       if (txnIdValue.isNull()) {
            if (fromMigrate) {
                int64_t txnId = getTableTxnId();
+               VOLT_DEBUG("Set migrateColumn to txnId %lld at index %d on source %p, target %p",
+                       txnId,
+                       migrateColumnIndex,
+                       sourceTupleWithNewValues.address(),
+                       targetTupleToUpdate.address());
                sourceTupleWithNewValues.setHiddenNValue(migrateColumnIndex, ValueFactory::getBigIntValue(txnId));
            }
        } else {
+           int64_t txnId = ValuePeeker::peekBigInt(txnIdValue);
+           vassert(txnId != 0ll);       // Failing this might be in an uninitialized view tuple
+           VOLT_DEBUG("Remove and null out migrating txnId %lld on source %p, target %p",
+                   txnId,
+                   sourceTupleWithNewValues.address(),
+                   targetTupleToUpdate.address());
            sourceTupleWithNewValues.setHiddenNValue(migrateColumnIndex, NValue::getNullValue(ValueType::tBIGINT));
-           migratingRemove(ValuePeeker::peekBigInt(txnId), targetTupleToUpdate);
+           migratingRemove(txnId, targetTupleToUpdate);
        }
     }
 
@@ -1123,6 +1159,7 @@ void PersistentTable::updateTupleWithSpecificIndexes(
 
     if (fromMigrate) {
         vassert(isTableWithMigrate(m_tableType) && m_shadowStream != nullptr);
+        VOLT_DEBUG("Add migrating txnId %lld on target %p", getTableTxnId(), targetTupleToUpdate.address());
         migratingAdd(getTableTxnId(), targetTupleToUpdate);
         // add to shadow stream if the table is partitioned or partition 0 for replicated table
         if (!isReplicatedTable() || m_executorContext->getPartitionId() == 0) {
@@ -1242,10 +1279,13 @@ void PersistentTable::updateTupleForUndo(char* tupleWithUnwantedValues,
     if (fromMigrate) {
         vassert(m_shadowStream != nullptr);
         vassert(targetTupleToUpdate.getHiddenNValue(getMigrateColumnIndex()).isNull());
+        VOLT_DEBUG("Remove migrating txnId %lld on target %p", getTableTxnId(), targetTupleToUpdate.address());
         migratingRemove(getTableTxnId(), targetTupleToUpdate);
     } else if (isTableWithMigrate(m_tableType)) {
         NValue const txnId = targetTupleToUpdate.getHiddenNValue(getMigrateColumnIndex());
         if(!txnId.isNull()){
+            VOLT_DEBUG("Add migrating txnId %lld on target %p",
+                    ValuePeeker::peekBigInt(txnId), targetTupleToUpdate.address());
             migratingAdd(ValuePeeker::peekBigInt(txnId), targetTupleToUpdate);
         }
     }
@@ -1281,6 +1321,8 @@ void PersistentTable::deleteTuple(TableTuple& target, bool fallible, bool remove
     if (isTableWithMigrate(m_tableType) && removeMigratingIndex) {
         NValue txnId = target.getHiddenNValue(getMigrateColumnIndex());
         if (!txnId.isNull()) {
+            VOLT_DEBUG("Remove migrating txnId %lld on target %p",
+                    ValuePeeker::peekBigInt(txnId), target.address());
             migratingRemove(ValuePeeker::peekBigInt(txnId), target);
         }
     }
@@ -1428,6 +1470,8 @@ void PersistentTable::deleteTupleForUndo(char* tupleData, bool skipLookup) {
     if (isTableWithMigrate(m_tableType)) {
         NValue txnId = target.getHiddenNValue(getMigrateColumnIndex());
         if(!txnId.isNull()){
+            VOLT_DEBUG("Remove migrating txnId %lld on target %p",
+                    ValuePeeker::peekBigInt(txnId), target.address());
             migratingRemove(ValuePeeker::peekBigInt(txnId), target);
         }
     }
@@ -1691,7 +1735,7 @@ void PersistentTable::loadTuplesForLoadTable(SerializeInputBE &serialInput, Pool
         // exceptions should be thrown in the try-block is pretty
         // daring and likely not correct.
         processLoadedTuple(target, uniqueViolationOutput, serializedTupleCount, tupleCountPosition,
-                           caller.shouldDrStream(), caller.ignoreTupleLimit());
+                           caller.shouldDrStream());
     }
 
     //If unique constraints are being handled, write the length/size of constraints that occured
@@ -1715,14 +1759,8 @@ void PersistentTable::processLoadedTuple(TableTuple& tuple,
                                          ReferenceSerializeOutput* uniqueViolationOutput,
                                          int32_t& serializedTupleCount,
                                          size_t& tupleCountPosition,
-                                         bool shouldDRStreamRows,
-                                         bool ignoreTupleLimit) {
+                                         bool shouldDRStreamRows) {
     try {
-        if (!ignoreTupleLimit && visibleTupleCount() >= m_tupleLimit) {
-            std::ostringstream str;
-            str << "Table " << m_name << " exceeds table maximum row count " << m_tupleLimit;
-            throw ConstraintFailureException(this, tuple, str.str(), (! uniqueViolationOutput) ? &m_surgeon : NULL);
-        }
         insertTupleCommon(tuple, tuple, true, shouldDRStreamRows, !uniqueViolationOutput);
     } catch (ConstraintFailureException& e) {
         if ( ! uniqueViolationOutput) {
@@ -1907,7 +1945,7 @@ void PersistentTable::swapTuples(TableTuple& originalTuple,
                  vassert(it != m_migratingRows.end());
                  MigratingBatch& batch = it->second;
                  void* addr = originalTuple.address();
-                 size_t found = batch.erase(addr);
+                 __attribute__((unused)) size_t found = batch.erase(addr);
                  vassert(found == 1);
                  batch.emplace(destinationTuple.address());
             }
@@ -2239,11 +2277,7 @@ std::vector<uint64_t> PersistentTable::getBlockAddresses() const {
     return blockAddresses;
 }
 
-#ifdef NDEBUG
-static bool isExistingTableIndex(std::vector<TableIndex*>&, TableIndex*) {
-    return false;
-}
-#else
+#ifndef NDEBUG
 static bool isExistingTableIndex(std::vector<TableIndex*>& indexes, TableIndex* index) {
     BOOST_FOREACH (auto existingIndex, indexes) {
         if (existingIndex == index) {
@@ -2272,7 +2306,7 @@ TableIndex* PersistentTable::index(std::string const& name) const {
 }
 
 void PersistentTable::addIndex(TableIndex* index) {
-    vassert(!isExistingTableIndex(m_indexes, index));
+    vassert(! isExistingTableIndex(m_indexes, index));
 
     // fill the index with tuples... potentially the slow bit
     TableTuple tuple(m_schema);
@@ -2421,15 +2455,19 @@ void PersistentTable::migratingAdd(int64_t txnId, TableTuple& tuple) {
         it = m_migratingRows.emplace_hint(it, txnId, MigratingBatch());
     }
     void* addr = tuple.address();
-    auto const success = it->second.insert(addr);
+    __attribute__((unused)) auto const success =
+        it->second.insert(addr);
     vassert(success.second);
+    VOLT_DEBUG("Added migrating txnId %lld for address %p", txnId, addr);
 };
 
 bool PersistentTable::migratingRemove(int64_t txnId, TableTuple& tuple) {
     vassert(isTableWithMigrate(m_tableType) && m_shadowStream != nullptr);
     MigratingRows::iterator it = m_migratingRows.find(txnId);
     if (it == m_migratingRows.end()) {
-        vassert(false);
+        // Migrating views may be called to remove a migrating flag that
+        // hasn't been set yet
+        vassert(m_isMaterialized);
         return false;
     }
 
@@ -2437,7 +2475,9 @@ bool PersistentTable::migratingRemove(int64_t txnId, TableTuple& tuple) {
     if (it->second.empty()) {
         m_migratingRows.erase(it);
     }
+
     vassert(found == 1);
+    VOLT_DEBUG("Removed migrating txnId %lld for address %p", txnId, tuple.address());
     return found == 1;
 }
 
@@ -2460,6 +2500,9 @@ bool PersistentTable::deleteMigratedRows(int64_t deletableTxnId) {
    // will be deleted next round, one batch at a time
    BOOST_FOREACH (auto toDelete, batch) {
       targetTuple.move(toDelete);
+      VOLT_DEBUG("Deleting migrated tuple for txnId %lld hidden txnId %lld, address %p",
+              currIt->first, ValuePeeker::peekBigInt(targetTuple.getHiddenNValue(getMigrateColumnIndex())),
+              targetTuple.address());
       vassert(ValuePeeker::peekBigInt(targetTuple.getHiddenNValue(getMigrateColumnIndex())) == currIt->first);
       deleteTuple(targetTuple, true, false);
    }

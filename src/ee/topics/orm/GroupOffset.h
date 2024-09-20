@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2019 VoltDB Inc.
+ * Copyright (C) 2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -77,7 +77,7 @@ public:
     }
 
     /**
-     * Returns the timestmap for when this groffsetoup was last committed or -1 if this offset was never committed
+     * Returns the timestamp for when this groffsetoup was last committed or -1 if this offset was never committed
      */
     const int64_t getCommitTimestamp() const {
         return isInTable() ? ValuePeeker::peekTimestamp(getNValue(GroupOffsetTable::Column::COMMIT_TIMESTAMP)) : -1;

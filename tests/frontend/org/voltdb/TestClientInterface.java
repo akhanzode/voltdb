@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -93,7 +93,7 @@ public class TestClientInterface {
     private StatsAgent m_statsAgent = new StatsAgent() {
         @Override
         public void performOpsAction(final Connection c, final long clientHandle, final OpsSelector selector,
-                                     final ParameterSet params) throws Exception {
+                                     final ParameterSet params) {
             final String stat = (String)params.toArray()[0];
             if (stat.equals("TOPO") && !statsAnswers.isEmpty()) {
                 c.writeStream().enqueue(statsAnswers.poll());

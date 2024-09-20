@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -172,7 +172,7 @@ SnapshotCompletionInterest, Promotable
                               + "snapshot that is paired with the command log. "
                               + "All identified errors are listed next."
                               + "This is an unexpected condition. "
-                              + "Please contact support@voltdb.com\n");
+                              + "Please contact support@voltactivedata.com\n");
 
     private CommandLogReinitiator m_replayAgent = new DefaultCommandLogReinitiator();
 
@@ -185,6 +185,9 @@ SnapshotCompletionInterest, Promotable
                 // catalog plan.
                 findRestoreCatalog();
             }
+
+            // Initialize progress report
+            VoltDB.instance().reportNodeStartupProgress(0, m_liveHosts.size());
 
             try {
                 if (!m_isLeader) {
@@ -495,17 +498,18 @@ SnapshotCompletionInterest, Promotable
         m_liveHosts = ImmutableSet.copyOf(hostMessenger.getLiveHostIds());
         m_voltdbrootPath = voltdbrootPath;
         m_terminusNonce = terminusNonce;
-
-        initialize(action);
     }
 
-    private void initialize(StartAction startAction) {
+    void initialize(StartAction startAction, boolean returnSegments) {
         // Load command log reinitiator
         CommandLogReinitiator replayAgent = ProClass.newInstanceOf("org.voltdb.CommandLogReinitiatorImpl",
                 "Command log replay", ProClass.HANDLER_IGNORE, m_hostId, startAction, m_hostMessenger, m_clPath,
                 m_liveHosts);
         if (replayAgent != null) {
             m_replayAgent = replayAgent;
+        }
+        if (returnSegments) {
+            m_replayAgent.returnAllSegments();
         }
         m_replayAgent.setCallback(this);
     }
@@ -573,6 +577,7 @@ SnapshotCompletionInterest, Promotable
             VoltDB.crashLocalVoltDB("Unable to delete zk node " + m_generatedRestoreBarrier2, false, e);
         }
 
+        VoltDB.instance().reportNodeStartupProgress(1, m_liveHosts.size());
         if (m_callback != null) {
             m_callback.onSnapshotRestoreCompletion();
         }
@@ -587,6 +592,9 @@ SnapshotCompletionInterest, Promotable
             } catch (InterruptedException e2) {
                 continue;
             }
+
+            int completed = m_liveHosts.size() - children.size();
+            VoltDB.instance().reportNodeStartupProgress(completed, m_liveHosts.size());
 
             if (children.size() > 0) {
                 try {
@@ -706,10 +714,12 @@ SnapshotCompletionInterest, Promotable
         // Negotiate with other hosts about which snapshot to restore
         SnapshotInfo infoWithMinHostId = getRestorePlan();
         if (infoWithMinHostId != null && infoWithMinHostId.nonce.equals(m_terminusNonce)) {
-            m_replayAgent.returnAllSegments();
-            initialize(StartAction.CREATE);
+            LOG.info("Restoring database from shutdown snapshot " + m_terminusNonce + ". Command logs will not be used.");
+            initialize(StartAction.CREATE, true);
             m_planned = true;
             return infoWithMinHostId;
+        } else {
+            initialize(m_action, false);
         }
 
         /*
@@ -1327,9 +1337,11 @@ SnapshotCompletionInterest, Promotable
         // be reset and cleared as they are no longer valid.
         if (m_isLeader && m_action.doesRecover()) {
             VoltDBInterface instance = VoltDB.instance();
-            if (DrRoleType.MASTER.value().equals(instance.getCatalogContext().getCluster().getDrrole())) {
-                ByteBuffer params = ByteBuffer.allocate(4);
+            CatalogContext context = instance.getCatalogContext();
+            if (context != null && DrRoleType.MASTER.value().equals(context.getCluster().getDrrole())) {
+                ByteBuffer params = ByteBuffer.allocate(4+4);
                 params.putInt(ExecutionEngine.TaskType.RESET_DR_APPLIED_TRACKER.ordinal());
+                params.putInt(-1);
                 try {
                     ClientResponse cr = instance.getClientInterface()
                             .callExecuteTask(MAX_RESET_DR_APPLIED_TRACKER_TIMEOUT_MILLIS, params.array());

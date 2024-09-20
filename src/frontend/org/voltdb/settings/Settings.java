@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -30,7 +30,6 @@ import java.util.UUID;
 
 import org.voltdb.common.Constants;
 import org.voltdb.utils.Digester;
-import org.voltdb.utils.VoltFile;
 
 import org.aeonbits.owner.Accessible;
 import org.aeonbits.owner.ConfigFactory;
@@ -43,7 +42,7 @@ public interface Settings extends Accessible {
 
     public static void initialize(File voltdbroot) {
         if (ConfigFactory.getProperty(Settings.CONFIG_DIR) == null) try {
-            File confDH = new VoltFile(voltdbroot, Constants.CONFIG_DIR).getCanonicalFile();
+            File confDH = new File(voltdbroot, Constants.CONFIG_DIR).getCanonicalFile();
             String pathAsURI = confDH.toURI().getRawPath();
             ConfigFactory.setProperty(Settings.CONFIG_DIR, pathAsURI);
         } catch (IOException e) {
@@ -70,6 +69,7 @@ public interface Settings extends Accessible {
     default void store(File settingsFH, String comment) {
         try (FileOutputStream fos = new FileOutputStream(settingsFH)){
             asProperties().store(fos, comment);
+            fos.getFD().sync(); // fsync to ensure file is persisted
         } catch (IOException e) {
             throw new SettingsException("failed to write properties to " + settingsFH, e);
         }

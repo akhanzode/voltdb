@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -252,7 +252,7 @@ public final class ExpressionUtil {
                 case "function": {
                     final FunctionExpression expr = new FunctionExpression();
                     expr.setAttributes(elm.getStringAttribute("name", ""),
-                            elm.getStringAttribute("argument", null),
+                            elm.getStringAttribute("argument", null), elm.getStringAttribute("optionalArgument", null),
                             elm.getIntAttribute("id", 0));
                     expr.setArgs(elm.children.stream().map(elem -> from(db, elem, typeHint)).collect(Collectors.toList()));
                     expr.setValueType(VoltType.typeFromString(elm.getStringAttribute("valuetype", "")));

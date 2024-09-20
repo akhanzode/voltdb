@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -20,14 +20,13 @@ package org.voltdb.iv2;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
-import org.voltcore.logging.Level;
 import org.voltcore.messaging.Mailbox;
 import org.voltcore.messaging.TransactionInfoBaseMessage;
 import org.voltcore.utils.CoreUtils;
 import org.voltdb.SiteProcedureConnection;
 import org.voltdb.rejoin.TaskLog;
-import org.voltdb.utils.LogKeys;
 
 /**
  * Implements the Single-partition everywhere procedure ProcedureTask.
@@ -58,7 +57,7 @@ public class EveryPartitionTask extends TransactionTask
         m_mailbox.send(com.google_voltpatches.common.primitives.Longs.toArray(m_initiatorHSIds), m_initiationMsg);
         m_txnState.setDone();
         m_queue.flush(getTxnId());
-        execLog.l7dlog( Level.TRACE, LogKeys.org_voltdb_ExecutionSite_SendingCompletedWUToDtxn.name(), null);
+        execLog.trace("ExecutionSite sending completed workunit to dtxn.");
         hostLog.debug("COMPLETE: " + this);
     }
 
@@ -80,7 +79,8 @@ public class EveryPartitionTask extends TransactionTask
      * Currently only thread-"safe" by virtue of only calling this on
      * ProcedureTasks which are not at the head of the MPI's TransactionTaskQueue.
      */
-    public void updateMasters(List<Long> masters)
+    @Override
+    public void updateMasters(List<Long> masters, Map<Integer, Long> partitionMaster)
     {
         m_initiatorHSIds.clear();
         m_initiatorHSIds.addAll(masters);

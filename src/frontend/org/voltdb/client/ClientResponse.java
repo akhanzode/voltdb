@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -49,7 +49,7 @@ public interface ClientResponse {
     /**
      * Status code indicating the connection to the database that the invocation was queued at
      * was lost before a response was received. It is possible that the invocation was sent, executed, and successfully
-     * committed before a response could be returned or the invocation may never have been sent.
+     * committed before a response could be returned, or the invocation may never have been sent.
      */
     public static final byte CONNECTION_LOST = -4;
 
@@ -61,6 +61,9 @@ public interface ClientResponse {
 
     /**
      * Status code indicating that the request didn't receive a response before the per-client timeout.
+     * <p>
+     * This code is not used with the {@link Client2} interface, which uses distinct {@link #CLIENT_REQUEST_TIMEOUT}
+     * and {@link #CLIENT_RESPONSE_TIMEOUT} codes.
      */
     public static final byte CONNECTION_TIMEOUT = -6;
 
@@ -99,6 +102,54 @@ public interface ClientResponse {
      * could not be found for the table hash from the remote cluster. Used internally only.
      */
     public static final byte DR_TABLE_HASH_NOT_FOUND = -12;
+
+    /**
+     * An attempt was made to update the application catalog online, but the deployment contained
+     * changes that are not supported for online change. Reinitialization is required. This is
+     * a graceful failure.
+     */
+    public static final byte UNSUPPORTED_DYNAMIC_CHANGE = -13;
+
+    /**
+     * Status code indicating that the transaction failed in the client before it
+     * was sent to the VoltDB server. This status code is used for client errors
+     * other than timeouts.
+     * <p>
+     * Currently used only with the {@link Client2} interface.
+     */
+    public static final byte CLIENT_ERROR_TXN_NOT_SENT = -14;
+
+    /**
+     * Status code indicating that the request was timed out in the client
+     * before it could be sent to the VoltDB server.
+     * <p>
+     * Currently used only with the {@link Client2} interface.
+     */
+    public static final byte CLIENT_REQUEST_TIMEOUT = -15;
+
+    /**
+     * Status code indicating that the request was timed out in the client
+     * while waiting for a response from the VoltDB server. No conclusion can
+     * be drawn about whether the transaction has been executed.
+     * <p>
+     * Currently used only with the {@link Client2} interface.
+     */
+    public static final byte CLIENT_RESPONSE_TIMEOUT = -16;
+
+    /**
+     * Status indicating that a compound procedure was aborted by explicit
+     * action of the stored procedure. No rollback was performed; transactions
+     * submitted by the procedure and successfully completed remain committed.
+     */
+    public static final byte COMPOUND_PROC_USER_ABORT = -17;
+
+    /**
+     * Status code indicating that a compound procedure is taking longer than a
+     * sufficiently large timeout. The procedure may either be slow, deadlocked, or looping
+     * infinitely. The timeout response is sent even if the procedure subsequently
+     * completes.
+     */
+    public static final byte COMPOUND_PROC_TIMEOUT = -18;
 
     /**
      * Default value for the user specified app status code field

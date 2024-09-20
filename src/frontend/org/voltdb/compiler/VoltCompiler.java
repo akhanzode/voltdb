@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -45,15 +45,12 @@ import java.util.regex.Pattern;
 
 import javax.xml.bind.JAXBException;
 
-import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.hsqldb_voltpatches.HSQLInterface;
-import org.hsqldb_voltpatches.VoltXMLElement;
 import org.voltcore.TransactionIdManager;
 import org.voltcore.logging.VoltLogger;
-import org.voltcore.utils.Pair;
 import org.voltdb.CatalogContext;
 import org.voltdb.ProcedurePartitionData;
 import org.voltdb.RealVoltDB;
@@ -66,6 +63,7 @@ import org.voltdb.catalog.Catalog;
 import org.voltdb.catalog.CatalogMap;
 import org.voltdb.catalog.Cluster;
 import org.voltdb.catalog.Column;
+import org.voltdb.catalog.Connector;
 import org.voltdb.catalog.Database;
 import org.voltdb.catalog.Deployment;
 import org.voltdb.catalog.FilteredCatalogDiffEngine;
@@ -733,7 +731,7 @@ public class VoltCompiler {
      * @return true if successful
      */
     private boolean compileInternalToFile(
-            final String jarOutputPath, final VoltCompilerReader cannonicalDDLIfAny, final Catalog previousCatalogIfAny,
+            final String jarOutputPath, final VoltCompilerReader canonicalDDLIfAny, final Catalog previousCatalogIfAny,
             final List<VoltCompilerReader> ddlReaderList, final InMemoryJarfile jarOutputRet) {
         if (jarOutputPath == null) {
             addErr("The output jar path is null.");
@@ -742,7 +740,7 @@ public class VoltCompiler {
 
         // NOTE/TODO: All the callers of this is not from AdHoc code branch. We use the old code path here, and don't update CalciteSchema from VoltDB catalog.
         final InMemoryJarfile jarOutput = compileInternal(
-                cannonicalDDLIfAny, previousCatalogIfAny, ddlReaderList, Collections.emptyList(), jarOutputRet);
+                canonicalDDLIfAny, previousCatalogIfAny, ddlReaderList, Collections.emptyList(), jarOutputRet);
         try {
             if (jarOutput == null) {
                 return false;
@@ -763,12 +761,14 @@ public class VoltCompiler {
         // try to get a catalog context
         CatalogContext catalogContext = voltdb != null ? voltdb.getCatalogContext() : null;
         ClusterSettings clusterSettings = catalogContext != null ? catalogContext.getClusterSettings() : null;
-        int tableCount = catalogContext != null ? catalogContext.tables.size() : 0;
-        Deployment deployment = catalogContext != null ? catalogContext.cluster.getDeployment().get("deployment") : null;
+        CatalogMap<Table> tables = catalogContext != null ? catalogContext.getTables() : null;
+        int tableCount = tables != null ? tables.size() : 0;
+        Cluster cluster = catalogContext != null ? catalogContext.getCluster() : null;
+        Deployment deployment = cluster != null ?  cluster.getDeployment().get("deployment") : null;
         int hostcount = clusterSettings != null ? clusterSettings.hostcount() : 1;
         int kfactor = deployment != null ? deployment.getKfactor() : 0;
         int sitesPerHost = 8;
-        if  (voltdb != null && voltdb.getCatalogContext() != null) {
+        if  (catalogContext != null && catalogContext.getNodeSettings()!= null) {
             sitesPerHost =  voltdb.getCatalogContext().getNodeSettings().getLocalSitesCount();
         }
         boolean isPro = MiscUtils.isPro();
@@ -783,7 +783,7 @@ public class VoltCompiler {
     /**
      * Internal method for compiling with and without a project.xml file or DDL files.
      *
-     * @param cannonicalDDLIfAny ???
+     * @param canonicalDDLIfAny ???
      * @param previousCatalogIfAny
      * @param ddlReaderList The list of DDL files to read and compile ??? (when no project is provided).
      * @param sqlNodes Calcite SqlNodes for DDL stmts
@@ -793,7 +793,7 @@ public class VoltCompiler {
      * return value will be the same object, not a copy.
      */
     private InMemoryJarfile compileInternal(
-            final VoltCompilerReader cannonicalDDLIfAny, final Catalog previousCatalogIfAny,
+            final VoltCompilerReader canonicalDDLIfAny, final Catalog previousCatalogIfAny,
             final List<VoltCompilerReader> ddlReaderList, final List<SqlNode> sqlNodes,
             final InMemoryJarfile jarOutputRet) {
         // Expect to have either >1 ddl file or a project file.
@@ -812,7 +812,7 @@ public class VoltCompiler {
         m_errors.clear();
 
         // do all the work to get the catalog
-        final Catalog catalog = compileCatalogInternal(cannonicalDDLIfAny, previousCatalogIfAny, ddlReaderList, sqlNodes, jarOutput);
+        final Catalog catalog = compileCatalogInternal(canonicalDDLIfAny, previousCatalogIfAny, ddlReaderList, sqlNodes, jarOutput);
         if (catalog == null) {
             return null;
         }
@@ -917,7 +917,7 @@ public class VoltCompiler {
     /**
      * Internal method for compiling the catalog.
      *
-     * @param cannonicalDDLIfAny catalog-related info parsed from a project file ???
+     * @param canonicalDDLIfAny catalog-related info parsed from a project file ???
      * @param previousCatalogIfAny previous catalog object, null if not exists
      * @param ddlReaderList Reader objects for ddl files.
      * @param sqlNodes Calcite SqlNodes for DDL stmts
@@ -925,7 +925,7 @@ public class VoltCompiler {
      * @return true if successful
      */
     private Catalog compileCatalogInternal(
-            final VoltCompilerReader cannonicalDDLIfAny, final Catalog previousCatalogIfAny,
+            final VoltCompilerReader canonicalDDLIfAny, final Catalog previousCatalogIfAny,
             final List<VoltCompilerReader> ddlReaderList, final List<SqlNode> sqlNodes, final InMemoryJarfile jarOutput) {
         m_catalog = new Catalog();
         // Initialize the catalog for one cluster
@@ -938,7 +938,7 @@ public class VoltCompiler {
             if (previousCatalogIfAny != null) {
                 previousDBIfAny = previousCatalogIfAny.getClusters().get("cluster").getDatabases().get("database");
             }
-            compileDatabaseNode(cannonicalDDLIfAny, previousDBIfAny, ddlReaderList, sqlNodes, jarOutput);
+            compileDatabaseNode(canonicalDDLIfAny, previousDBIfAny, ddlReaderList, sqlNodes, jarOutput);
         } catch (final VoltCompilerException e) {
             return null;
         }
@@ -1038,13 +1038,13 @@ public class VoltCompiler {
     /**
      * Load a ddl file with full support for VoltDB extensions (partitioning, procedures,
      * export), AND full support for input via a project xml file's "database" node.
-     * @param cannonicalDDLIfAny catalog-related info parsed from a project file
+     * @param canonicalDDLIfAny catalog-related info parsed from a project file
      * @param ddlReaderList Reader objects for ddl files.
      * @param jarOutput The in-memory jar to populate or null if the caller doesn't provide one.
      * @throws VoltCompilerException
      */
     private void compileDatabaseNode(
-            VoltCompilerReader cannonicalDDLIfAny, Database previousDBIfAny,
+            VoltCompilerReader canonicalDDLIfAny, Database previousDBIfAny,
             final List<VoltCompilerReader> ddlReaderList, final List<SqlNode> sqlNodes,
             final InMemoryJarfile jarOutput) throws VoltCompilerException {
         final ArrayList<Class<?>> classDependencies = new ArrayList<>();
@@ -1054,7 +1054,7 @@ public class VoltCompiler {
 
         // shutdown and make a new hsqldb <-- NOTE
         HSQLInterface hsql = HSQLInterface.loadHsqldb(ParameterizationInfo.getParamStateManager());
-        compileDatabase(db, hsql, voltDdlTracker, cannonicalDDLIfAny, previousDBIfAny,
+        compileDatabase(db, hsql, voltDdlTracker, canonicalDDLIfAny, previousDBIfAny,
                 ddlReaderList, sqlNodes, classDependencies, DdlProceduresToLoad.ALL_DDL_PROCEDURES, jarOutput);
     }
 
@@ -1064,7 +1064,7 @@ public class VoltCompiler {
      * @param db the database entry in the catalog
      * @param hsql an interface to the hsql frontend, initialized and potentially reused by the caller.
      * @param voltDdlTracker non-standard VoltDB schema annotations, initially those from a project file
-     * @param cannonicalDDLIfAny ???
+     * @param canonicalDDLIfAny ???
      * @param previousDBIfAny previous db catalog object, null if not exists???
      * @param sqlNodes Calcite SqlNodes for DDL stmts
      * @param classDependencies optional additional jar files required by procedures
@@ -1073,7 +1073,7 @@ public class VoltCompiler {
      */
     private void compileDatabase(
             Database db, HSQLInterface hsql, VoltDDLElementTracker voltDdlTracker,
-            VoltCompilerReader cannonicalDDLIfAny, Database previousDBIfAny, List<VoltCompilerReader> schemaReaders,
+            VoltCompilerReader canonicalDDLIfAny, Database previousDBIfAny, List<VoltCompilerReader> schemaReaders,
             List<SqlNode> sqlNodes, Collection<Class<?>> classDependencies, DdlProceduresToLoad whichProcs,
             InMemoryJarfile jarOutput) throws VoltCompilerException {
         // Actually parse and handle all the DDL
@@ -1091,10 +1091,10 @@ public class VoltCompiler {
             // in case we encounter a compilation error.
             //
             ddlcompiler.saveDefinedFunctions();
-            if (cannonicalDDLIfAny != null) {
+            if (canonicalDDLIfAny != null) {
                 // add the file object's path to the list of files for the jar
-                m_ddlFilePaths.put(cannonicalDDLIfAny.getName(), cannonicalDDLIfAny.getPath());
-                ddlcompiler.loadSchema(cannonicalDDLIfAny, db, previousDBIfAny, whichProcs, false);
+                m_ddlFilePaths.put(canonicalDDLIfAny.getName(), canonicalDDLIfAny.getPath());
+                ddlcompiler.loadSchema(canonicalDDLIfAny, db, previousDBIfAny, whichProcs, false);
             }
 
             m_dirtyTables.clear();
@@ -1123,15 +1123,7 @@ public class VoltCompiler {
             // When A/A is enabled, create an export table for every DR table to log possible conflicts
             ddlcompiler.loadAutogenExportTableSchema(db, previousDBIfAny, whichProcs, m_isXDCR);
             sqlNodes.forEach(node -> {
-                final Pair<SchemaPlus, Pair<Statement, VoltXMLElement>> r = CreateTableUtils.addTable(node, hsql, db);
-                if (r.getSecond() != null) {
-                    final Statement stmt = r.getSecond().getFirst();
-                    final VoltXMLElement elm = r.getSecond().getSecond();
-                    ddlcompiler.getLimitDeleteStmtToXmlEntries().put(stmt, elm);
-//                } else {      // TODO: explicitly left CREATE INDEX switch off till we resolve all CatalogDiff errors
-//                  // First, need to make tests/testprocs/org/voltdb_testprocs/regressionsuites/matviewprocs/matviewsuite-ddl.sql work.
-//                    final SchemaPlus sc = CreateIndexUtils.run(node, previousDBIfAny, db);
-                }
+                CreateTableUtils.addTable(node, db);
             });
             ddlcompiler.compileToCatalog(db, m_isXDCR); // NOTE: this is the place catalog gets added for create table.
 
@@ -1169,29 +1161,11 @@ public class VoltCompiler {
             // add extra classes from the DDL
             m_addedClasses = voltDdlTracker.m_extraClassses.toArray(new String[0]);
             addExtraClasses(jarOutput);
-
-            compileRowLimitDeleteStmts(db, hsql, ddlcompiler.getLimitDeleteStmtToXmlEntries());
         } catch (Throwable ex) {
             ddlcompiler.restoreSavedFunctions();
             throw ex;
         }
         ddlcompiler.clearSavedFunctions();
-    }
-
-    private void compileRowLimitDeleteStmts(
-            Database db, HSQLInterface hsql, Map<Statement, VoltXMLElement> deleteStmtXmlEntries)
-            throws VoltCompilerException {
-        for (Map.Entry<Statement, VoltXMLElement> entry : deleteStmtXmlEntries.entrySet()) {
-            Statement stmt = entry.getKey();
-            VoltXMLElement xml = entry.getValue();
-
-            // choose DeterminismMode.FASTER for determinism, and rely on the planner to error out
-            // if we generated a plan that is content-non-deterministic.
-            StatementCompiler.compileStatementAndUpdateCatalog(
-                    this, hsql, db, m_estimates, stmt, xml, stmt.getSqltext(),
-                    null, // no user-supplied join order
-                    DeterminismMode.FASTER, StatementPartitioning.partitioningForRowLimitDelete(), false);
-        }
     }
 
     /**
@@ -1322,61 +1296,32 @@ public class VoltCompiler {
 
     void addExportTableToConnector(final String targetName, final String tableName, final Database catdb)
             throws VoltCompilerException {
-        assert tableName != null && ! tableName.trim().isEmpty() && catdb != null;
+        assert !StringUtils.isBlank(tableName) && catdb != null;
 
         // Catalog Connector
-        org.voltdb.catalog.Connector catconn = catdb.getConnectors().getIgnoreCase(targetName);
+        Connector catconn = catdb.getConnectors().getIgnoreCase(targetName);
         if (catconn == null) {
             catconn = catdb.getConnectors().add(targetName);
         }
-        org.voltdb.catalog.Table tableref = catdb.getTables().getIgnoreCase(tableName);
+        Table tableref = catdb.getTables().getIgnoreCase(tableName);
         if (tableref == null) {
             throw new VoltCompilerException("While configuring export, table " + tableName + " was not present in " +
             "the catalog.");
         } else if (TableType.isStream(tableref.getTabletype())) {
-            // streams cannot have tuple limits
-            if (tableref.getTuplelimit() != Integer.MAX_VALUE) {
-                throw new VoltCompilerException("Streams cannot have row limits configured");
-            }
-            Column pc = tableref.getPartitioncolumn();
-            //Get views
-            List<Table> tlist = CatalogUtil.getMaterializeViews(catdb, tableref);
-            if (pc == null && tlist.size() != 0) {
-                compilerLog.error("While configuring export, stream " + tableName + " is a source table " +
-                        "for a materialized view. Streams support views as long as partitioned column is part of the view.");
-                throw new VoltCompilerException("Stream configured with materialized view without partitioned column.");
-            }
-            if (pc != null && pc.getName() != null && tlist.size() != 0) {
-                for (Table t : tlist) {
-                    if (t.getColumns().get(pc.getName()) == null) {
-                        compilerLog.error("While configuring export, table " + t + " is a source table " +
-                                "for a materialized view. Export only tables support views as long as partitioned column is part of the view.");
-                        throw new VoltCompilerException("Stream configured with materialized view without partitioned column in the view.");
-                    } else {
-                        //Set partition column of view table to partition column of stream
-                        t.setPartitioncolumn(t.getColumns().get(pc.getName()));
-                    }
-                }
-            }
+            checkExportedStream(tableref, catdb, "export");
+
             // This is used to enforce default connectors assigned to streams through the Java Property
             // for streams that don't have the Export To Target clause
             if (TableType.isConnectorLessStream(tableref.getTabletype()) && System.getProperty(ExportDataProcessor.EXPORT_TO_TYPE) != null) {
                 tableref.setTabletype(TableType.STREAM.get());
             }
         }
-        if (tableref.getMaterializer() != null) {
+
+        // Reject materialized views except if migrating view
+        if (tableref.getMaterializer() != null && !TableType.isPersistentMigrate(tableref.getTabletype())) {
             compilerLog.error("While configuring export, " + tableName + " is a " +
                                         "materialized view.  A view cannot be export source.");
             throw new VoltCompilerException("View configured as export source");
-        } else if (tableref.getIndexes().size() > 0 && TableType.isStream(tableref.getTabletype())) {
-            compilerLog.error("While configuring export, stream " + tableName + " has indexes defined. " +
-                    "Streams can't have indexes (including primary keys).");
-            throw new VoltCompilerException("Streams cannot be configured with indexes");
-        } else if (tableref.getIsreplicated() && !TableType.needsShadowStream(tableref.getTabletype())) {
-            // if you don't specify partition columns, make
-            // export tables partitioned, but on no specific column (iffy)
-            tableref.setIsreplicated(false);
-            tableref.setPartitioncolumn(null);
         }
         org.voltdb.catalog.ConnectorTableInfo connTableInfo =
                 catconn.getTableinfo().getIgnoreCase(tableName);
@@ -1388,14 +1333,54 @@ public class VoltCompiler {
         } else  {
             throw new VoltCompilerException(String.format("Table \"%s\" is already exported", tableName));
         }
+    }
 
+    // Note: this method has side-effects on the stream being checked, and the views using it
+    void checkExportedStream(Table table, final Database catdb, String what) throws VoltCompilerException {
+        assert TableType.isStream(table.getTabletype());
+
+        // Check views on stream
+        Column pc = table.getPartitioncolumn();
+        List<Table> tlist = CatalogUtil.getMaterializeViews(catdb, table);
+
+        if (pc == null && tlist.size() != 0) {
+            compilerLog.error("While configuring " + what + ", stream " + table.getTypeName() + " is a source table " +
+                    "for a materialized view. Streams support views as long as partitioned column is part of the view.");
+            throw new VoltCompilerException("Stream configured with materialized view without partitioned column.");
+        }
+        if (pc != null && pc.getName() != null && tlist.size() != 0) {
+            for (Table t : tlist) {
+                if (t.getColumns().get(pc.getName()) == null) {
+                    compilerLog.error("While configuring " + what + ", table " + t + " is a source table " +
+                            "for a materialized view. Export only tables support views as long as partitioned column is part of the view.");
+                    throw new VoltCompilerException("Stream configured with materialized view without partitioned column in the view.");
+                } else {
+                    //Set partition column of view table to partition column of stream
+                    t.setPartitioncolumn(t.getColumns().get(pc.getName()));
+                }
+            }
+        }
+
+        // Other checks
+        if (table.getIndexes().size() > 0) {
+            compilerLog.error("While configuring " + what + ", stream " + table + " has indexes defined. " +
+                    "Streams can't have indexes (including primary keys).");
+            throw new VoltCompilerException("Streams cannot be configured with indexes");
+        }
+
+        // Streams exporting to topic or target should never be set to replicated even if no partition column
+        // exists. The results are "partitioned" streams with no partitioning column (iffy).
+        if (table.getIsreplicated()) {
+            table.setIsreplicated(false);
+            table.setPartitioncolumn(null);
+        }
     }
 
     void compileDRTable(final Entry<String, String> drNode, final Database db) throws VoltCompilerException {
         String tableName = drNode.getKey();
         String action = drNode.getValue();
 
-        org.voltdb.catalog.Table tableref = db.getTables().getIgnoreCase(tableName);
+        Table tableref = db.getTables().getIgnoreCase(tableName);
         if (tableref.getMaterializer() != null) {
             throw new VoltCompilerException("While configuring dr, table " + tableName + " is a materialized view." +
                     " DR does not support materialized view.");
@@ -2105,7 +2090,7 @@ public class VoltCompiler {
                                         "upgrade is available in \"%s\".",
                                 versionFromCatalog, versionFromVoltDB, outputTextPath));
                         throw new IOException(String.format(
-                                "Catalog upgrade failed. You will need to recompile using voltdb compile."));
+                                "Catalog upgrade failed. You will need to recompile."));
                     }
                 }
             } catch (IOException ioe) { // Do nothing because this could come from the normal failure path
@@ -2122,7 +2107,7 @@ public class VoltCompiler {
                                 "upgrade is available in \"%s\".",
                         versionFromCatalog, versionFromVoltDB, outputTextPath));
                 throw new IOException(String.format(
-                        "Catalog upgrade failed. You will need to recompile using voltdb compile."));
+                        "Catalog upgrade failed. You will need to recompile."));
             } finally {
                 // Restore the original class loader
                 m_classLoader = originalClassLoader;

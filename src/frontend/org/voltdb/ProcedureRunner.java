@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -34,6 +34,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Random;
 import java.util.concurrent.ExecutionException;
+import java.util.function.IntFunction;
 
 import org.voltcore.logging.VoltLogger;
 import org.voltcore.network.VoltPort;
@@ -210,7 +211,7 @@ public class ProcedureRunner {
                                     site.getCorrespondingPartitionId(),
                                     m_catProc,
                                     m_stmtList,
-                                    true);
+                                    ProcedureStatsCollector.ProcType.TRANS);
         VoltDB.instance().getStatsAgent().registerStatsSource(StatsSelector.PROCEDURE,
                                                               site.getCorrespondingSiteId(),
                                                               m_statsCollector);
@@ -277,9 +278,36 @@ public class ProcedureRunner {
     }
 
     /**
+     * Wraps coreCall
+     */
+    public ClientResponseImpl call(Object[] paramListIn, boolean returnResults,
+                                   boolean keepParamsImmutable) {
+        return call(true, paramListIn, returnResults, keepParamsImmutable);
+    }
+
+    /**
      * Wraps coreCall with statistics code.
      */
-    public ClientResponseImpl call(Object... paramListIn) {
+    public ClientResponseImpl call(boolean resetHash, Object[] paramListIn) {
+        return call(true, paramListIn, true, false);
+    }
+
+    /**
+     * Wraps coreCall with statistics code and allows the caller to choose if the determinism hash is reset prior to
+     * calling the procedure.
+     * <p>
+     * NOTE: {@code resetHash} should almost always be true unless this a subsequent execution of the procedure in a
+     * batch procedure call
+     *
+     * @param resetHash   if {@code true} {@link #m_determinismHash} will be reset prior to the procedure call
+     * @param paramListIn array of parameters to pass to the procedure
+     * @param returnResults if it is true, return result tables in the response
+     * @return result of the procedure being invoked
+     */
+    private ClientResponseImpl call(boolean resetHash,
+                                    Object[] paramListIn,
+                                    boolean returnResults,
+                                    boolean keepParamsImmutable) {
         m_perCallStats = m_statsCollector.beginProcedure();
 
         // if we're keeping track, calculate parameter size
@@ -289,17 +317,14 @@ public class ProcedureRunner {
             m_perCallStats.setParameterSize(params.getSerializedSize());
         }
 
-        ClientResponseImpl result = coreCall(paramListIn);
+        ClientResponseImpl result = coreCall(resetHash, paramListIn, returnResults, keepParamsImmutable);
 
         // if we're keeping track, calculate result size
         if (m_perCallStats != null) {
             m_perCallStats.setResultSize(result.getResults());
         }
+        m_statsCollector.endProcedure(result.aborted(), result.failed(), m_perCallStats);
 
-        m_statsCollector.endProcedure(result.getStatus() == ClientResponse.USER_ABORT,
-                                      (result.getStatus() != ClientResponse.USER_ABORT) &&
-                                      (result.getStatus() != ClientResponse.SUCCESS),
-                                      m_perCallStats);
         // allow the GC to collect per-call stats if this proc isn't called for a while
         m_perCallStats = null;
 
@@ -316,7 +341,10 @@ public class ProcedureRunner {
     }
 
     @SuppressWarnings("finally")
-    private ClientResponseImpl coreCall(Object... paramListIn) {
+    private ClientResponseImpl coreCall(boolean resetHash,
+                                        Object[] paramListIn,
+                                        boolean returnResults,
+                                        boolean keepParamsImmutable) {
         // verify per-txn state has been reset
         assert(m_statusCode == ClientResponse.SUCCESS);
         assert(m_statusString == null);
@@ -336,8 +364,10 @@ public class ProcedureRunner {
         // use local var to avoid warnings about reassigning method argument
         Object[] paramList = paramListIn;
 
-        // catalog version and statement count are part of the CRC, reset them for a new call
-        m_determinismHash.reset(m_site.getSystemProcedureExecutionContext().getCatalogVersion());
+        if (resetHash) {
+            // catalog version and statement count are part of the CRC, reset them for a new call
+            m_determinismHash.reset(m_site.getSystemProcedureExecutionContext().getCatalogVersion());
+        }
 
         ClientResponseImpl retval = null;
         // assert no sql is queued
@@ -348,6 +378,9 @@ public class ProcedureRunner {
 
             // inject sysproc execution context as the first parameter.
             if (isSystemProcedure()) {
+                // Regardless of what the systemsettings says all sysprocs dont require a copy of the parameter.
+                // If you write a new sysproc that modifies param you are doing it wrong.
+                keepParamsImmutable = false;
                 final Object[] combinedParams = new Object[paramList.length + 1];
                 combinedParams[0] = m_site.getSystemProcedureExecutionContext();
                 for (int i=0; i < paramList.length; ++i) {
@@ -366,7 +399,7 @@ public class ProcedureRunner {
 
             for (int i = 0; i < m_paramTypes.length; i++) {
                 try {
-                    paramList[i] = ParameterConverter.tryToMakeCompatible(m_paramTypes[i], paramList[i]);
+                    paramList[i] = ParameterConverter.tryToMakeCompatible(m_paramTypes[i], paramList[i], keepParamsImmutable);
                     // check the result type in an assert
                     assert(ParameterConverter.verifyParameterConversion(paramList[i], m_paramTypes[i]));
                 } catch (Exception e) {
@@ -385,8 +418,9 @@ public class ProcedureRunner {
                     }
                     try {
                         Object rawResult = m_procMethod.invoke(m_procedure, paramList);
-
-                        results = ParameterConverter.getResultsFromRawResults(m_procedureName, rawResult);
+                        if (returnResults) {
+                            results = ParameterConverter.getResultsFromRawResults(m_procedureName, rawResult);
+                        }
                     } catch (IllegalAccessException e) {
                         // If reflection fails, invoke the same error handling that other exceptions do
                         throw new InvocationTargetException(e);
@@ -518,6 +552,19 @@ public class ProcedureRunner {
      * @return true if the txn hashes to the current partition, false otherwise
      */
     public boolean checkPartition(TransactionState txnState, TheHashinator hashinator) {
+        return checkPartition(txnState, hashinator, txnState.getInvocation()::getParameterAtIndex);
+    }
+
+    /**
+     * Check if the partition parameter hashes to this partition
+     *
+     * @param txnState           current {@link TransactionState}
+     * @param hashinator         current {@link TheHashinator} to be used to calculate the partition
+     * @param parameterRetriever {@link IntFunction} to retrieve parameters that are part of the invocation
+     * @return {@code true} if the partition parameter matches this partition
+     */
+    public boolean checkPartition(TransactionState txnState, TheHashinator hashinator,
+            IntFunction<Object> parameterRetriever) {
         if (m_isSinglePartition) {
             if (m_partitionColumn == -1) {
                 // Procedure doesn't have a partition column so this is always the correct partition
@@ -546,8 +593,8 @@ public class ProcedureRunner {
             // check if AdHoc_RO_SP or AdHoc_RW_SP
             if (m_procedure instanceof AdHocBase) {
                 // ClientInterface should pre-validate this param is valid
-                parameterAtIndex = invocation.getParameterAtIndex(0);
-                parameterType = VoltType.get((Byte) invocation.getParameterAtIndex(1));
+                parameterAtIndex = parameterRetriever.apply(0);
+                parameterType = VoltType.get((Byte) parameterRetriever.apply(1));
 
                 if (parameterAtIndex == null && m_isReadOnly) {
                     assert (m_procedure instanceof AdHoc_RO_SP);
@@ -557,7 +604,7 @@ public class ProcedureRunner {
 
             } else {
                 parameterType = m_partitionColumnType;
-                parameterAtIndex = invocation.getParameterAtIndex(m_partitionColumn);
+                parameterAtIndex = parameterRetriever.apply(m_partitionColumn);
             }
 
             // Note that @LoadSinglepartitionTable has problems if the parititoning param
@@ -585,7 +632,7 @@ public class ProcedureRunner {
             if (!m_catProc.getEverysite() && m_site.getCorrespondingPartitionId() != MpInitiator.MP_INIT_PID) {
                 log.warn("Detected MP transaction misrouted to SPI. This can happen during a schema update. " +
                         "Otherwise, it is unexpected behavior. " +
-                        "Please report the following information to support@voltdb.com");
+                        "Please report the following information to support@voltactivedata.com");
                 log.warn("procedure name: " + m_catProc.getTypeName() +
                         ", site partition id: " + m_site.getCorrespondingPartitionId() +
                         ", site HSId: " + m_site.getCorrespondingHostId() + ":" + m_site.getCorrespondingSiteId() +
@@ -897,11 +944,12 @@ public class ProcedureRunner {
         setupTransaction(txnState);
         assert (m_procedure instanceof VoltSystemProcedure);
         VoltSystemProcedure sysproc = (VoltSystemProcedure) m_procedure;
-        return sysproc.executePlanFragment(dependencies, fragmentId, params, m_site.getSystemProcedureExecutionContext());
+        return sysproc.executePlanFragment(dependencies, fragmentId, params,
+                m_site.getSystemProcedureExecutionContext());
     }
 
-    private final void throwIfInfeasibleTypeConversion(SQLStmt stmt, Class<?> argClass, int argInd,
-            VoltType expectedType) {
+    private void throwIfInfeasibleTypeConversion(SQLStmt stmt, Class<?> argClass, int argInd,
+                                                 VoltType expectedType) {
         if (argClass.isArray()) {
             // The statement parameter model doesn't currently support a
             // general concept of an array-typed parameter. Instead, it
@@ -1177,7 +1225,7 @@ public class ProcedureRunner {
 
     /**
      * Test whether or not the given stack frame is within a procedure invocation
-     * @param The name of the procedure
+     * @param procedureName name of the procedure
      * @param stel a stack trace element
      * @return true if it is, false it is not
      */
@@ -1632,5 +1680,9 @@ public class ProcedureRunner {
             }
         }
         return results;
+    }
+
+    public int getPartitionId() {
+        return m_site.getSystemProcedureExecutionContext().getPartitionId();
     }
 }

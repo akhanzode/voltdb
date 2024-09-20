@@ -1,5 +1,5 @@
 # This file is part of VoltDB.
-# Copyright (C) 2008-2020 VoltDB Inc.
+# Copyright (C) 2008-2022 Volt Active Data Inc.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -14,37 +14,47 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with VoltDB.  If not, see <http://www.gnu.org/licenses/>.
 
+import os
 from glob import glob
 
 # Main Java Class
 VoltDB = 'org.voltdb.VoltDB'
 
 def _listOfGlobsToFiles(pathGlobs):
-    result = set()
-    for pathGlob in pathGlobs:
-        globRes = glob(pathGlob.strip())
+    result = list() # must preserve order
+    uniq = set()
+    for pg in pathGlobs:
+        pathGlob = os.path.expanduser(pg.strip())
+        globRes = glob(pathGlob)
         if globRes:
-            result.update(globRes)
+            for path in globRes:
+                _addUnique(result, uniq, path)
         else:
-            result.add(pathGlob)
+            _addUnique(result, uniq, pathGlob)
     return ",".join(result)
+
+def _addUnique(result, uniq, path):
+    if path not in uniq:
+        result.append(path)
+        uniq.add(path)
 
 @VOLT.Command(
     options = (
-        VOLT.StringOption('-C', '--config', 'configfile',
-                         'specify the location of the deployment file',
-                          default = None),
-        VOLT.StringOption('-D', '--dir', 'directory_spec',
-                          'Specifies the root directory for the database. The default is voltdbroot under the current working directory.',
-                          default = None),
+        VOLT.PathOption('-C', '--config', 'configfile',
+                        'specify the location of the deployment file'),
+        VOLT.PathOption('-D', '--dir', 'directory_spec',
+                        'Specifies the root directory for the database. The default is voltdbroot under the current working directory.'),
         VOLT.BooleanOption('-f', '--force', 'force',
-                           'Initialize a new, empty database. Any previous session will be overwritten.'),
+                           'Initialize a new, empty database. Any previous session will be overwritten. Existing snapshot directories are archived.'),
+        VOLT.IntegerOption('-r', '--retain', 'retain',
+                           'Specifies how many generations of archived snapshots directories will be retained when --force is used. Defaults to 2. The value 0 is allowed.'),
         VOLT.StringListOption('-s', '--schema', 'schemas',
                            'Specifies a list of schema files or paths with wildcards, comma separated, containing the data definition (as SQL statements) to be loaded when starting the database.'),
         VOLT.StringListOption('-j', '--classes', 'classes_jarfiles',
                           'Specifies a list of .jar files or paths with wildcards, comma separated, containing classes used to declare stored procedures. The classes are loaded automatically from a saved copy when the database starts.'),
-        VOLT.StringOption('-l', '--license', 'license', 'Specifies the path for the VoltDB license file')
+        VOLT.PathOption('-l', '--license', 'license', 'Specifies the path for the VoltDB license file')
     ),
+    log4j_default = 'log4j.xml',
     description = 'Initializes a new, empty database.'
 )
 
@@ -55,7 +65,9 @@ def init(runner):
     if runner.opts.directory_spec:
         runner.args.extend(['voltdbroot', runner.opts.directory_spec])
     if runner.opts.force:
-        runner.args.extend(['force'])
+        runner.args.append('force')
+    if runner.opts.retain is not None:
+        runner.args.extend(['retain', runner.opts.retain])
     if runner.opts.schemas:
         runner.args.append('schema')
         runner.args.append(_listOfGlobsToFiles(runner.opts.schemas))
@@ -66,4 +78,5 @@ def init(runner):
         runner.args.extend(['license', runner.opts.license])
 
     args = runner.args
-    runner.java_execute(VoltDB, None, *args)
+    kwargs = { 'exec': True }
+    runner.java_execute(VoltDB, None, *args, **kwargs)

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -39,6 +39,7 @@ import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import junit.framework.Assert;
+import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.junit.AfterClass;
@@ -53,7 +54,6 @@ import org.voltdb.client.ProcCallException;
 import org.voltdb.regressionsuites.RegressionSuite;
 import org.voltdb.sysprocs.AdHocNTBase;
 import org.voltdb.types.TimestampType;
-import org.voltdb.utils.VoltFile;
 
 public class TestAdHocQueries extends AdHocQueryTester {
 
@@ -63,7 +63,7 @@ public class TestAdHocQueries extends AdHocQueryTester {
     @AfterClass
     public static void tearDownClass() {
         try {
-            VoltFile.recursivelyDelete(new File("/tmp/" + System.getProperty("user.name")));
+            FileUtils.deleteDirectory(new File("/tmp/" + System.getProperty("user.name")));
         } catch (IOException ignored) {}
     }
 
@@ -325,6 +325,33 @@ public class TestAdHocQueries extends AdHocQueryTester {
     public static String m_pathToDeployment = Configuration.getPathToCatalogForTest("adhoc.xml");
 
     @Test
+    public void testENG21651() {
+        final TestEnv env = new TestEnv("CREATE TABLE PROD (ID int NOT NULL, EXT_ID varchar(30));",
+                m_catalogJar, m_pathToDeployment, 2, 2, 1);
+        long ids[] = {1617463880188133744L,1617463880188133743L,1617463880188133742L,1617463880188134165L,7463880188133420L};
+        try {
+            env.setUp();
+            for (int i = 0; i < ids.length; i++) {
+                env.m_client.callProcedure("@AdHoc",
+                        "INSERT INTO PROD (ID, EXT_ID) VALUES(" + i + ",'" + Long.toString(ids[i]) + "')");
+            }
+
+            VoltTable result = env.m_client.callProcedure("@AdHoc",
+                    "select ID, EXT_ID, CAST(EXT_ID AS BIGINT) FROM PROD").getResults()[0];
+            while (result.advanceRow()) {
+                int id = (int) result.getLong(0);
+                long extId = result.getLong(2);
+                System.out.println("cast " + ids[id] + " to:" + extId);
+                assert(ids[id] == extId);
+            }
+        } catch (IOException | ProcCallException e) {
+            fail("failed: " + e.getMessage());
+        } finally {
+            env.tearDown();
+        }
+    }
+
+    @Test
     public void testENG15335() {
         final TestEnv env = new TestEnv("CREATE TABLE P0(id INTEGER NOT NULL);\n" +
                 "PARTITION TABLE P0 ON COLUMN id;\n" +
@@ -372,19 +399,6 @@ public class TestAdHocQueries extends AdHocQueryTester {
         } finally {
             env.tearDown();
         }
-    }
-
-    private static Long[] getNthColumnAsLong(int colIndex, VoltTable tbl) {
-        final int colCount = tbl.getColumnCount();
-        assertTrue("Asking for" + colIndex + "-th column from a " + colCount + "-column table",
-                colCount > colIndex);
-        final int rowCount = tbl.getRowCount();
-        final Long[] result = new Long[rowCount];
-        for(int i = 0; i < rowCount; ++i) {
-            result[i] = tbl.getLong(colIndex);
-            tbl.advanceRow();
-        }
-        return result;
     }
 
     @Test
@@ -1342,6 +1356,136 @@ public class TestAdHocQueries extends AdHocQueryTester {
                     "SELECT COUNT(*) FROM ENG15836 apb WHERE PROD_KEY IN (886, 887, 890) AND apb.sdate <= 100;");
 
             assertContentOfTable(new Object[][]{{6}}, cr.getResults()[0]);
+        } finally {
+            env.tearDown();
+        }
+    }
+
+    @Test
+    public void testENG20068() throws Exception {
+        /**
+         * The bug using the query would use the only index in the executor, but such
+         * executor would ignore the "initial_expression" that sets cursor at correct
+         * starting position before further processing (post-filtering, etc). Before
+         * this fix, the query would return all 14 rows because of lack of "initial_expression"
+         * evaluation.
+         */
+        final String ddl =
+            "CREATE TABLE ENBA (\n" +
+            "RULE_TYPE varchar(25) NOT NULL,\n" +
+            "RULE_TYPE_ID integer NOT NULL,\n" +
+            "PARM1 varchar(300),\n" +
+            "PARM2 varchar(300),\n" +
+            "PARM3 varchar(300),\n" +
+            ");\n" +
+            "CREATE INDEX I_ENBA_I1 ON ENBA(RULE_TYPE, RULE_TYPE_ID, PARM1, PARM2);";
+        final TestEnv env = new TestEnv(ddl,
+                m_catalogJar, m_pathToDeployment, 2, 1, 0);
+        try {
+            env.setUp();
+            Batcher batcher = new Batcher(env);
+            Stream.of("'450887680', '524288000'",
+                    "'419430400', '450887680'",
+                    "'4194340', '62914560'",
+                    "'314572800', '41943400'",
+                    "'31457280', '4194340'",
+                    "'262144000', '314572800'",
+                    "'209715200', '262144000'",
+                    "'18774368', '26214400'",
+                    "'157286400', '209715200'",
+                    "'1503238554', '1717986918'",
+                    "'125829120', '157286400'",
+                    "'12582912', '15728640'",
+                    "'104857600', '125829120'",
+                    "'10485760', '12582912'")
+                .forEach(entry ->
+                        batcher.add(String.format("INSERT INTO ENBA VALUES(" +
+                                "'S_RED_LT_ML_TGT_BAL', 1, 'J4U Data', %s);\n",
+                                entry), 1));
+            batcher.run();
+            final ClientResponse cr = env.m_client.callProcedure("@AdHoc",
+                    "SELECT COUNT(*) FROM ENBA WHERE RULE_TYPE = 'S_RED_LT_ML_TGT_BAL'\n" +
+                    "AND RULE_TYPE_ID = 1 and PARM1 = 'J4U Data'\n" +
+                    "AND 9054208 <= CAST(PARM3 as bigint) AND 9054208 > CAST(PARM2 as bigint);");
+            assertContentOfTable(new Object[][]{{1}}, cr.getResults()[0]);
+        } finally {
+            env.tearDown();
+        }
+    }
+
+    @Test
+    public void testENG20394() throws Exception {
+        /**
+         * The bug using the query would use the only index in the executor, but such
+         * executor would ignore the "initial_expression" that sets cursor at correct
+         * starting position before further processing (post-filtering, etc). Before
+         * this fix, the query would return all 14 rows because of lack of "initial_expression"
+         * evaluation.
+         */
+        final String ddl =
+            "CREATE TABLE ENBA (\n" +
+            "RULE_TYPE varchar(25) NOT NULL,\n" +
+            "RULE_TYPE_ID integer NOT NULL,\n" +
+            "PARM1 varchar(300),\n" +
+            "PARM2 varchar(300),\n" +
+            "PARM4 varchar(300),\n" +
+            "PARM5 varchar(300),\n" +
+            ");\n" +
+            "CREATE INDEX I_ENBA_I1 ON ENBA(RULE_TYPE, RULE_TYPE_ID, PARM1, PARM2);";
+        final TestEnv env = new TestEnv(ddl,
+                m_catalogJar, m_pathToDeployment, 2, 1, 0);
+        try {
+            env.setUp();
+            Batcher batcher = new Batcher(env);
+            Stream.of("1, '31', '45', 'zzzz', 'abcd'",
+                    "1, '46', '60', 'dcba', 'zzzz'",
+                    "0, 'Voldemort', 'yyyy', 'zzzz', 'abcd'")
+                .forEach(entry ->
+                        batcher.add(String.format("INSERT INTO ENBA VALUES('S_SM_LATCH_ACT', %s);\n",
+                                entry), 1));
+            batcher.run();
+            final ClientResponse cr = env.m_client.callProcedure("@AdHoc",
+                    "SELECT PARM1 FROM ENBA where RULE_TYPE = 'S_SM_LATCH_ACT' AND RULE_TYPE_ID = 1 \n" +
+                    "AND cast(PARM1 AS bigint) <= 34;");
+            assertContentOfTable(new Object[][]{{"31"}}, cr.getResults()[0]);
+        } finally {
+            env.tearDown();
+        }
+    }
+
+    @Test
+    public void testENG20461() throws Exception {
+        /**
+         * The bug using the query would silently drop the CAST operation in the SELECT
+         * predicate that compares a VARCHAR column casted to INTEGER with a integer constant,
+         * and by doing so the comparison would be executed as comparing column values against
+         * stringified integer constant.
+         */
+        final String ddl =
+            "CREATE TABLE ENBA (\n" +
+            "RULE_TYPE varchar(25) NOT NULL,\n" +
+            "RULE_TYPE_ID integer NOT NULL,\n" +
+            "PARM1 varchar(300),\n" +
+            "PARM2 varchar(300));\n" +
+            "CREATE INDEX I_ENBA_I1 ON ENBA(RULE_TYPE, RULE_TYPE_ID, PARM1, PARM2);";
+        final TestEnv env = new TestEnv(ddl, m_catalogJar, m_pathToDeployment, 2, 1, 0);
+        try {
+            env.setUp();
+            Batcher batcher = new Batcher(env);
+            Stream.of("'31', '45'", "'46', '60'", "'8', '15'")
+                .forEach(entry ->
+                        batcher.add(String.format("INSERT INTO ENBA VALUES('S_SM_LATCH_ACT', 1, %s);\n",
+                                entry), 1));
+            batcher.run();
+            // Both queries select/count 1st and 3rd rows
+            ClientResponse cr = env.m_client.callProcedure("@AdHoc",
+                    "SELECT COUNT(*) FROM ENBA where RULE_TYPE = 'S_SM_LATCH_ACT' AND RULE_TYPE_ID = 1 \n" +
+                    "AND cast(PARM1 AS bigint) <= 34;");
+            assertContentOfTable(new Object[][]{{2}}, cr.getResults()[0]);
+            cr = env.m_client.callProcedure("@AdHoc",
+                    "SELECT COUNT(*) FROM ENBA where RULE_TYPE = 'S_SM_LATCH_ACT' AND RULE_TYPE_ID = 1 \n" +
+                    "AND cast(cast(PARM1 AS float) AS bigint) <= 34;");
+            assertContentOfTable(new Object[][]{{2}}, cr.getResults()[0]);
         } finally {
             env.tearDown();
         }

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -398,7 +398,7 @@ public class KafkaClientVerifier {
                 log.info("Train is still running, got " + delta + " more records");
                 continue;
             }
-            if ((System.currentTimeMillis() - wtime) > 60000) {
+            if ((System.currentTimeMillis() - wtime) > 30000) {
                 log.info("Waited long enough looks like train has stopped.");
                 break;
             }

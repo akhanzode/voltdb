@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -49,10 +49,19 @@ public class TestStatisticsSuiteDRStats extends StatisticsTestSuiteBase {
 
     private static int REPLICATION_PORT = 11000;
 
+    private static final ColumnInfo[] expectedDRClusterStatsSchema;
     private static final ColumnInfo[] expectedDRNodeStatsSchema;
-    private static final ColumnInfo[] expectedDRPartitionStatsSchema;
+    private static final ColumnInfo[] expectedDRProducerPartitionStatsSchema;
+    private static final ColumnInfo[] expectedDRConsumerPartitionStatsSchema;
 
     static {
+        expectedDRClusterStatsSchema = new ColumnInfo[] {
+                new ColumnInfo("CLUSTER_ID", VoltType.SMALLINT),
+                new ColumnInfo("REMOTE_CLUSTER_ID", VoltType.SMALLINT),
+                new ColumnInfo("STATE", VoltType.STRING),
+                new ColumnInfo("LASTFAILURE", VoltType.SMALLINT)
+        };
+
         expectedDRNodeStatsSchema = new ColumnInfo[] {
             new ColumnInfo("TIMESTAMP", VoltType.BIGINT),
             new ColumnInfo("HOST_ID", VoltType.INTEGER),
@@ -63,10 +72,11 @@ public class TestStatisticsSuiteDRStats extends StatisticsTestSuiteBase {
             new ColumnInfo("SYNCSNAPSHOTSTATE", VoltType.STRING),
             new ColumnInfo("ROWSINSYNCSNAPSHOT", VoltType.BIGINT),
             new ColumnInfo("ROWSACKEDFORSYNCSNAPSHOT", VoltType.BIGINT),
-            new ColumnInfo("QUEUEDEPTH", VoltType.BIGINT)
+            new ColumnInfo("QUEUEDEPTH", VoltType.BIGINT),
+            new ColumnInfo("REMOTECREATIONTIMESTAMP", VoltType.TIMESTAMP)
         };
 
-        expectedDRPartitionStatsSchema = new ColumnInfo[] {
+        expectedDRProducerPartitionStatsSchema = new ColumnInfo[] {
             new ColumnInfo("TIMESTAMP", VoltType.BIGINT),
             new ColumnInfo("HOST_ID", VoltType.INTEGER),
             new ColumnInfo("HOSTNAME", VoltType.STRING),
@@ -85,7 +95,30 @@ public class TestStatisticsSuiteDRStats extends StatisticsTestSuiteBase {
             new ColumnInfo("MODE", VoltType.STRING),
             new ColumnInfo("QUEUE_GAP", VoltType.BIGINT),
             new ColumnInfo("CONNECTION_STATUS", VoltType.STRING),
+            new ColumnInfo("AVAILABLE_BYTES", VoltType.INTEGER),
+            new ColumnInfo("AVAILABLE_BUFFERS", VoltType.INTEGER),
+            new ColumnInfo("CONSUMER_LIMIT_TYPE", VoltType.STRING),
         };
+
+        expectedDRConsumerPartitionStatsSchema = new ColumnInfo[] {
+                new ColumnInfo("TIMESTAMP", VoltType.BIGINT),
+                new ColumnInfo("HOST_ID", VoltType.INTEGER),
+                new ColumnInfo("HOSTNAME", VoltType.STRING),
+                new ColumnInfo("CLUSTER_ID", VoltType.INTEGER),
+                new ColumnInfo("REMOTE_CLUSTER_ID", VoltType.INTEGER),
+                new ColumnInfo("PARTITION_ID", VoltType.INTEGER),
+                new ColumnInfo("IS_COVERED", VoltType.STRING),
+                new ColumnInfo("COVERING_HOST", VoltType.STRING),
+                new ColumnInfo("LAST_RECEIVED_TIMESTAMP", VoltType.TIMESTAMP),
+                new ColumnInfo("LAST_APPLIED_TIMESTAMP", VoltType.TIMESTAMP),
+                new ColumnInfo("IS_PAUSED", VoltType.STRING),
+                new ColumnInfo("DUPLICATE_BUFFERS", VoltType.BIGINT),
+                new ColumnInfo("IGNORED_BUFFERS", VoltType.BIGINT),
+                new ColumnInfo("AVAILABLE_BYTES", VoltType.INTEGER),
+                new ColumnInfo("AVAILABLE_BUFFERS", VoltType.INTEGER),
+                new ColumnInfo("CONSUMER_LIMIT_TYPE", VoltType.STRING),
+        };
+
     }
 
     public TestStatisticsSuiteDRStats(String name) {
@@ -125,7 +158,7 @@ public class TestStatisticsSuiteDRStats extends StatisticsTestSuiteBase {
         System.out.println("\n\nTESTING DRPRODUCERPARTITION STATS\n\n\n");
         Client client  = getFullyConnectedClient();
 
-        VoltTable expectedTable1 = new VoltTable(expectedDRPartitionStatsSchema);
+        VoltTable expectedTable1 = new VoltTable(expectedDRProducerPartitionStatsSchema);
 
         //
         // DRPARTITION
@@ -136,6 +169,15 @@ public class TestStatisticsSuiteDRStats extends StatisticsTestSuiteBase {
         System.out.println("Test DR table: " + results[0].toString());
         validateSchema(results[0], expectedTable1);
         assertEquals(0, results[0].getRowCount());
+
+        VoltTable expectedTable2 = new VoltTable(expectedDRConsumerPartitionStatsSchema);
+        results = client.callProcedure("@Statistics", "DRCONSUMERPARTITION", 0).getResults();
+        // one aggregate tables returned
+        assertEquals(1, results.length);
+        System.out.println("Test DR table: " + results[0].toString());
+        validateSchema(results[0], expectedTable2);
+        assertEquals(0, results[0].getRowCount());
+
     }
 
     public void testDRPartitionStatisticsWithConsumers() throws Exception {
@@ -207,8 +249,8 @@ public class TestStatisticsSuiteDRStats extends StatisticsTestSuiteBase {
         VoltTable[] results = client.callProcedure("@Statistics", "DRPRODUCERPARTITION", 0).getResults();
         // one aggregate tables returned
         assertEquals(1, results.length);
-        System.out.println("Test DR table: " + results[0].toString());
-        validateSchema(results[0], new VoltTable(expectedDRPartitionStatsSchema));
+        System.out.println("Test DR producer stats table: " + results[0].toString());
+        validateSchema(results[0], new VoltTable(expectedDRProducerPartitionStatsSchema));
         // One row per site, including the MPI on each host if there is DR replicated stream
         // don't have HSID for ease of check, just check a bunch of stuff
         results[0].advanceRow();
@@ -217,6 +259,12 @@ public class TestStatisticsSuiteDRStats extends StatisticsTestSuiteBase {
         validateRowSeenAtAllHosts(results[0], columnTargets, false);
         validateRowSeenAtAllPartitions(results[0], "HOSTNAME", results[0].getString("HOSTNAME"), false);
         validateRowSeenAtAllPartitions(results[0], "CONNECTION_STATUS", connStatus, false);
+
+        results = client.callProcedure("@Statistics", "DRCONSUMERPARTITION", 0).getResults();
+        // one aggregate tables returned
+        assertEquals(1, results.length);
+        System.out.println("Test DR consumer stats table: " + results[0].toString());
+        validateSchema(results[0], new VoltTable(expectedDRConsumerPartitionStatsSchema));
     }
 
     public void testDRStatistics() throws Exception {
@@ -227,19 +275,21 @@ public class TestStatisticsSuiteDRStats extends StatisticsTestSuiteBase {
         System.out.println("\n\nTESTING DR STATS\n\n\n");
         Client client  = getFullyConnectedClient();
 
-        VoltTable expectedTable1 = new VoltTable(expectedDRPartitionStatsSchema);
+        VoltTable expectedTable1 = new VoltTable(expectedDRProducerPartitionStatsSchema);
         VoltTable expectedTable2 = new VoltTable(expectedDRNodeStatsSchema);
-
+        VoltTable expectedTable3 = new VoltTable(expectedDRClusterStatsSchema);
         //
         // DR
         //
         VoltTable[] results = client.callProcedure("@Statistics", "DR", 0).getResults();
         // two aggregate tables returned
-        assertEquals(2, results.length);
+        assertEquals(3, results.length);
         System.out.println("Test DR table: " + results[0].toString());
         System.out.println("Test DR table: " + results[1].toString());
+        System.out.println("Test DR table: " + results[2].toString());
         validateSchema(results[0], expectedTable1);
         validateSchema(results[1], expectedTable2);
+        validateSchema(results[2], expectedTable3);
 
         // One row per host for DRNODE stats
         results[1].advanceRow();

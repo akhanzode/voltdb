@@ -1,8 +1,8 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This file contains original code and/or modifications of original code.
- * Any modifications made by VoltDB Inc. are licensed under the following
+ * Any modifications made by Volt Active Data Inc. are licensed under the following
  * terms and conditions:
  *
  * This program is free software: you can redistribute it and/or modify
@@ -69,6 +69,13 @@ Table::Table(int tableAllocationTargetSize) :
 }
 
 Table::~Table() {
+#ifdef VOLT_POOL_CHECKING
+    auto engine = ExecutorContext::getEngine();
+    bool shutdown = engine == nullptr ? true : engine->isDestroying();
+    if (shutdown) {
+       m_tlPool.shutdown();
+    }
+#endif
     // not all tables are reference counted but this should be invariant
     vassert(m_refcount == 0);
 

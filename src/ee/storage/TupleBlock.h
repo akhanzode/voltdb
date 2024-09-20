@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -186,6 +186,10 @@ public:
             retval += offset.unpack();
         } else {
             retval = &(m_storage[m_tupleLength * m_nextFreeTuple]);
+            if(m_nextFreeTuple >= m_tuplesPerBlock)
+            {
+                return std::pair<char*, int>(NULL, -1);
+            }
             m_nextFreeTuple++;
         }
         m_activeTuples++;

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/local/bin/python2.7
 
 # This is a visualizer which pulls TPC-C benchmark results from the MySQL
 # databases and visualizes them. Four graphs will be generated, latency graph on
@@ -341,7 +341,7 @@ def plot(title, xlabel, ylabel, filename, width, height, app, data, series, mind
                     if failed:
                         for pos in ['top', 'bottom', 'right', 'left']:
                             pl.ax.spines[pos].set_edgecolor(color)
-                        pl.ax.set_axis_bgcolor(color)
+                        pl.ax.set_facecolor(color)
                     pl.ax.patch.set_alpha(0.1)
 
                     bdata.update(failed=failed, bgcolor=color)

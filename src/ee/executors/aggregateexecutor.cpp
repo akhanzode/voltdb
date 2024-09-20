@@ -1,8 +1,8 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This file contains original code and/or modifications of original code.
- * Any modifications made by VoltDB Inc. are licensed under the following
+ * Any modifications made by Volt Active Data Inc. are licensed under the following
  * terms and conditions:
  *
  * This program is free software: you can redistribute it and/or modify
@@ -1035,7 +1035,7 @@ void AggregatePartialExecutor::p_execute_tuple(const TableTuple& nextTuple) {
 
 void AggregatePartialExecutor::p_execute_finish() {
     VOLT_TRACE("finalizing..");
-    for (auto const iter : m_hash) {
+    for (auto const& iter : m_hash) {
         AggregateRow *aggregateRow = iter.second;
         if (insertOutputTuple(aggregateRow)) {
             m_pmp->countdownProgress();

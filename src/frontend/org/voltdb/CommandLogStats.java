@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -26,13 +26,16 @@ public class CommandLogStats extends StatsSource {
 
     private final CommandLog m_commandLog;
 
-    public enum StatName {
-        OUTSTANDING_BYTES,
-        OUTSTANDING_TXNS,
-        IN_USE_SEGMENT_COUNT,
-        SEGMENT_COUNT,
-        FSYNC_INTERVAL
-    };
+    public enum CommandLogCols {
+        OUTSTANDING_BYTES           (VoltType.BIGINT),
+        OUTSTANDING_TXNS            (VoltType.BIGINT),
+        IN_USE_SEGMENT_COUNT        (VoltType.INTEGER),
+        SEGMENT_COUNT               (VoltType.INTEGER),
+        FSYNC_INTERVAL              (VoltType.INTEGER);
+
+        public final VoltType m_type;
+        CommandLogCols(VoltType type) { m_type = type; }
+    }
 
     public CommandLogStats(CommandLog commandLog) {
         super(false);
@@ -41,18 +44,14 @@ public class CommandLogStats extends StatsSource {
 
     @Override
     protected void populateColumnSchema(ArrayList<ColumnInfo> columns) {
-        super.populateColumnSchema(columns);
-        columns.add(new VoltTable.ColumnInfo(StatName.OUTSTANDING_BYTES.name(), VoltType.BIGINT));
-        columns.add(new VoltTable.ColumnInfo(StatName.OUTSTANDING_TXNS.name(), VoltType.BIGINT));
-        columns.add(new VoltTable.ColumnInfo(StatName.IN_USE_SEGMENT_COUNT.name(), VoltType.INTEGER));
-        columns.add(new VoltTable.ColumnInfo(StatName.SEGMENT_COUNT.name(), VoltType.INTEGER));
-        columns.add(new VoltTable.ColumnInfo(StatName.FSYNC_INTERVAL.name(), VoltType.INTEGER));
+        super.populateColumnSchema(columns, CommandLogCols.class);
     }
 
     @Override
-    protected void updateStatsRow(Object rowKey, Object[] rowValues) {
-        m_commandLog.populateCommandLogStats(columnNameToIndex, rowValues);
-        super.updateStatsRow(rowKey, rowValues);
+    protected int updateStatsRow(Object rowKey, Object[] rowValues) {
+        int offset = super.updateStatsRow(rowKey, rowValues);
+        m_commandLog.populateCommandLogStats(offset, rowValues);
+        return offset + CommandLogCols.values().length;
     }
 
     @Override

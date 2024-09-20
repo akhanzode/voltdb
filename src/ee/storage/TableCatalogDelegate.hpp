@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -122,6 +122,8 @@ class TableCatalogDelegate {
         return m_tableType;
     }
 
+    void setTableType(TableType tableType);
+
     PersistentTable *getPersistentTable() {
         return dynamic_cast<PersistentTable*>(m_table);
     }
@@ -134,9 +136,11 @@ class TableCatalogDelegate {
         m_table = tb;
     }
 
-    const std::string& signature() { return m_signature; }
+    const std::string& signature() const { return m_signature; }
 
-    const char* signatureHash() { return m_signatureHash; }
+    const char* signatureHash() const { return m_signatureHash; }
+
+    int64_t signatureHashAsLong() const { return *reinterpret_cast<const int64_t*>(signatureHash()); }
 
     /*
      * Returns true if this table is a materialized view

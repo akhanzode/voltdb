@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -22,9 +22,7 @@ import java.io.StringWriter;
 import java.io.Writer;
 import java.util.concurrent.TimeUnit;
 
-import org.voltcore.logging.Level;
 import org.voltcore.messaging.Mailbox;
-import org.voltcore.utils.RateLimitedLogger;
 import org.voltdb.ClientResponseImpl;
 import org.voltdb.ExpectedProcedureException;
 import org.voltdb.ProcedureRunner;
@@ -33,10 +31,10 @@ import org.voltdb.TheHashinator;
 import org.voltdb.VoltDB;
 import org.voltdb.VoltTable;
 import org.voltdb.client.ClientResponse;
+import org.voltdb.compiler.deploymentfile.SystemSettingsType;
 import org.voltdb.dtxn.TransactionState;
 import org.voltdb.messaging.InitiateResponseMessage;
 import org.voltdb.messaging.Iv2InitiateTaskMessage;
-import org.voltdb.utils.LogKeys;
 
 abstract public class ProcedureTask extends TransactionTask
 {
@@ -58,10 +56,10 @@ abstract public class ProcedureTask extends TransactionTask
     abstract void completeInitiateTask(SiteProcedureConnection siteConnection);
 
     /** Mostly copy-paste of old ExecutionSite.processInitiateTask() */
-    protected InitiateResponseMessage processInitiateTask(Iv2InitiateTaskMessage task,
+    protected InitiateResponseMessage processInitiateTask(Iv2InitiateTaskMessage taskMessage,
             SiteProcedureConnection siteConnection)
     {
-        final InitiateResponseMessage response = new InitiateResponseMessage(task);
+        final InitiateResponseMessage response = new InitiateResponseMessage(taskMessage);
 
         try {
             Object[] callerParams = null;
@@ -70,7 +68,7 @@ abstract public class ProcedureTask extends TransactionTask
              * that the parameter set is corrupt
              */
             try {
-                callerParams = task.getParameters();
+                callerParams = taskMessage.getParameters();
             } catch (RuntimeException e) {
                 Writer result = new StringWriter();
                 PrintWriter pw = new PrintWriter(result);
@@ -94,11 +92,7 @@ abstract public class ProcedureTask extends TransactionTask
                                 "This can happen if a catalog update removing the procedure occurred " +
                                 "after the procedure was submitted " +
                                 "but before the procedure was executed.";
-                RateLimitedLogger.tryLogForMessage(
-                        System.currentTimeMillis(),
-                        60, TimeUnit.SECONDS,
-                        hostLog,
-                        Level.WARN, error + " %s", "This log message is rate limited to once every 60 seconds.");
+                hostLog.rateLimitedWarn(60, error + " %s", "This log message is rate limited to once every 60 seconds.");
                 response.setResults(
                         new ClientResponseImpl(
                                 ClientResponse.UNEXPECTED_FAILURE,
@@ -112,7 +106,11 @@ abstract public class ProcedureTask extends TransactionTask
                 runner.setupTransaction(m_txnState);
 
                 // execute the procedure
-                cr = runner.call(callerParams);
+                SystemSettingsType.Procedure procedureSetting = VoltDB.instance().getCatalogContext().getDeployment().getSystemsettings().getProcedure();
+                boolean keepImmutable = taskMessage.getStoredProcedureInvocation().getKeepParamsImmutable() &&
+                                        ( procedureSetting == null || procedureSetting.isCopyparameters() );
+                cr = runner.call(callerParams, (taskMessage.shouldReturnResultTables() || taskMessage.isEveryPartition()),
+                                 keepImmutable);
 
                 // pass in the first value in the hashes array if it's not null
                 Integer hash = null;
@@ -121,28 +119,15 @@ abstract public class ProcedureTask extends TransactionTask
                     hash = hashes[0];
                 }
                 m_txnState.setHash(hash);
-                //Don't pay the cost of returning the result tables for a replicated write
-                //With reads don't apply the optimization just in case
-                //                    if (!task.shouldReturnResultTables() && !task.isReadOnly()) {
-                //                        cr.dropResultTable();
-                //                    }
-
                 response.setResults(cr);
-                // record the results of write transactions to the transaction state
-                // this may be used to verify the DR replica cluster gets the same value
-                // skip for multi-partition txns because only 1 of k+1 partitions will
-                //  have the real results
-                if ((!task.isReadOnly()) && task.isSinglePartition()) {
-                    m_txnState.storeResults(cr);
-                }
             } else {
                 // mis-partitioned invocation, reject it and let the ClientInterface restart it
-                response.setMispartitioned(true, task.getStoredProcedureInvocation(),
+                response.setMispartitioned(true, taskMessage.getStoredProcedureInvocation(),
                         TheHashinator.getCurrentVersionedConfig());
             }
         }
         catch (final ExpectedProcedureException e) {
-            execLog.l7dlog( Level.TRACE, LogKeys.org_voltdb_ExecutionSite_ExpectedProcedureException.name(), e);
+            execLog.trace("Procedure threw an expected procedure exception", e);
             response.setResults(
                     new ClientResponseImpl(
                         ClientResponse.GRACEFUL_FAILURE,
@@ -153,7 +138,7 @@ abstract public class ProcedureTask extends TransactionTask
             // Should not be able to reach here. VoltProcedure.call caught all invocation target exceptions
             // and converted them to error responses. Java errors are re-thrown, and not caught by this
             // exception clause. A truly unexpected exception reached this point. Crash. It's a defect.
-            hostLog.l7dlog( Level.ERROR, LogKeys.host_ExecutionSite_UnexpectedProcedureException.name(), e);
+            hostLog.error("Unexpected exception while executing procedure wrapper", e);
             VoltDB.crashLocalVoltDB(e.getMessage(), true, e);
         }
         return response;

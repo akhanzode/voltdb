@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -24,17 +24,19 @@ package org.voltdb;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.Calendar;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 import org.apache.zookeeper_voltpatches.CreateMode;
 import org.apache.zookeeper_voltpatches.KeeperException;
@@ -56,15 +58,16 @@ import org.voltdb.catalog.Column;
 import org.voltdb.catalog.Database;
 import org.voltdb.catalog.Procedure;
 import org.voltdb.catalog.Table;
-import org.voltdb.compiler.CatalogChangeResult;
+import org.voltdb.catalog.Topic;
+import org.voltdb.common.NodeState;
 import org.voltdb.compiler.deploymentfile.DeploymentType;
 import org.voltdb.compiler.deploymentfile.PathsType;
 import org.voltdb.dtxn.SiteTracker;
 import org.voltdb.elastic.ElasticService;
 import org.voltdb.iv2.Cartographer;
 import org.voltdb.iv2.SpScheduler.DurableUniqueIdListener;
-import org.voltdb.licensetool.LicenseApi;
-import org.voltdb.serdes.EncodeFormat;
+import org.voltdb.licensing.Licensing;
+import org.voltdb.serdes.AvroSerde;
 import org.voltdb.settings.ClusterSettings;
 import org.voltdb.settings.DbSettings;
 import org.voltdb.settings.NodeSettings;
@@ -73,6 +76,7 @@ import org.voltdb.snmp.SnmpTrapSender;
 import org.voltdb.task.TaskManager;
 import org.voltdb.utils.HTTPAdminListener;
 
+import com.google_voltpatches.common.base.Throwables;
 import com.google_voltpatches.common.util.concurrent.ListenableFuture;
 import com.google_voltpatches.common.util.concurrent.ListeningExecutorService;
 import com.google_voltpatches.common.util.concurrent.MoreExecutors;
@@ -85,7 +89,7 @@ public class MockVoltDB implements VoltDBInterface
     final String m_clusterName = "cluster";
     final String m_databaseName = "database";
     StatsAgent m_statsAgent = null;
-    HostMessenger m_hostMessenger = new HostMessenger(new HostMessenger.Config(false), null);
+    HostMessenger m_hostMessenger = new HostMessenger(new HostMessenger.Config(false), null,"hostDisplayName" );
     private OperationMode m_mode = OperationMode.RUNNING;
     private volatile String m_localMetadata;
     final SnapshotCompletionMonitor m_snapshotCompletionMonitor = new SnapshotCompletionMonitor();
@@ -93,6 +97,7 @@ public class MockVoltDB implements VoltDBInterface
     OperationMode m_startMode = OperationMode.RUNNING;
     ReplicationRole m_replicationRole = ReplicationRole.NONE;
     long m_clusterCreateTime = 0;
+    private Instant m_hostStartTime = Instant.now();
     VoltDB.Configuration voltconfig = null;
     private final ListeningExecutorService m_es = MoreExecutors.listeningDecorator(CoreUtils.getSingleThreadExecutor("Mock Computation Service"));
     private ScheduledThreadPoolExecutor m_periodicWorkThread = CoreUtils.getScheduledThreadPoolExecutor("Periodic Work", 1, CoreUtils.SMALL_STACK_SIZE);;
@@ -140,11 +145,7 @@ public class MockVoltDB implements VoltDBInterface
             cluster.setHeartbeattimeout(10000);
             assert(cluster != null);
 
-            try {
-                m_hostMessenger.start();
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }
+            m_hostMessenger.start();
             VoltZK.createPersistentZKNodes(m_hostMessenger.getZK());
             m_hostMessenger.getZK().create(
                     VoltZK.cluster_metadata + "/" + m_hostMessenger.getHostId(),
@@ -161,8 +162,10 @@ public class MockVoltDB implements VoltDBInterface
                     null);
 
             m_statsAgent = new StatsAgent();
-            m_statsAgent.registerMailbox(m_hostMessenger,
-                    m_hostMessenger.getHSIdForLocalSite(HostMessenger.STATS_SITE_ID));
+            long hsId = m_hostMessenger.getHSIdForLocalSite(HostMessenger.STATS_SITE_ID);
+            // Use generate to install the dummy mailbox which is expected to be there by OpsAgent.registerMailbox
+            m_hostMessenger.generateMailboxId(hsId);
+            m_statsAgent.registerMailbox(m_hostMessenger, hsId);
             for (MailboxType type : MailboxType.values()) {
                 m_mailboxMap.put(type, new LinkedList<MailboxNodeContent>());
             }
@@ -170,6 +173,7 @@ public class MockVoltDB implements VoltDBInterface
                     new MailboxNodeContent(m_hostMessenger.getHSIdForLocalSite(HostMessenger.STATS_SITE_ID), null));
             m_siteTracker = new SiteTracker(m_hostId, m_mailboxMap);
         } catch (Exception e) {
+            Throwables.throwIfUnchecked(e);
             throw new RuntimeException(e);
         }
     }
@@ -218,8 +222,8 @@ public class MockVoltDB implements VoltDBInterface
 
     public void addTopic(String topicName) {
         addTable(topicName, false);
-        getTable(topicName).setIstopic(true);
-        getTable(topicName).setTopicformat(EncodeFormat.CSV.name());
+        getDatabase().getTopics().add(topicName);
+        getTable(topicName).setTopicname(topicName);
     }
 
     public void setDRProducerEnabled()
@@ -294,6 +298,11 @@ public class MockVoltDB implements VoltDBInterface
     public Table getTable(String tableName)
     {
         return getDatabase().getTables().get(tableName);
+    }
+
+    public Topic getTopic(String topicName)
+    {
+        return getDatabase().getTopics().get(topicName);
     }
 
     Column getColumnFromTable(String tableName, String columnName)
@@ -475,7 +484,7 @@ public class MockVoltDB implements VoltDBInterface
     }
 
     @Override
-    public void readBuildInfo(String editionTag)
+    public void readBuildInfo()
     {
     }
 
@@ -504,6 +513,11 @@ public class MockVoltDB implements VoltDBInterface
     }
 
     @Override
+    public StartAction getStartAction() {
+        return voltconfig.m_startAction;
+    }
+
+    @Override
     public void startSampler()
     {
     }
@@ -512,7 +526,8 @@ public class MockVoltDB implements VoltDBInterface
     public CatalogContext catalogUpdate(String diffCommands,
             int expectedCatalogVersion, int nextCatalogVersion, long genId,
             boolean isForReplay, boolean requireCatalogDiffCmdsApplyToEE,
-            boolean hasSchemaChange, boolean requiresNewExportGeneration,  boolean hasSecurityUserChange)
+            boolean hasSchemaChange, boolean requiresNewExportGeneration, boolean hasSecurityUserChange,
+            Consumer<Map<Byte, String[]>> replicableTablesConsumer)
     {
         throw new UnsupportedOperationException("unimplemented");
     }
@@ -650,6 +665,42 @@ public class MockVoltDB implements VoltDBInterface
     }
 
     @Override
+    public NodeState getNodeState()
+    {
+        return NodeState.UP; // a small lie
+    }
+
+    @Override
+    public boolean getNodeStartupComplete()
+    {
+        return true;
+    }
+
+    @Override
+    public int[] getNodeStartupProgress()
+    {
+        int[] p = { 1, 1 };
+        return p;
+    }
+
+    @Override
+    public void reportNodeStartupProgress(int c, int t)
+    {
+    }
+
+    @Override
+    public int getMyHostId()
+    {
+        return m_hostId;
+    }
+
+    @Override
+    public int getVoltPid()
+    {
+        return 9999; // no-one cares
+    }
+
+    @Override
     public void promoteToMaster()
     {
         m_replicationRole = ReplicationRole.NONE;
@@ -713,169 +764,9 @@ public class MockVoltDB implements VoltDBInterface
     }
 
     @Override
-    public LicenseApi getLicenseApi()
-    {
-        return new LicenseApi() {
-            @Override
-            public boolean initializeFromFile(File license) {
-                return true;
-            }
-
-            @Override
-            public boolean isAnyKindOfTrial() {
-                return false;
-            }
-
-            @Override
-            public boolean isProTrial() {
-                return false;
-            }
-
-            @Override
-            public boolean isEnterpriseTrial() {
-                return false;
-            }
-
-            @Override
-            public int maxHostcount() {
-                return Integer.MAX_VALUE;
-            }
-
-            @Override
-            public Calendar expires() {
-                Calendar result = Calendar.getInstance();
-                result.add(Calendar.YEAR, 20); // good enough?
-                return result;
-            }
-
-            @Override
-            public boolean verify() {
-                return true;
-            }
-
-            @Override
-            public boolean isDrReplicationAllowed() {
-                // TestExecutionSite (and probably others)
-                // use MockVoltDB without requiring unique
-                // zmq ports for the DR replicator. Note
-                // that getReplicationActive(), above, is
-                // hardcoded to false, too.
-                return false;
-            }
-
-            @Override
-            public boolean isDrActiveActiveAllowed() {
-                // TestExecutionSite (and probably others)
-                // use MockVoltDB without requiring unique
-                // zmq ports for the DR replicator.
-                return false;
-            }
-
-            @Override
-            public boolean isCommandLoggingAllowed() {
-                return true;
-            }
-
-            @Override
-            public boolean isAWSMarketplace() {
-                return false;
-            }
-
-            @Override
-            public boolean isEnterprise() {
-                return false;
-            }
-
-            @Override
-            public boolean isPro() {
-                return false;
-            }
-
-            @Override
-            public String licensee() {
-                return null;
-            }
-
-            @Override
-            public Calendar issued() {
-                return null;
-            }
-
-            @Override
-            public String note() {
-                return null;
-            }
-
-            @Override
-            public boolean hardExpiration() {
-                return false;
-            }
-
-            @Override
-            public boolean secondaryInitialization() {
-                return true;
-            }
-
-            @Override
-            public String getSignature() {
-                return null;
-            }
-
-            @Override
-            public String getLicenseType() {
-                return null;
-            }
-
-            @Override
-            public boolean isUnrestricted()
-            {
-                return false;
-            }
-
-            @Override
-            public String getIssuerCompany()
-            {
-                return null;
-            }
-
-            @Override
-            public String getIssuerUrl()
-            {
-                return null;
-            }
-
-            @Override
-            public String getIssuerEmail()
-            {
-                return null;
-            }
-
-            @Override
-            public String getIssuerPhone()
-            {
-                return null;
-            }
-
-            @Override
-            public int getVersion()
-            {
-                return 0;
-            }
-
-            @Override
-            public int getScheme()
-            {
-                return 0;
-            }
-        };
-    }
-
-    @Override
-    public void updateLicenseApi(LicenseApi newLicense) { }
-
-    @Override
-    public String getLicenseInformation() {
-        return "";
+    public Licensing getLicensing() {
+        // So far, we have no need to provide this interface
+        throw new UnsupportedOperationException("MockVoltDB.getLicensing called, but is not implemented");
     }
 
     @Override
@@ -903,6 +794,11 @@ public class MockVoltDB implements VoltDBInterface
     @Override
     public void setClusterCreateTime(long clusterCreateTime) {
         m_clusterCreateTime = clusterCreateTime;
+    }
+
+    @Override
+    public Instant getHostStartTime() {
+        return m_hostStartTime;
     }
 
     @Override
@@ -1001,15 +897,12 @@ public class MockVoltDB implements VoltDBInterface
     public void setMasterOnly() {}
 
     @Override
-    public void registerCatalogValidator(CatalogValidator validator) {
+    public AvroSerde getAvroSerde() {
+        throw new UnsupportedOperationException();
     }
 
     @Override
-    public void unregisterCatalogValidator(CatalogValidator validator) {
-    }
-
-    @Override
-    public boolean validateDeploymentUpdates(DeploymentType newDep, DeploymentType curDep, CatalogChangeResult ccr) {
-        return true;
+    public DrProducerCatalogCommands getDrCatalogCommands() {
+        throw new UnsupportedOperationException();
     }
 }

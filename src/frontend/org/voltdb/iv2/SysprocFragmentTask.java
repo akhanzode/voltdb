@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -22,7 +22,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import org.voltcore.logging.Level;
 import org.voltcore.messaging.Mailbox;
 import org.voltcore.utils.CoreUtils;
 import org.voltdb.DependencyPair;
@@ -43,7 +42,6 @@ import org.voltdb.messaging.FragmentTaskMessage;
 import org.voltdb.rejoin.TaskLog;
 import org.voltdb.sysprocs.SysProcFragmentId;
 import org.voltdb.utils.Encoder;
-import org.voltdb.utils.LogKeys;
 import org.voltdb.utils.VoltTableUtil;
 import org.voltdb.utils.VoltTrace;
 
@@ -246,8 +244,8 @@ public class SysprocFragmentTask extends FragmentTaskBase
                     currentFragResponse.addDependency(dep);
                 }
             } catch (final EEException | SQLException | ReplicatedTableException e) {
-                hostLog.l7dlog(Level.TRACE, LogKeys.host_ExecutionSite_ExceptionExecutingPF.name(),
-                        new Object[] { Encoder.hexEncode(m_fragmentMsg.getFragmentPlan(frag)) }, e);
+                hostLog.traceFmt(e, "Unexpected exception while executing plan fragment %s",
+                                 Encoder.hexEncode(m_fragmentMsg.getFragmentPlan(frag)));
                 currentFragResponse.setStatus(FragmentResponseMessage.UNEXPECTED_ERROR, e);
                 addDependencyToFragment(currentFragResponse);
                 break;

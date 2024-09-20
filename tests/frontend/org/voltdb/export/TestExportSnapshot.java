@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -32,6 +32,8 @@ import org.voltdb.compiler.VoltProjectBuilder;
 import org.voltdb.regressionsuites.LocalCluster;
 import org.voltdb.regressionsuites.MultiConfigSuiteBuilder;
 import org.voltdb.regressionsuites.TestSQLTypesSuite;
+
+import com.google_voltpatches.common.collect.ImmutableMap;
 
 /**
  * End to end Export tests using the injected custom export.
@@ -66,15 +68,13 @@ public class TestExportSnapshot extends TestExportBaseSocketExport {
     public void testExportSnapshotResetsSequenceNumber() throws Exception {
         System.out.println("testExportSnapshotResetsSequenceNumber");
         String targetStream = "S_NO_NULLS";
-        m_streamNames.add(targetStream);
         Client client = getClient();
         for (int i = 0; i < 10; i++) {
             final Object[] rowdata = TestSQLTypesSuite.m_midValues;
             final Object[] params = convertValsToParams(targetStream, i, rowdata);
             client.callProcedure("ExportInsertNoNulls", params);
         }
-        waitForExportAllRowsDelivered(client, m_streamNames);
-        quiesce(client);
+        waitForExportRowsToBeDelivered(client, ImmutableMap.of(targetStream, 10L));
 
         client.callProcedure("@SnapshotSave", "/tmp/" + System.getProperty("user.name"), "testnonce", (byte) 1);
 
@@ -97,14 +97,12 @@ public class TestExportSnapshot extends TestExportBaseSocketExport {
 
         // must still be able to verify the export data.
         // ENG-570
-        client.drain();
-        waitForExportAllRowsDelivered(client, m_streamNames);
         // Ignore first 10 rows received before restart, make sure the sequence number of
         // remaining rows start from beginning.
         for (int i = 0; i < 10; i++) {
             m_verifier.ignoreRow(targetStream, i);
         }
-        m_verifier.verifyRows();
+        m_verifier.waitForTuplesAndVerify(client);
         System.out.println("Passed!");
     }
 
@@ -150,7 +148,6 @@ public class TestExportSnapshot extends TestExportBaseSocketExport {
         config = new LocalCluster("export-ddl-cluster-rep.jar", 2, 3, k_factor,
                 BackendTarget.NATIVE_EE_JNI, LocalCluster.FailureState.ALL_RUNNING, true, additionalEnv);
         //TODO: Update after fixing Snapshot on same server
-        config.setNewCli(false);
         config.setHasLocalServer(false);
         config.setMaxHeap(1024);
         boolean compile = config.compile(project);

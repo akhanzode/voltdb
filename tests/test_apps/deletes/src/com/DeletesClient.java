@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -511,7 +511,7 @@ public class DeletesClient
         VoltTable[] results = null;
         try
         {
-            results = client.callProcedure("@SnapshotStatus").getResults();
+            results = client.callProcedure("@Statistics", "SnapshotStatus", 0).getResults();
         }
         catch (NoConnectionsException e1)
         {
@@ -670,7 +670,6 @@ public class DeletesClient
         Client client = null;
         ClientConfig config = new ClientConfig("program", "none");
         config.setProcedureCallTimeout(Long.MAX_VALUE);
-        config.setClientAffinity(true);
         config.setTopologyChangeAware(true);
         client = ClientFactory.createClient(config);
         // with topo awareness, we only need to connect to one server and it

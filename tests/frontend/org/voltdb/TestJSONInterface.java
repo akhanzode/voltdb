@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -92,6 +92,7 @@ import org.apache.http.conn.socket.ConnectionSocketFactory;
 import org.apache.http.conn.socket.PlainConnectionSocketFactory;
 import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
 import org.apache.http.conn.ssl.SSLContextBuilder;
+import org.apache.http.conn.ssl.TrustSelfSignedStrategy;
 import org.apache.http.entity.ContentType;
 import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.CloseableHttpClient;
@@ -222,7 +223,7 @@ public class TestJSONInterface extends TestCase {
     }
 
     private static String httpUrlOverJSONExecute(String method, String url, String user, String password, String scheme, int expectedCode, String expectedCt, String varString) throws Exception {
-        SSLContext sslContext = new SSLContextBuilder().loadTrustMaterial(null, (X509Certificate[] arg0, String arg1) -> true).build();
+        SSLContext sslContext = new SSLContextBuilder().loadTrustMaterial(null, new TrustSelfSignedStrategy()).build();
         SSLConnectionSocketFactory sf = new SSLConnectionSocketFactory(sslContext,
           SSLConnectionSocketFactory.ALLOW_ALL_HOSTNAME_VERIFIER);
         Registry<ConnectionSocketFactory> socketFactoryRegistry = RegistryBuilder.<ConnectionSocketFactory>create()
@@ -2053,8 +2054,8 @@ public class TestJSONInterface extends TestCase {
         }
     }
 
-    // NOTE: removed from test since ENG-17219 that upgrades lib/jackson-core from 1.9.13 to 2.9.4
-    public void tesstUsers() throws Exception {
+    // NOTE: if you update jackson and things dont work, dont comment the test but fix it.
+    public void testUsers() throws Exception {
         try {
             String simpleSchema
             = "CREATE TABLE foo (\n"
@@ -2150,12 +2151,12 @@ public class TestJSONInterface extends TestCase {
             //Get exportTypes
             String json = getUrlOverJSON(protocolPrefix + "localhost:8095/deployment/export/types", null, null, null, 200,  "application/json");
             JSONObject jobj = new JSONObject(json);
-            assertTrue(jobj.getString("types").contains("FILE"));
-            assertTrue(jobj.getString("types").contains("JDBC"));
-            assertTrue(jobj.getString("types").contains("KAFKA"));
-            assertTrue(jobj.getString("types").contains("HTTP"));
-            assertTrue(jobj.getString("types").contains("RABBITMQ"));
-            assertTrue(jobj.getString("types").contains("CUSTOM"));
+            String types = jobj.getString("types");
+            assertTrue(types.contains("FILE"));
+            assertTrue(types.contains("JDBC"));
+            assertTrue(types.contains("KAFKA"));
+            assertTrue(types.contains("HTTP"));
+            assertTrue(types.contains("CUSTOM"));
         } finally {
             if (server != null) {
                 server.shutdown();

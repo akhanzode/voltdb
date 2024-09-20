@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -17,19 +17,26 @@
 
 package org.voltdb;
 
-import com.google_voltpatches.common.collect.ImmutableMap;
-import com.google_voltpatches.common.collect.Sets;
-
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.TreeMap;
 
+import com.google_voltpatches.common.collect.ImmutableMap;
+import com.google_voltpatches.common.collect.Sets;
+
 public class DRRoleStats extends StatsSource {
-    public static final String CN_ROLE = "ROLE";
-    public static final String CN_STATE = "STATE";
-    public static final String CN_REMOTE_CLUSTER_ID = "REMOTE_CLUSTER_ID";
+
+    public enum DRRole {
+        ROLE                        (VoltType.STRING),
+        STATE                       (VoltType.STRING),
+        REMOTE_CLUSTER_ID           (VoltType.INTEGER);
+
+        public final VoltType m_type;
+        DRRole(VoltType type) { m_type = type; }
+    }
+
 
     public enum State {
         DISABLED, // Feature is completely disabled
@@ -70,20 +77,21 @@ public class DRRoleStats extends StatsSource {
     @Override
     protected void populateColumnSchema(ArrayList<VoltTable.ColumnInfo> columns)
     {
-        columns.add(new VoltTable.ColumnInfo(CN_ROLE, VoltType.STRING));
-        columns.add(new VoltTable.ColumnInfo(CN_STATE, VoltType.STRING));
-        columns.add(new VoltTable.ColumnInfo(CN_REMOTE_CLUSTER_ID, VoltType.INTEGER));
+        for (DRRole col : DRRole.values()) {
+            columns.add(new VoltTable.ColumnInfo(col.name(), col.m_type));
+        }
     }
 
     @Override
-    protected void updateStatsRow(Object rowKey, Object[] rowValues)
+    protected int updateStatsRow(Object rowKey, Object[] rowValues)
     {
         @SuppressWarnings("unchecked") Map.Entry<Byte, State> state = (Map.Entry<Byte, State>) rowKey;
         final String role = getRole();
 
-        rowValues[columnNameToIndex.get(CN_ROLE)] = role;
-        rowValues[columnNameToIndex.get(CN_STATE)] = state.getValue().name();
-        rowValues[columnNameToIndex.get(CN_REMOTE_CLUSTER_ID)] = state.getKey();
+        rowValues[DRRole.ROLE.ordinal()] = role;
+        rowValues[DRRole.STATE.ordinal()] = "NONE".equalsIgnoreCase(role) ? State.DISABLED.name() : state.getValue().name();
+        rowValues[DRRole.REMOTE_CLUSTER_ID.ordinal()] = state.getKey();
+        return DRRole.values().length;
     }
 
     @Override
@@ -91,7 +99,8 @@ public class DRRoleStats extends StatsSource {
     {
         final ProducerDRGateway producer = m_vdb.getNodeDRGateway();
         final Map<Byte, DRProducerNodeStats> producerStats;
-        if (producer != null) {
+        final String role = getRole();
+        if (producer != null && !"NONE".equalsIgnoreCase(role)) {
             producerStats = producer.getNodeDRStats();
         } else {
             producerStats = ImmutableMap.of((byte) -1, DRProducerNodeStats.DISABLED_NODE_STATS);
@@ -105,7 +114,7 @@ public class DRRoleStats extends StatsSource {
             consumerStates = ImmutableMap.of((byte) -1, State.DISABLED);
         }
 
-        final Map<Byte, State> states = mergeProducerConsumerStates(producerStats, consumerStates);
+        final Map<Byte, State> states = mergeProducerConsumerStates(producerStats, consumerStates, role);
 
         final Iterator<Map.Entry<Byte, State>> iter = states.entrySet().iterator();
         return new Iterator<Object>() {
@@ -129,7 +138,7 @@ public class DRRoleStats extends StatsSource {
     }
 
     private static Map<Byte, State> mergeProducerConsumerStates(Map<Byte, DRProducerNodeStats> producerStats,
-                                                                Map<Byte, State> consumerStates)
+                                                                Map<Byte, State> consumerStates, final String role)
     {
         Map<Byte, State> states = new HashMap<>();
         for (byte clusterId : Sets.union(producerStats.keySet(), consumerStates.keySet())) {
@@ -140,7 +149,7 @@ public class DRRoleStats extends StatsSource {
                 finalState = finalState.and(producerNodeStats.state);
             }
             if (consumerState != null) {
-                finalState = finalState.and(consumerState);
+                finalState = finalState.and("NONE".equalsIgnoreCase(role) ? State.DISABLED : consumerState);
             }
             states.put(clusterId, finalState);
         }
@@ -176,15 +185,15 @@ public class DRRoleStats extends StatsSource {
         String role = null;
         Map<Byte, State> states = new TreeMap<>();
         while (stats.advanceRow()) {
-            final byte clusterId = (byte) stats.getLong(CN_REMOTE_CLUSTER_ID);
-            final String curRole = stats.getString(CN_ROLE);
+            final byte clusterId = (byte) stats.getLong(DRRole.REMOTE_CLUSTER_ID.name());
+            final String curRole = stats.getString(DRRole.ROLE.name());
             if (role == null) {
                 role = curRole;
             } else if (!role.equals(curRole)) {
                 throw new IllegalArgumentException("Inconsistent DR role across cluster nodes: " + stats.toFormattedString(false));
             }
 
-            final State state = State.valueOf(stats.getString(CN_STATE));
+            final State state = State.valueOf(stats.getString(DRRole.STATE.name()));
             states.put(clusterId, state.and(states.get(clusterId)));
         }
 

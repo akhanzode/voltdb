@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -55,7 +55,7 @@ public class QueryStats extends AdHocNTBase {
             Arrays.stream(StatsSelector.getAllStatsCollector())
             .collect(Collectors.toMap(Enum::name, a -> a, (a, b) -> b));
     private static final Pattern PROC_PATTERN =
-            Pattern.compile("statistics\\s*\\(\\s*([a-z]+)\\s*,\\s*(\\d+)\\s*(,\\s*(\\d+)\\s*)?\\)", Pattern.CASE_INSENSITIVE);
+            Pattern.compile("statistics\\s*\\(\\s*(\\w+)\\s*,\\s*(\\d+)\\s*(,\\s*(\\d+)\\s*)?\\)", Pattern.CASE_INSENSITIVE);
     private static final String tempTableAlias = "TT";
 
     @Override

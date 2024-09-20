@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -23,9 +23,9 @@
 
 package org.voltdb.exportclient;
 
-
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -55,9 +55,9 @@ import org.voltdb.MockVoltDB;
 import org.voltdb.VoltDB;
 import org.voltdb.export.AdvertisedDataSource;
 import org.voltdb.exportclient.ExportDecoderBase.RestartBlockException;
-import org.voltdb.utils.VoltFile;
 
 import com.google_voltpatches.common.base.Charsets;
+import org.apache.commons.io.FileUtils;
 
 import au.com.bytecode.opencsv_voltpatches.CSVWriter;
 
@@ -74,12 +74,11 @@ public class TestExportToFileClient extends ExportClientTestBase {
     {
         super.setup();
         try {
-            VoltFile.recursivelyDelete(new File(m_dir));
+            FileUtils.deleteDirectory(new File(m_dir));
             (new File(m_dir)).mkdirs();
         } catch (IOException e) {
             fail(e.getMessage());
         }
-        System.setProperty("__EXPORT_FILE_ROTATE_PERIOD_UNIT__", TimeUnit.SECONDS.name());
         ExportToFileClient.TEST_VOLTDB_ROOT = m_dir;
         VoltDB.replaceVoltDBInstanceForTest(s_mockVoltDB);
     }
@@ -180,6 +179,43 @@ public class TestExportToFileClient extends ExportClientTestBase {
     }
 
     @Test
+    public void testPeriodUnits() throws Exception
+    {
+        unitTest("123s", 123);
+        unitTest("123m", 123 * 60);
+        unitTest("123h", 123 * 60 * 60);
+        unitTest("123d", 123 * 60 * 60 * 24);
+        unitTest("123",  123 * 60); // default to minutes
+        unitTest("123x", -1); // fail
+    }
+
+    private void unitTest(String value, int expected) {
+        ExportToFileClient client = new ExportToFileClient();
+        String nonce = "TEST_" + value;
+        try {
+            Properties props = new Properties();
+            props.put("nonce", nonce);
+            props.put("period", value);
+            client.configure(props);
+        }
+        catch (Exception ex) {
+            if (expected < 0) {
+                System.out.printf("%s failed as expected: %s\n", nonce, ex.getMessage());
+            } else {
+                fail(String.format("%s threw unexpected exception: %s", nonce, ex));
+            }
+            return;
+        }
+        if (expected < 0) {
+            fail(String.format("%s was expected to fail but resulted in %s", nonce, client.m_periodSecs));
+        }
+        else {
+            assertEquals(String.format("%s gave unexpected result %s", nonce, client.m_periodSecs),
+                         expected, client.m_periodSecs);
+        }
+    }
+
+    @Test
     public void testFileRollingUnbatched() throws Exception
     {
         final long startTs = System.currentTimeMillis();
@@ -188,7 +224,7 @@ public class TestExportToFileClient extends ExportClientTestBase {
         props.put("nonce", Long.toString(System.currentTimeMillis()));
         props.put("type", "csv");
         props.put("outdir", m_dir);
-        props.put("period", "1"); // 1 second rolling period
+        props.put("period", "1s"); // 1 second rolling period
         client.configure(props);
 
         final AdvertisedDataSource source = constructTestSource(false, 0);
@@ -249,7 +285,7 @@ public class TestExportToFileClient extends ExportClientTestBase {
         props.put("nonce", Long.toString(System.currentTimeMillis()));
         props.put("type", "csv");
         props.put("outdir", m_dir);
-        props.put("period", "1"); // 1 second rolling period
+        props.put("period", "1s"); // 1 second rolling period
         props.put("batched", "true");
         client.configure(props);
 
@@ -311,7 +347,7 @@ public class TestExportToFileClient extends ExportClientTestBase {
         props.put("nonce", Long.toString(System.currentTimeMillis()));
         props.put("type", "csv");
         props.put("outdir", m_dir);
-        props.put("period", "100"); // 100 second rolling period
+        props.put("period", "100s"); // 100 second rolling period
         props.put("with-schema", "false"); // disable write JSON representation
         client.configure(props);
 
@@ -365,7 +401,7 @@ public class TestExportToFileClient extends ExportClientTestBase {
         props.put("nonce", Long.toString(System.currentTimeMillis()));
         props.put("type", "csv");
         props.put("outdir", m_dir);
-        props.put("period", "1"); // 1 second rolling period
+        props.put("period", "1s"); // 1 second rolling period
         props.put("with-schema", "true"); // enable write JSON representation
         client.configure(props);
 
@@ -417,7 +453,7 @@ public class TestExportToFileClient extends ExportClientTestBase {
         props.put("nonce", Long.toString(System.currentTimeMillis()));
         props.put("type", "csv");
         props.put("outdir", m_dir);
-        props.put("period", "1"); // 1 second rolling period
+        props.put("period", "1s"); // 1 second rolling period
         props.put("with-schema", "true"); // enable write JSON representation
         client.configure(props);
 
@@ -472,7 +508,7 @@ public class TestExportToFileClient extends ExportClientTestBase {
         props.put("nonce", Long.toString(System.currentTimeMillis()));
         props.put("type", "csv");
         props.put("outdir", m_dir);
-        props.put("period", "1"); // 1 second rolling period
+        props.put("period", "1s"); // 1 second rolling period
         props.put("with-schema", "true");
         props.put("batched", "true");
         props.put("uniquenames", "true");
@@ -498,7 +534,7 @@ public class TestExportToFileClient extends ExportClientTestBase {
         decoder.onBlockCompletion(row);
 
 
-        boolean validName = true;
+        String invalidName = null;
         final File dir = new File(m_dir);
         final File[] subdirs = dir.listFiles();
 
@@ -513,13 +549,17 @@ public class TestExportToFileClient extends ExportClientTestBase {
                 }
             }
             for (File file : allFiles) {
-                if (!(file.getName().matches("\\d\\-mytable\\-\\(\\d\\)\\.[a-z]{3}")||file.getName().matches("\\d\\-mytable\\-\\(\\d\\)-schema\\.json"))) {
-                    validName = false;
+                String name = file.getName();
+                if (!(name.matches("\\d{19}\\-mytable\\-\\(\\d\\)\\.[a-z]{3}") ||
+                      name.matches("\\d{19}\\-mytable\\-\\(\\d\\)-schema\\.json"))) {
+                    invalidName = name;
                     break;
                 }
             }
         }
-        assertTrue(validName);
+
+        String failMsg = String.format("invalid name: %s", invalidName);
+        assertNull(failMsg, invalidName);
     }
 
     @Test
@@ -530,7 +570,7 @@ public class TestExportToFileClient extends ExportClientTestBase {
         props.put("nonce", Long.toString(System.currentTimeMillis()));
         props.put("type", "csv");
         props.put("outdir", m_dir);
-        props.put("period", "1"); // 1 second rolling period
+        props.put("period", "1s"); // 1 second rolling period
         props.put("with-schema", "true");
         props.put("batched", "true");
         props.put("uniquenames", "false");
@@ -555,7 +595,7 @@ public class TestExportToFileClient extends ExportClientTestBase {
         decoder.processRow(row);
         decoder.onBlockCompletion(row);
 
-        boolean validName = true;
+        String invalidName = null;
         final File dir = new File(m_dir);
         final File[] subdirs = dir.listFiles();
 
@@ -570,13 +610,17 @@ public class TestExportToFileClient extends ExportClientTestBase {
                 }
             }
             for (File file : allFiles) {
-                if (!(file.getName().matches("\\d\\-mytable\\.[a-z]{3}") || file.getName().matches("\\d\\-mytable-schema\\.json"))) {
-                    validName = false;
+                String name = file.getName();
+                if (!(name.matches("\\d{19}\\-mytable\\.[a-z]{3}") ||
+                      name.matches("\\d{19}\\-mytable-schema\\.json"))) {
+                    invalidName = name;
                     break;
                 }
             }
         }
-        assertTrue(validName);
+
+        String failMsg = String.format("invalid name: %s", invalidName);
+        assertNull(failMsg, invalidName);
     }
 
     @Test
@@ -587,7 +631,7 @@ public class TestExportToFileClient extends ExportClientTestBase {
         props.put("nonce", Long.toString(System.currentTimeMillis()));
         props.put("type", "csv");
         props.put("outdir", m_dir);
-        props.put("period", "1"); // 1 second rolling period
+        props.put("period", "1s"); // 1 second rolling period
         props.put("with-schema", "true");
         props.put("batched", "false");
         props.put("uniquenames", "true");
@@ -636,7 +680,7 @@ public class TestExportToFileClient extends ExportClientTestBase {
         props.put("nonce", Long.toString(System.currentTimeMillis()));
         props.put("type", "csv");
         props.put("outdir", m_dir);
-        props.put("period", "1"); // 1 second rolling period
+        props.put("period", "1s"); // 1 second rolling period
         props.put("with-schema", "true");
         props.put("batched", "false");
         props.put("uniquenames", "false");
@@ -682,4 +726,120 @@ public class TestExportToFileClient extends ExportClientTestBase {
                 + "\"" + GEOG_POINT.toWKT() + "\",\"" + GEOG.toWKT() + "\"", ts, ts, ts, ts, ts),
                 new String(Files.readAllBytes(f.toPath()), Charsets.UTF_8).trim());
     }
+
+    @Test
+    public void testRenameStrandedUnbatchedFiles() throws Exception {
+        // create some fake csv files
+        String[] times = { "20220101000000", "20220101010000", "20220101020000", "20220101030000" };
+        String[] tables = { "TABLE", "LISTE" };
+        String nonce = "FileExport";
+        int gen = 1000;
+        for (String time : times) {
+            for (String table : tables) {
+                String name = "active-" + nonce + "-" + String.format("%019d", gen) + "-" + table + "-" + time + ".csv";
+                File file = new File(m_dir, name);
+                boolean created = file.createNewFile();
+                assertTrue("collision on create", created);
+                gen++;
+            }
+        }
+
+        // check for files
+        File outdir = new File(m_dir);
+        File[] files = outdir.listFiles();
+        int found = 0;
+        for (File f : files) {
+            String filename = f.getName();
+            if (filename.startsWith("active-")) {
+                found++;
+            }
+        }
+        assertEquals("Didn't find expected files", 8, found);
+
+        // configure client
+        ExportToFileClient client = new ExportToFileClient();
+        Properties props = new Properties();
+        props.put("nonce", nonce);
+        props.put("type", "csv");
+        props.put("outdir", m_dir);
+        props.put("batched", "false");
+        client.configure(props);
+
+        // check the files were renamed
+        int foundActive = 0;
+        int foundInactive = 0;
+        files = outdir.listFiles();
+        for (File f : files) {
+            String filename = f.getName();
+            if (filename.startsWith("active-")) {
+                foundActive++;
+            } else {
+                foundInactive++;
+            }
+        }
+        assertEquals("stranded active file still there", 0, foundActive);
+        assertEquals("stranded active files not renamed", 8, foundInactive);
+
+    }
+
+    @Test
+    public void testRenameStrandedBatchedFiles() throws Exception {
+
+        // create some fake csv files
+        String[] times = { "20220101000000", "20220101010000", "20220101020000", "20220101030000" };
+        String[] tables = { "TABLE", "LISTE" };
+        String nonce = "FileExport";
+        int gen = 1000;
+        for (String time : times) {
+            String dirName = "active-" + nonce + "-" + time;
+            File dir = new File(m_dir, dirName);
+            boolean created = dir.mkdir();
+            assertTrue("collision on dir create", created);
+            for (String table : tables) {
+                String filename = String.format("%019d", gen) + "-" + table + ".csv";
+                File file = new File(dir, filename);
+                created = file.createNewFile();
+                assertTrue("collision on create", created);
+                gen++;
+            }
+        }
+
+        // check for files
+        File outdir = new File(m_dir);
+        File[] files = outdir.listFiles();
+        int found = 0;
+        for (File f : files) {
+            String filename = f.getName();
+            if (filename.startsWith("active-")) {
+                found++;
+            }
+        }
+        assertEquals("Didn't find expected stranded batch folders", 4, found);
+
+        // configure client
+        ExportToFileClient client = new ExportToFileClient();
+        Properties props = new Properties();
+        props.put("nonce", nonce);
+        props.put("type", "csv");
+        props.put("outdir", m_dir);
+        props.put("batched", "true");
+        client.configure(props);
+
+        // check the files were renamed
+        int foundActive = 0;
+        int foundInactive = 0;
+        files = outdir.listFiles();
+        for (File f : files) {
+            String filename = f.getName();
+            if (filename.startsWith("active-")) {
+                foundActive++;
+            } else {
+                foundInactive++;
+            }
+        }
+        assertEquals("new active folder not found", 1, foundActive);
+        assertEquals("Stranded folders not renamed", 4, foundInactive);
+
+    }
+
 }

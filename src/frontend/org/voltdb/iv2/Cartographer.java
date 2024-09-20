@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -95,6 +95,15 @@ public class Cartographer extends StatsSource
 
     private final ExecutorService m_es
             = CoreUtils.getCachedSingleThreadExecutor("Cartographer", 15000);
+
+    public enum TOPO {
+        Partition               (VoltType.INTEGER),
+        Sites                   (VoltType.STRING),
+        Leader                  (VoltType.STRING);
+
+        public final VoltType m_type;
+        TOPO(VoltType type) { m_type = type; }
+    }
 
     /**
      * Retrieve the list of partitions in the system. Since each partition information is being populated individually
@@ -256,9 +265,9 @@ public class Cartographer extends StatsSource
     @Override
     protected void populateColumnSchema(ArrayList<ColumnInfo> columns)
     {
-        columns.add(new ColumnInfo("Partition", VoltType.INTEGER));
-        columns.add(new ColumnInfo("Sites", VoltType.STRING));
-        columns.add(new ColumnInfo("Leader", VoltType.STRING));
+        for (TOPO col : TOPO.values()) {
+            columns.add(new VoltTable.ColumnInfo(col.name(), col.m_type));
+        };
     }
 
     @Override
@@ -275,7 +284,7 @@ public class Cartographer extends StatsSource
     }
 
     @Override
-    protected void updateStatsRow(Object rowKey, Object[] rowValues) {
+    protected int updateStatsRow(Object rowKey, Object[] rowValues) {
         long leader;
         List<Long> sites = new ArrayList<Long>();
         if (rowKey.equals(MpInitiator.MP_INIT_PID)) {
@@ -286,16 +295,17 @@ public class Cartographer extends StatsSource
             //sanity check. The master list may be updated while the statistics is calculated.
             Long leaderInCache = m_iv2Masters.pointInTimeCache().get(rowKey);
             if (leaderInCache == null) {
-                return;
+                return 0;
             }
 
             leader = leaderInCache;
             sites.addAll(getReplicasForPartition((Integer)rowKey));
         }
 
-        rowValues[columnNameToIndex.get("Partition")] = rowKey;
-        rowValues[columnNameToIndex.get("Sites")] = CoreUtils.hsIdCollectionToString(sites);
-        rowValues[columnNameToIndex.get("Leader")] = CoreUtils.hsIdToString(leader);
+        rowValues[TOPO.Partition.ordinal()] = rowKey;
+        rowValues[TOPO.Sites.ordinal()] = CoreUtils.hsIdCollectionToString(sites);
+        rowValues[TOPO.Leader.ordinal()] = CoreUtils.hsIdToString(leader);
+        return TOPO.values().length;
     }
 
     /**
@@ -699,7 +709,7 @@ public class Cartographer extends StatsSource
         }
     }
 
-    public String verifyPartitonLeaderMigrationForStopNode(final int ihid) {
+    public String verifyPartitionLeaderMigrationForStopNode(final int ihid) {
         if (m_configuredReplicationFactor == 0) {
             return "Stopping individual nodes is only allowed on a K-safe cluster";
         }
@@ -724,17 +734,30 @@ public class Cartographer extends StatsSource
                     } catch (KeeperException.NoNodeException ignore) {}
                     otherStoppedHids.remove(ihid);
                     if (!otherStoppedHids.isEmpty()) {
-                        return "Cann't move partition leaders while other nodes are being shutdown.";
+                        return "Can't move partition leaders while other nodes are being shut down.";
                     }
                     String message = doPartitionsHaveReplicas(ihid, otherStoppedHids);
                     if (message != null) {
                         return message;
                     }
-                    // Partition leader distribution mast be balanced, otherwise, the migrated partition leader will
-                    // be moved back.
-                    if (!isPartitionLeadersBalanced()) {
-                        return "Cann't move partition leaders since leader migration is in progress";
-                    }
+                    // Check existence of background partition leader migration request, and fail early if it exists.
+                    // Background leader migration interferes PrepareStopNode check.
+                    // Partition leader distribution must be balanced, otherwise leader might be ping-ponged
+                    // from one request to another.
+                    try {
+                        final String errMsg = "Can't move partition leaders while another leader migration is in progress";
+                        final String logForm = "[Host id %d] Can't stop host id %d: %s";
+                        int thisHost = VoltDB.instance().getMyHostId();
+                        if (m_zk.exists(VoltZK.migratePartitionLeaderBlocker, false) != null) {
+                            hostLog.rateLimitedWarn(60, logForm, thisHost, ihid, "ZooKeeper reports partition leadership migration in progress");
+                            return errMsg;
+                        }
+                        else if (!isPartitionLeadersBalanced()) {
+                            hostLog.rateLimitedWarn(60, logForm, thisHost, ihid, "partition leadership is not in balance");
+                            return errMsg;
+                        }
+                        hostLog.infoFmt("[Host id %d] OK to stop host id %d, no other leader migration in progress", thisHost, ihid);
+                    } catch (KeeperException.NoNodeException ignore) {}
                     return null;
                 }}).get();
         } catch (InterruptedException | ExecutionException t) {
@@ -963,7 +986,7 @@ public class Cartographer extends StatsSource
     }
 
     private int findNewHostForPartitionLeader(Host src, Host target, int maxMastersPerHost, int minMastersPerHost) {
-        // cann't move onto itself
+        // can't move onto itself
         if (src.equals(target)) {
             return -1;
         }
@@ -1038,11 +1061,11 @@ public class Cartographer extends StatsSource
 
     //Utility method to peek the topology
     public static VoltTable peekTopology(Cartographer cart) {
-        ColumnInfo[] column = new ColumnInfo[3];
-        column[0] = new ColumnInfo("Partition", VoltType.BIGINT);
-        column[1] = new ColumnInfo("Sites", VoltType.STRING);
-        column[2] = new ColumnInfo("Leader", VoltType.STRING);
-        VoltTable t = new VoltTable(column);
+        ArrayList<ColumnInfo> columns = new ArrayList<>();
+        for (TOPO col : TOPO.values()) {
+            columns.add(new VoltTable.ColumnInfo(col.name(), col.m_type));
+        };
+        VoltTable t = new VoltTable(columns.toArray(new ColumnInfo[columns.size()]));
 
         Iterator<Object> i = cart.getStatsRowKeyIterator(false);
         while (i.hasNext()) {

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -118,7 +118,7 @@ public class ExpressionTranslator {
             final String funName = operator.getName();
             final int funId = getSqlFunId(funName);
             assert funId > 0 : String.format("Unrecognized function %s", funName);
-            expr.setAttributes(funName, null, funId);
+            expr.setAttributes(funName, null, null, funId);
             expr.setArgs(call.getOperandList().stream().flatMap(node -> {
                 if (node instanceof SqlBasicCall) {
                     return Stream.of(translate((SqlBasicCall) node, t));

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -31,7 +31,6 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-import org.voltcore.logging.Level;
 import org.voltcore.logging.VoltLogger;
 import org.voltcore.messaging.HostMessenger;
 import org.voltcore.utils.CoreUtils;
@@ -54,11 +53,10 @@ import org.voltdb.client.ProcedureCallback;
 import org.voltdb.export.ExportDataSource.StreamStartAction;
 import org.voltdb.iv2.MpInitiator;
 import org.voltdb.utils.CatalogUtil;
-import org.voltdb.utils.LogKeys;
-import org.voltdb.utils.VoltFile;
 
 import com.google_voltpatches.common.base.Preconditions;
 import com.google_voltpatches.common.collect.HashMultimap;
+import org.apache.commons.io.FileUtils;
 
 /**
  * Bridges the connection to an OLAP system and the buffers passed
@@ -235,7 +233,7 @@ public class ExportManager implements ExportManagerInterface
         try {
             exportLog.info(
                 String.format("Cleaning out contents of export overflow directory %s for create with force", overflowDir));
-            VoltFile.recursivelyDelete(overflowDir, false);
+            FileUtils.cleanDirectory(overflowDir);
         } catch(IOException e) {
             String msg = String.format("Error cleaning out export overflow directory %s: %s",
                     overflowDir, e.getMessage());
@@ -352,7 +350,7 @@ public class ExportManager implements ExportManagerInterface
             newProcessor.readyForData();
         }
         catch (final ClassNotFoundException e) {
-            exportLog.l7dlog( Level.ERROR, LogKeys.export_ExportManager_NoLoaderExtensions.name(), e);
+            exportLog.error("No Export loader extensions are available", e);
             throw new RuntimeException(e);
         }
         catch (final Exception e) {
@@ -445,7 +443,7 @@ public class ExportManager implements ExportManagerInterface
                 }
             }
             catch (final ClassNotFoundException e) {
-                exportLog.l7dlog( Level.ERROR, LogKeys.export_ExportManager_NoLoaderExtensions.name(), e);
+                exportLog.error("No Export loader extensions are available", e);
                 throw new RuntimeException(e);
             }
             catch (final Exception e) {
@@ -548,6 +546,7 @@ public class ExportManager implements ExportManagerInterface
             long committedSequenceNumber,
             long tupleCount,
             long uniqueId,
+            long committedSpHandle,
             long bufferPtr,
             BBContainer container) {
         if (container != null) {
@@ -556,7 +555,7 @@ public class ExportManager implements ExportManagerInterface
         ExportManagerInterface instance = VoltDB.getExportManager();
         instance.pushBuffer(partitionId, tableName,
                 startSequenceNumber, committedSequenceNumber,
-                tupleCount, uniqueId, container);
+                tupleCount, uniqueId, committedSpHandle, container);
     }
 
     @Override
@@ -567,6 +566,7 @@ public class ExportManager implements ExportManagerInterface
             long committedSequenceNumber,
             long tupleCount,
             long uniqueId,
+            long committedSpHandle,     // unused
             BBContainer container) {
 
         try {
@@ -644,7 +644,7 @@ public class ExportManager implements ExportManagerInterface
 
     @Override
     public void invokeMigrateRowsDelete(int partition, String tableName, long deletableTxnId,  ProcedureCallback cb) {
-        m_ci.getDispatcher().getInternelAdapterNT().callProcedure(m_ci.getInternalUser(), true, TTLManager.NT_PROC_TIMEOUT, cb,
+        m_ci.getDispatcher().getInternalAdapterNT().callProcedure(m_ci.getInternalUser(), true, TTLManager.NT_PROC_TIMEOUT, cb,
                 "@MigrateRowsDeleterNT", new Object[] {partition, tableName, deletableTxnId});
     }
 

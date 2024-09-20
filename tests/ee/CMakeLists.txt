@@ -1,5 +1,5 @@
 # This file is part of VoltDB.
-# Copyright (C) 2008-2020 VoltDB Inc.
+# Copyright (C) 2008-2022 Volt Active Data Inc.
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -34,6 +34,12 @@
 #
 ########################################################################
 CMAKE_MINIMUM_REQUIRED (VERSION 2.8.11 FATAL_ERROR)
+
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE "${CCACHE_PROGRAM}")
+endif()
+
 PROJECT(VoltDB_Tests)
 IF ( (CMAKE_SYSTEM_NAME STREQUAL "Darwin") AND ( (CMAKE_VERSION VERSION_GREATER 3.0.0) OR (CMAKE_VERSION VERSION_EQUAL 3.0.0) ) )
     # Newer versions of CMake than we use set this
@@ -118,6 +124,9 @@ SET (VOLTDB_MANUAL_SUCCEEDING_TEST_PROGRAMS
   harness_test/harness_tester
   topics/TopicsTableFactoryTest
   topics/GroupStoreTest
+  topics/encode/EncoderTest
+  topics/encode/AvroEncoderTest
+  topics/encode/CsvEncoderTest
   topics/orm/GroupOrmTest
   logging/logging_test
   memleaktests/no_losses
@@ -129,6 +138,7 @@ SET (VOLTDB_MANUAL_SUCCEEDING_TEST_PROGRAMS
   storage/CopyOnWriteTest
   storage/DRTupleStream_test
   storage/ExportTupleStream_test
+  storage/TopicTupleStreamTest
   storage/filter_test
   storage/LargeTempTableBlockTest
   storage/LargeTempTableTest

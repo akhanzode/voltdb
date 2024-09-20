@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -149,7 +149,10 @@ public class ExecutionEngineIPC extends ExecutionEngine {
         , FetchTopicsGroups(37)
         , CommitTopicsGroupOffsets(38)
         , FetchTopicsGroupOffsets(39)
-        , DeleteExpiredTopicsOffsets(40);
+        , DeleteExpiredTopicsOffsets(40)
+        , SetReplicableTables(41)
+        , ClearAllReplicableTables(42)
+        , ClearReplicableTables(43);
 
         Commands(final int id) {
             m_id = id;
@@ -542,6 +545,7 @@ public class ExecutionEngineIPC extends ExecutionEngine {
                     // start sequence number - 8 bytes
                     // tupleCount - 8 bytes
                     // uniqueId - 8 bytes
+                    // last committed SpHandle - 8 bytes
                     // export buffer length - 4 bytes
                     // export buffer - export buffer length bytes
                     int partitionId = getBytes(4).getInt();
@@ -553,6 +557,7 @@ public class ExecutionEngineIPC extends ExecutionEngine {
                     long committedSequenceNumber = getBytes(8).getLong();
                     long tupleCount = getBytes(8).getLong();
                     long uniqueId = getBytes(8).getLong();
+                    long lastCommittedSpHandle = getBytes(8).getLong();
                     int length = getBytes(4).getInt();
                     ByteBuffer buffer = length == 0 ? null : getBytes(length);
                     ExportManager.pushExportBuffer(
@@ -562,7 +567,8 @@ public class ExecutionEngineIPC extends ExecutionEngine {
                             committedSequenceNumber,
                             tupleCount,
                             uniqueId,
-                            0,
+                            lastCommittedSpHandle,
+                            0L,
                             buffer == null ? null : DBBPool.wrapBB(buffer));
                 }
                 else if (status == ExecutionEngine.ERRORCODE_DECODE_BASE64_AND_DECOMPRESS) {
@@ -911,6 +917,9 @@ public class ExecutionEngineIPC extends ExecutionEngine {
             final String hostname,
             final int drClusterId,
             final int defaultDrBufferSize,
+            final boolean drIgnoreConflicts,
+            final int drCrcErrorIgnoreMax,
+            final boolean drCrcErrorIgnoreFatal,
             final int tempTableMemory,
             final BackendTarget target,
             final int port,
@@ -943,6 +952,9 @@ public class ExecutionEngineIPC extends ExecutionEngine {
                 m_hostname,
                 drClusterId,
                 defaultDrBufferSize,
+                drIgnoreConflicts,
+                drCrcErrorIgnoreMax,
+                drCrcErrorIgnoreFatal,
                 1024 * 1024 * tempTableMemory,
                 hashinatorConfig,
                 isLowestSiteId);
@@ -1007,6 +1019,9 @@ public class ExecutionEngineIPC extends ExecutionEngine {
             final String hostname,
             final int drClusterId,
             final int defaultDrBufferSize,
+            final boolean drIgnoreConflicts,
+            final int drCrcErrorIgnoreMax,
+            final boolean drCrcErrorIgnoreFatal,
             final long tempTableMemory,
             final HashinatorConfig hashinatorConfig,
             final boolean createDrReplicatedStream)
@@ -1024,6 +1039,9 @@ public class ExecutionEngineIPC extends ExecutionEngine {
         m_data.putInt(hostId);
         m_data.putInt(drClusterId);
         m_data.putInt(defaultDrBufferSize);
+        m_data.putInt(drIgnoreConflicts ? 1 : 0);
+        m_data.putInt(drCrcErrorIgnoreMax);
+        m_data.putInt(drCrcErrorIgnoreFatal ? 1 : 0);
         m_data.putLong(EELoggers.getLogLevels());
         m_data.putLong(tempTableMemory);
         m_data.putInt(createDrReplicatedStream ? 1 : 0);
@@ -2114,4 +2132,72 @@ public class ExecutionEngineIPC extends ExecutionEngine {
         }
     }
 
+    @Override
+    public void setReplicableTables(int clusterId, String[] tables) {
+        byte[][] tableNames = null;
+        int tablesSize = 0;
+        if (tables != null) {
+            tableNames = new byte[tables.length][];
+            for (int i = 0; i < tables.length; ++i) {
+                tableNames[i] = tables[i].getBytes(Constants.UTF8ENCODING);
+                tablesSize += Integer.BYTES + tableNames.length;
+            }
+        }
+
+        verifyDataCapacity(Byte.BYTES + Integer.BYTES * 2 + tablesSize);
+
+        m_data.clear();
+        m_data.putInt(Commands.SetReplicableTables.m_id);
+        m_data.putInt(clusterId);
+        if (tableNames == null) {
+            m_data.putInt(-1);
+        } else {
+            m_data.putInt(tableNames.length);
+            for (byte[] table : tableNames) {
+                m_data.putInt(table.length);
+                m_data.put(table);
+            }
+        }
+
+        try {
+            m_connection.write();
+            m_connection.readStatusByte();
+        } catch (final IOException e) {
+            e.printStackTrace();
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public void clearAllReplicableTables() {
+        verifyDataCapacity(Byte.BYTES);
+
+        m_data.clear();
+        m_data.putInt(Commands.ClearAllReplicableTables.m_id);
+
+        try {
+            m_connection.write();
+            m_connection.readStatusByte();
+        } catch (final IOException e) {
+            e.printStackTrace();
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public void clearReplicableTables(int clusterId) {
+        verifyDataCapacity(Byte.BYTES);
+
+        m_data.clear();
+        m_data.putInt(Commands.ClearReplicableTables.m_id);
+        m_data.putInt(clusterId);
+
+        try {
+            m_connection.write();
+            m_connection.readStatusByte();
+        } catch (final IOException e) {
+            e.printStackTrace();
+            throw new RuntimeException(e);
+        }
+    }
 }

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -23,19 +23,22 @@ import java.nio.ByteBuffer;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
 
 import org.json_voltpatches.JSONString;
 import org.json_voltpatches.JSONStringer;
 import org.voltcore.logging.VoltLogger;
 import org.voltdb.catalog.Table;
 import org.voltdb.client.BatchTimeoutOverrideType;
+import org.voltdb.client.Priority;
 import org.voltdb.client.ProcedureInvocationExtensions;
 import org.voltdb.client.ProcedureInvocationType;
 import org.voltdb.common.Constants;
+import org.voltdb.iv2.PriorityPolicy;
 import org.voltdb.utils.SerializationHelper;
 
 /**
- * Represents a serializeable bundle of procedure name and parameters. This
+ * Represents a serializable bundle of procedure name and parameters. This
  * is the object that is sent by the client library to call a stored procedure.
  *
  * Note, the client (java) serializes a ProcedureInvocation, which is deserialized
@@ -56,7 +59,11 @@ public class StoredProcedureInvocation implements JSONString {
     private String procName = null;
     private byte m_procNameBytes[] = null;
 
-    public static final long UNITIALIZED_ID = -1L;
+    // Not partition-specific
+    private static final int NO_PARTITION = -1;
+
+    // No timeout - same value used for batch and request timeouts
+    public static final int NO_TIMEOUT = BatchTimeoutOverrideType.NO_TIMEOUT;
 
     /*
      * This ByteBuffer is accessed from multiple threads concurrently.
@@ -70,10 +77,54 @@ public class StoredProcedureInvocation implements JSONString {
         returned to the client in the ClientResponse */
     long clientHandle = -1;
 
-    private int m_batchTimeout = BatchTimeoutOverrideType.NO_TIMEOUT;
+    private int m_batchTimeout = NO_TIMEOUT;
     private boolean m_allPartition = false;
-    private int m_partitionDestination = -1;
+    private int m_partitionDestination = NO_PARTITION;
+    private boolean m_batchCall = false;
 
+    private volatile boolean keepParamsImmutable = false;
+    public void setKeepParamsImmutable(boolean flag) {
+        keepParamsImmutable = flag;
+    }
+    public boolean getKeepParamsImmutable(){
+        return keepParamsImmutable;
+    }
+
+    /*
+     * StoredProcedureInvocations (SPI) are created with the SYSTEM_PRIORITY by default,
+     * which is the highest in the system and is not supposed to be requested by VoltDB clients.
+     * This preserves the default behavior for those SPI instances that are created internally
+     * by the system. The only cases where the priority can be set to a different value are:
+     *
+     * - a serialized invocation arriving from the client and carrying an explicit priority
+     * - a serialized invocation arriving from the client and NOT carrying an explicit priority
+     *   (in which case we assign a default client priority).
+     *
+     * See initVersion2FromBuffer for SPI deserialization.
+     */
+    private int m_requestPriority = Priority.SYSTEM_PRIORITY;
+
+    /*
+     * Request timeout, 2 use cases:
+     *
+     * 1- applicable to client requests.
+     *
+     * For added protection against timing out internally-created
+     * invocations, we will not time out an SPI whose priority
+     * is set to SYSTEM_PRIORITY. This is enforced in method
+     * requestHasTimedOut(), below.
+     *
+     * 2- used to specify a compound procedure timeout.
+     *
+     * This use case doesn't call requestHasTimedOut().
+     */
+    private int m_requestTimeout = NO_TIMEOUT; // a duration, in microseconds
+    private long m_requestStartTime = 0; // a point in time, as from System.nanoTime()
+
+    /*
+     * Shallow copy, used for DR. Priority and request timeout
+     * values are intentionally not copied.
+     */
     public StoredProcedureInvocation getShallowCopy()
     {
         StoredProcedureInvocation copy = new StoredProcedureInvocation();
@@ -94,6 +145,8 @@ public class StoredProcedureInvocation implements JSONString {
         copy.m_batchTimeout = m_batchTimeout;
         copy.m_allPartition = m_allPartition;
         copy.m_partitionDestination = m_partitionDestination;
+        copy.m_batchCall = m_batchCall;
+        copy.keepParamsImmutable = keepParamsImmutable;
 
         return copy;
     }
@@ -196,11 +249,83 @@ public class StoredProcedureInvocation implements JSONString {
     }
 
     public boolean hasPartitionDestination() {
-        return m_partitionDestination != -1;
+        return m_partitionDestination != NO_PARTITION;
     }
 
     public int getPartitionDestination() {
         return m_partitionDestination;
+    }
+
+    /**
+     * Set this procedure invocation as a batch invocation. When the procedure is a batch invocation there should only
+     * be one parameter which is a VoltTable where each row is a set of parameters to pass to the procedure
+     * <p>
+     * If the procedure being invoked is a partitioned procedure but one of the rows in {@code params} is not valid for
+     * {@code partitionDestination} then {@link org.voltdb.client.ClientResponse#GRACEFUL_FAILURE} will be returned by
+     * {@link org.voltdb.client.ClientResponse#getStatus()} and
+     * {@link org.voltdb.client.ClientResponse#TXN_MISPARTITIONED} will be returned by
+     * {@link org.voltdb.client.ClientResponse#getAppStatus()}
+     *
+     * @param params               {@link VoltTable} containing the parameters for the batch execution
+     */
+    public void setBatchCall(VoltTable params) {
+        this.params = new FutureTask<ParameterSet>(() -> ParameterSet.fromArrayNoCopy(params));
+        serializedParams = null;
+        m_batchCall = true;
+    }
+
+    public void setBatchCall(boolean batchCall) {
+        m_batchCall = batchCall;
+        assert(getParams().size() == 1);
+    }
+    /**
+     * @return {@code true} if this is a batch procedure call
+     */
+    public boolean isBatchCall() {
+        return m_batchCall;
+    }
+
+    public int getRequestPriority() {
+        return m_requestPriority;
+    }
+
+    public void setRequestPriority(int priority) {
+        // Clip values to acceptable range
+        if (priority < Priority.SYSTEM_PRIORITY) {
+            m_requestPriority = Priority.LOWEST_PRIORITY;
+        } else if (priority > Priority.LOWEST_PRIORITY) {
+            m_requestPriority = Priority.LOWEST_PRIORITY;
+        } else {
+            m_requestPriority = priority;
+        }
+    }
+
+    public int getRequestTimeout() {
+        return m_requestTimeout;
+    }
+
+    public void setRequestTimeout(int timeout) {
+        m_requestTimeout = timeout;
+    }
+
+    public boolean hasRequestTimeout() {
+        return m_requestTimeout != NO_TIMEOUT;
+    }
+
+    public boolean requestHasTimedOut() {
+        return m_requestTimeout != NO_TIMEOUT &&
+               m_requestPriority != Priority.SYSTEM_PRIORITY &&
+               System.nanoTime() - m_requestStartTime > TimeUnit.MICROSECONDS.toNanos(m_requestTimeout);
+    }
+
+    public void copyRequestTimeout(StoredProcedureInvocation src) {
+        m_requestStartTime = src.m_requestStartTime;
+        m_requestTimeout = src.m_requestTimeout;
+    }
+
+    public void clearRequestTimeout() {
+        m_requestStartTime = 0;
+        m_requestTimeout = NO_TIMEOUT;
     }
 
     /** Read into an serialized parameter buffer to extract a single parameter */
@@ -230,17 +355,29 @@ public class StoredProcedureInvocation implements JSONString {
     {
         // get extension sizes - if not present, size is 0 for each
         // 6 is one byte for ext type, one for size, and 4 for integer value
-        int batchExtensionSize = m_batchTimeout != BatchTimeoutOverrideType.NO_TIMEOUT ? 6 : 0;
+        int extensionSize = m_batchTimeout != NO_TIMEOUT ? 6 : 0;
 
-        int allPartitionExtensionSize = 0;
-        int partitionDestinationSize = 0;
         // Either set allPartition or partitionDestination both are not needed
-        if (m_partitionDestination == -1) {
-            // 2 is one byte for ext type, one for size
-            allPartitionExtensionSize = m_allPartition ? 2 : 0;
-        } else {
+        if (hasPartitionDestination()) {
             // 6 is one byte for ext type, one for size, and 4 for integer value
-            partitionDestinationSize = 6;
+            extensionSize += 6;
+        } else if (m_allPartition) {
+            // 2 is one byte for ext type, one for size
+            extensionSize += 2;
+        }
+
+        if (m_batchCall) {
+            // 2 is one byte for ext type, one for size
+            extensionSize += 2;
+        }
+
+        // The request priority, always present
+        // 3 is one byte for ext type, one for size, one for byte value
+        extensionSize += 3;
+
+        // Request timeout: one byte for ext type, one for size, and 4 for integer value
+        if (hasRequestTimeout()) {
+            extensionSize += 6;
         }
 
         // compute the size
@@ -249,7 +386,7 @@ public class StoredProcedureInvocation implements JSONString {
                 4 + getProcNameBytes().length + // procname
                 8 + // client handle
                 1 + // extension count
-                        batchExtensionSize + allPartitionExtensionSize + partitionDestinationSize;
+                extensionSize;
         return size;
     }
 
@@ -349,9 +486,10 @@ public class StoredProcedureInvocation implements JSONString {
 
         buf.putLong(clientHandle);
 
-        // there are two possible extensions, count which apply
-        byte extensionCount = 0;
-        if (m_batchTimeout != BatchTimeoutOverrideType.NO_TIMEOUT) {
+        // there are several possible extensions, count which apply
+        // note that priority is always present
+        byte extensionCount = 1;
+        if (m_batchTimeout != NO_TIMEOUT) {
             ++extensionCount;
         }
         if (hasPartitionDestination()) {
@@ -359,17 +497,31 @@ public class StoredProcedureInvocation implements JSONString {
         } else if (m_allPartition) {
             ++extensionCount;
         }
+        if (m_batchCall) {
+            ++extensionCount;
+        }
+        if (hasRequestTimeout()) {
+            ++extensionCount;
+        }
 
         // write the count as one byte
         buf.put(extensionCount);
+
         // write any extensions that apply
-        if (m_batchTimeout != BatchTimeoutOverrideType.NO_TIMEOUT) {
+        if (m_batchTimeout != NO_TIMEOUT) {
             ProcedureInvocationExtensions.writeBatchTimeoutWithTypeByte(buf, m_batchTimeout);
         }
         if (hasPartitionDestination()) {
             ProcedureInvocationExtensions.writePartitionDestinationWithTypeByte(buf, m_partitionDestination);
         } else if (m_allPartition) {
             ProcedureInvocationExtensions.writeAllPartitionWithTypeByte(buf);
+        }
+        if (m_batchCall) {
+            ProcedureInvocationExtensions.writeBatchCallWithTypeByte(buf);
+        }
+        ProcedureInvocationExtensions.writeRequestPriorityWithTypeByte(buf, m_requestPriority);
+        if (hasRequestTimeout()) {
+            ProcedureInvocationExtensions.writeRequestTimeoutWithTypeByte(buf, m_requestTimeout);
         }
 
         serializeParams(buf);
@@ -442,9 +594,11 @@ public class StoredProcedureInvocation implements JSONString {
         type = ProcedureInvocationType.typeFromByte(version);
         m_procNameBytes = null;
         // set these to defaults so old versions don't worry about them
-        m_batchTimeout = BatchTimeoutOverrideType.NO_TIMEOUT;
+        m_batchTimeout = NO_TIMEOUT;
         m_allPartition = false;
-        m_partitionDestination = -1;
+        m_partitionDestination = NO_PARTITION;
+        m_requestTimeout = NO_TIMEOUT;
+        m_requestStartTime = 0;
 
         switch (type) {
             case ORIGINAL:
@@ -469,6 +623,8 @@ public class StoredProcedureInvocation implements JSONString {
         }
         setProcName(procNameBytes);
         clientHandle = buf.getLong();
+
+        // Note: do not set a priority on older requests, leave at system level
         // do not deserialize parameters in ClientInterface context
         initParameters(buf);
     }
@@ -476,7 +632,7 @@ public class StoredProcedureInvocation implements JSONString {
     private void initVersion1FromBuffer(ByteBuffer buf) throws IOException {
         BatchTimeoutOverrideType batchTimeoutType = BatchTimeoutOverrideType.typeFromByte(buf.get());
         if (batchTimeoutType == BatchTimeoutOverrideType.NO_OVERRIDE_FOR_BATCH_TIMEOUT) {
-            m_batchTimeout = BatchTimeoutOverrideType.NO_TIMEOUT;
+            m_batchTimeout = NO_TIMEOUT;
         } else {
             m_batchTimeout = buf.getInt();
             // Client side have already checked the batchTimeout value, but,
@@ -487,6 +643,7 @@ public class StoredProcedureInvocation implements JSONString {
             }
         }
 
+        // Note: do not set a priority on older requests, leave at system level
         // the rest of the format is the same as the original
         initOriginalFromBuffer(buf);
     }
@@ -504,7 +661,7 @@ public class StoredProcedureInvocation implements JSONString {
         clientHandle = buf.getLong();
 
         // default values for extensions
-        m_batchTimeout = BatchTimeoutOverrideType.NO_TIMEOUT;
+        m_batchTimeout = NO_TIMEOUT;
         // read any invocation extensions and skip any we don't recognize
         int extensionCount = buf.get();
 
@@ -517,24 +674,58 @@ public class StoredProcedureInvocation implements JSONString {
             throw new IOException("SPI extension count was > 30: possible corrupt network data.");
         }
 
-        for (int i = 0; i < extensionCount; ++i) {
-            final byte type = ProcedureInvocationExtensions.readNextType(buf);
-            switch (type) {
-            case ProcedureInvocationExtensions.BATCH_TIMEOUT:
-                m_batchTimeout = ProcedureInvocationExtensions.readBatchTimeout(buf);
-                break;
-            case ProcedureInvocationExtensions.ALL_PARTITION:
-                // note this always returns true as it's just a flag
-                m_allPartition = ProcedureInvocationExtensions.readAllPartition(buf);
-                break;
-            case ProcedureInvocationExtensions.PARTITION_DESTINATION:
-                m_partitionDestination = ProcedureInvocationExtensions.readPartitionDestination(buf);
-                m_allPartition = true;
-                break;
-            default:
-                ProcedureInvocationExtensions.skipUnknownExtension(buf);
-                break;
+        boolean hadPriority = false;
+        try {
+            for (int i = 0; i < extensionCount; ++i) {
+                final byte type = ProcedureInvocationExtensions.readNextType(buf);
+                switch (type) {
+                case ProcedureInvocationExtensions.BATCH_TIMEOUT:
+                    m_batchTimeout = ProcedureInvocationExtensions.readBatchTimeout(buf);
+                    break;
+                case ProcedureInvocationExtensions.ALL_PARTITION:
+                    // note this always returns true as it's just a flag
+                    m_allPartition = ProcedureInvocationExtensions.readAllPartition(buf);
+                    break;
+                case ProcedureInvocationExtensions.PARTITION_DESTINATION:
+                    m_partitionDestination = ProcedureInvocationExtensions.readPartitionDestination(buf);
+                    m_allPartition = true;
+                    break;
+                case ProcedureInvocationExtensions.BATCH_CALL:
+                    m_batchCall = ProcedureInvocationExtensions.readBatchCall(buf);
+                    break;
+                case ProcedureInvocationExtensions.REQUEST_PRIORITY:
+                    int priority = ProcedureInvocationExtensions.readRequestPriority(buf);
+                    if (priority == Priority.SYSTEM_PRIORITY) {
+                        // Preserve system priority: note that rogue clients can
+                        // take advantage of this but we have no way to discriminate.
+                        setRequestPriority(priority);
+                    }
+                    else {
+                        // Clip the incoming request to the values supported by the server configuration
+                        setRequestPriority(PriorityPolicy.clipPriority(priority));
+                    }
+                    hadPriority = true;
+                    break;
+                case ProcedureInvocationExtensions.REQUEST_TIMEOUT:
+                    m_requestTimeout = ProcedureInvocationExtensions.readRequestTimeout(buf);
+                    m_requestStartTime = System.nanoTime();
+                    break;
+                default:
+                    ProcedureInvocationExtensions.skipUnknownExtension(buf);
+                    break;
+                }
             }
+        } catch (Exception e) {
+            if (e instanceof IOException) {
+                throw e;
+            } else {
+                throw new IOException(String.format("Failed to deserialize SPI extensions: ", e.getMessage()));
+            }
+        }
+
+        // Old clients that sent invocations without priority get assigned a default
+        if (!hadPriority) {
+            setRequestPriority(PriorityPolicy.getDefaultPriority());
         }
 
         // do not deserialize parameters in ClientInterface context
@@ -557,8 +748,11 @@ public class StoredProcedureInvocation implements JSONString {
         String retval = type.name() + " Invocation: " + procName + "(";
         ParameterSet params = getParams();
         if (params != null) {
+            String sep = "";
             for (Object o : params.toArray()) {
-                retval += String.valueOf(o) + ", ";
+                retval += sep;
+                retval += String.valueOf(o);
+                sep = ", ";
             }
         } else {
             retval += "null";
@@ -567,6 +761,7 @@ public class StoredProcedureInvocation implements JSONString {
         retval += " type=" + String.valueOf(type);
         retval += " batchTimeout=" + BatchTimeoutOverrideType.toString(m_batchTimeout);
         retval += " clientHandle=" + String.valueOf(clientHandle);
+        retval += " priority=" + String.valueOf(m_requestPriority);
 
         return retval;
     }

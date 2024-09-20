@@ -20,6 +20,7 @@ begin Cluster                      "A set of connected hosts running one or more
   int drFlushInterval              "Time interval in milliseconds between flushing partially filled DR buffers (depends on globalFlushInterval)"
   int exportFlushInterval          "Time interval in milliseconds between flushing partially filled Export buffers (depends on globalFlushInterval)"
   int preferredSource              "The cluster id from which this joining cluster should request snapshot"
+  string conflictretention         "Optional retention time for XDCR conflict CSV files"
 end
 
 begin Deployment javaonly         "Run-time deployment settings"
@@ -33,12 +34,24 @@ begin ThreadPool javaonly         "Thread Pool configuration"
   int size                        "The size of the thread pool"
 end
 
+// Note: Systemsettings does not contain all elements defined in DeploymentFileSchema.xsd
+// but only those that appear in @SystemInformation
+
 begin Systemsettings javaonly "Container for deployment systemsettings element"
   int temptablemaxsize        "The maximum allocation size for temp tables in the EE"
   int snapshotpriority        "The priority of snapshot work"
   int elasticduration         "Maximum duration time for rebalancing"
   int elasticthroughput       "Target throughput in megabytes for elasticity"
   int querytimeout            "The maximum latency for a query batch before timing out"
+  Priorities* priorities      "The server settings for priorities"
+end
+
+begin Priorities javaonly   "The server settings for priorities"
+  bool enabled              "Are priorities enabled"
+  int maxwait               "Max wait time in queue, in milliseconds"
+  int batchsize             "Batch processing size from queue"
+  int drpriority            "Priority of DR operations"
+  int snapshotpriority      "Priority of snapshot operations"
 end
 
 begin Database                       "A set of schema, procedures and other metadata that together comprise an application"
@@ -54,6 +67,7 @@ begin Database                       "A set of schema, procedures and other meta
   Task*  tasks                       "The set of configured tasks"
   bool   isActiveActiveDRed          "Are all DR tables in this database active-active DRed"
   string securityprovider            "The security provider used to authenticate users"
+  Topic* topics                      "The set of topics for the database"
 end
 
 begin CommandLog javaonly     "Configuration for a command log"
@@ -64,17 +78,17 @@ begin CommandLog javaonly     "Configuration for a command log"
   int logSize                 "Size of the command log in megabytes"
 end
 
-begin ConnectorTableInfo    "Per-export connector table configuration"
-  Table? table              "Reference to the table being appended"
-  bool appendOnly           "DEPRECATED: True if this table is an append-only table for export."
+begin ConnectorTableInfo javaonly   "Per-export connector table configuration"
+  Table? table                      "Reference to the table being appended"
+  bool appendOnly                   "DEPRECATED: True if this table is an append-only table for export."
 end
 
-begin ConnectorProperty    "Connector configuration property"
-  string name              "Configuration property name"
-  string value             "Configuration property value"
+begin ConnectorProperty javaonly    "Connector configuration property"
+  string name                       "Configuration property name"
+  string value                      "Configuration property value"
 end
 
-begin Connector                 "Export connector"
+begin Connector javaonly        "Export connector"
   string loaderclass            "The class name of the connector"
   string threadpoolname         "The name of the thread pool"
   bool enabled                  "Is the connector enabled"
@@ -90,6 +104,7 @@ begin Group javaonly
   bool sql              "Can invoke the adhoc system procedures"
   bool sqlread          "Can invoke read-only adhoc system procedures"
   bool allproc          "Can invoke any user defined procedures"
+  bool compoundproc     "Can invoke compound procedures"
 end
 
 begin GroupRef javaonly
@@ -172,17 +187,39 @@ begin Table                                  "A table (relation) in the database
   MaterializedViewHandlerInfo* mvHandlerInfo "Only on result table of a materialized view"
   Table? materializer                        "If this is a materialized view, this field stores the source table"
   string signature                           "Catalog version independent signature of the table consisting of name and schema"
-  int tuplelimit                             "A maximum number of rows in a table"
+  removed tuplelimit                         "Removed: A maximum number of rows in a table"
   bool isDRed                                "Is this table DRed?"
-  Statement* tuplelimitDeleteStmt            "Delete statement to execute if tuple limit will be exceeded"
+  removed tuplelimitDeleteStmt               "Removed: Delete statement to execute if tuple limit will be exceeded"
   TimeToLive* timeToLive                     "Time to live"
   int tableType                              "Types: no stream(persistent), view-only stream, stream with target, persistent table for export and migration"
   string migrationTarget                     "The target where the data are migrated to"
-  bool isTopic                               "Is this a topic stream?"
-  string topicProfile                        "The deployment profile of the topic"
-  string topicFormat                         "The format of the topic"
-  string topicKeyColumnNames                 "A CSV string of the key column names, ordered"
-  string topicAllowedRoleNames               "A CSV string of the roles allowed to access this topic"
+  string topicName                           "Associated topic for stream"
+  string topicKeyColumnNames                 "List of topic key column names"
+  string topicValueColumnNames               "List of topic value column names"
+  removed isTopic                            "Replaced by topicName not being empty"
+  removed topicProfile                       "Removed"
+  removed topicFormat                        "Moved to topic deployment config"
+  removed topicAllowedRoleNames              "Moved to topic deployment config"
+end
+
+begin Topic                                  "A topic in the database"
+  bool isOpaque                              "Is this an opaque topic?"
+  bool isSingle                              "Is this a single partition opaque topic?"
+  int consumerKeySchemaId                    "The schema ID for the consumer keys"
+  int consumerValueSchemaId                  "The schema ID for the consumer values"
+  string streamName                          "Stream for the topic"
+  string procedureName                       "Stored procedure for the topic"
+  int retentionPolicy                        "Retention policy of the topic"
+  int retentionLimit                         "Retention limit of the topic"
+  int priority                               "Priority of the procedure calls"
+  string retentionUnit                       "Retention unit of the topic"
+  string roles                               "A CSV string of the roles to access this topic"
+  removed profile                            "The deployment profile of the topic"
+  Property* properties                       "Configuration properties for the topic"
+end
+
+begin Property                               "Configuration property"
+  string value                               "Configuration property value"
 end
 
 begin TimeToLive javaonly             "Time to Live (TTL), limits the life span of data"
@@ -323,8 +360,8 @@ begin SnapshotSchedule javaonly "A schedule for the database to follow when crea
   bool enabled                  "Is this auto snapshot schedule enabled?"
   string frequencyUnit          "Unit of time frequency is specified in"
   int frequencyValue            "Frequency in some unit"
-  int retain                    "How many snapshots to retain"
-  string prefix                 "Prefix for snapshot filenames"
+  int retain                    "How many auto snapshots to retain"
+  string prefix                 "Prefix for auto snapshot filenames"
 end
 
 begin TaskParameter javaonly

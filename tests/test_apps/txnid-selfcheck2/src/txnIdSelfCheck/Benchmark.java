@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -23,23 +23,45 @@
 
 package txnIdSelfCheck;
 
-import org.voltcore.logging.VoltLogger;
-import org.voltdb.CLIConfig;
-import org.voltdb.ClientResponseImpl;
-import org.voltdb.VoltTable;
-import org.voltdb.client.*;
-import org.voltdb.utils.MiscUtils;
-
 import java.io.FileWriter;
 import java.io.IOException;
 import java.lang.Thread.UncaughtExceptionHandler;
 import java.text.SimpleDateFormat;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Map.Entry;
-import java.util.concurrent.*;
+import java.util.Random;
+import java.util.Timer;
+import java.util.TimerTask;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+
+import org.voltcore.logging.VoltLogger;
+import org.voltdb.CLIConfig;
+import org.voltdb.ClientResponseImpl;
+import org.voltdb.VoltTable;
+import org.voltdb.client.Client;
+import org.voltdb.client.Client2;
+import org.voltdb.client.Client2Config;
+import org.voltdb.client.ClientConfig;
+import org.voltdb.client.ClientFactory;
+import org.voltdb.client.ClientImpl;
+import org.voltdb.client.ClientResponse;
+import org.voltdb.client.ClientStatusListenerExt;
+import org.voltdb.client.ProcCallException;
+import org.voltdb.client.ProcedureCallback;
+import org.voltdb.utils.MiscUtils;
 
 public class Benchmark {
 
@@ -52,8 +74,10 @@ public class Benchmark {
 
     // validated command line configuration
     final Config config;
-    // create a client for each server node
+    // clients for each Client version
     Client client;
+    Client2 client2;
+    static final int REQUEST_LIMIT = 300_000;
     // Timer for periodic stats printing
     Timer timer;
     // Benchmark start time
@@ -109,6 +133,12 @@ public class Benchmark {
         @Option(desc = "Id of the first thread (useful for running multiple clients).")
         int threadoffset = 0;
 
+        @Option(desc = "Use client V2 (default false")
+        boolean useclientv2 = false;
+
+        @Option(desc = "Use priorities, only evaluated if client V2 (default false")
+        boolean usepriorities = false;
+
         @Option(desc = "Minimum value size in bytes.")
         int minvaluesize = 1024;
 
@@ -130,8 +160,11 @@ public class Benchmark {
         @Option(desc = "Target data size for the partitioned filler table.")
         long partfillerrowmb = 128;
 
+        @Option(desc = "Client Timeout: increased from default to pass recover tests.")
+        int clienttimeout = 240;
+
         @Option(desc = "Timeout that kills the client if progress is not made.")
-        int progresstimeout = 120;
+        int progresstimeout = 240;
 
         @Option(desc = "Whether or not to disable adhoc writes.")
         boolean disableadhoc = false;
@@ -158,7 +191,7 @@ public class Benchmark {
         float upserthitratio = (float)0.20;
 
         @Option(desc = "Allow disabling different threads for testing specific functionality. ")
-        String disabledthreads = "none";
+        String disabledthreads = "Cappedlt";
         //threads: "clients,partBiglt,replBiglt,partTrunclt,replTrunclt,partCappedlt,replCappedlt,partLoadlt,replLoadlt,readThread,adHocMayhemThread,idpt,updateclasses,partNDlt,replNDlt"
         // Biglt,Trunclt,Cappedlt,Loadlt are also recognized and apply to BOTH part and repl threads
         ArrayList<String> disabledThreads = null;
@@ -180,6 +213,14 @@ public class Benchmark {
         @Option(desc = "Enable Hashmismatch generation")
         boolean enablehashmismatchgen = false;
 
+        @Option(desc = "username")
+        String username = "";
+
+        @Option(desc = "password")
+        String password = "";
+
+        @Option(desc = "Drop Tasks at the end default is true.")
+        boolean droptasks = true;
 
         @Override
         public void validate() {
@@ -347,6 +388,19 @@ public class Benchmark {
         }
     }
 
+    // Client2 support
+    Client2 getClient2() {
+        Client2Config clientConfig = new Client2Config()
+                .clientRequestLimit(REQUEST_LIMIT)
+                .outstandingTransactionLimit(REQUEST_LIMIT / 10)
+                .procedureCallTimeout(config.clienttimeout, TimeUnit.SECONDS);
+        if (config.sslfile.trim().length() > 0) {
+            clientConfig.trustStoreFromPropertyFile(config.sslfile);
+            clientConfig.enableSSL();
+        }
+        return ClientFactory.createClient(clientConfig);
+    }
+
     /**
      * Constructor for benchmark instance.
      * Configures VoltDB client and prints configuration.
@@ -365,7 +419,8 @@ public class Benchmark {
         log.info(HORIZONTAL_RULE);
         log.info(config.getConfigDumpString());
 
-        ClientConfig clientConfig = new ClientConfig("", "", new StatusListener());
+        ClientConfig clientConfig = new ClientConfig(config.username, config.password, new StatusListener());
+        clientConfig.setProcedureCallTimeout(TimeUnit.SECONDS.toMillis(config.clienttimeout));
         if (config.sslfile.trim().length() > 0) {
             clientConfig.setTrustStoreConfigFromPropertyFile(config.sslfile);
             clientConfig.enableSSL();
@@ -375,6 +430,9 @@ public class Benchmark {
             clientConfig.setTopologyChangeAware(true);
         }
         client = ClientFactory.createClient(clientConfig);
+        if (config.useclientv2) {
+            client2 = getClient2();
+        }
     }
 
     /**
@@ -539,8 +597,10 @@ public class Benchmark {
         VoltTable t = cr.getResults()[0];
         log.info(String.format("%15s%15s%15s%15s",
                 "TASK NAME", "PARTITION ID", "INVOCATIONS", "FAILURES"));
+        List<String> tasks = new ArrayList<>();
         while (t.advanceRow()) {
             long f = t.getLong("PROCEDURE_FAILURES");
+            tasks.add(t.getString("TASK_NAME"));
             log.info(String.format("%15s%15s%15s%15s",
                     t.getString("TASK_NAME"), t.getLong("PARTITION_ID"), t.getLong("SCHEDULER_INVOCATIONS"), f));
             if (f > 0)
@@ -551,6 +611,34 @@ public class Benchmark {
         // if (failures > 0) {
         //     hardStop(failures + " unexpected TASK failures");
         // }
+    }
+
+    private void dropAllTasks() throws IOException, ProcCallException {
+        ClientResponse cr = client.callProcedure("@Statistics", "TASK", 0);
+
+        if (cr.getStatus() != ClientResponse.SUCCESS) {
+            log.error("Failed to call Statistics proc at shutdown. Exiting.");
+            printJStack();
+            hardStop(((ClientResponseImpl) cr).toJSONString());
+        }
+        VoltTable t = cr.getResults()[0];
+        List<String> tasks = new ArrayList<>();
+        while (t.advanceRow()) {
+            tasks.add(t.getString("TASK_NAME"));
+        }
+        for (String task : tasks) {
+            String dropSql = "DROP TASK " + task +" IF EXISTS;";
+            System.out.println(dropSql);
+
+            cr = client.callProcedure("@AdHoc", dropSql);
+
+            if (cr.getStatus() != ClientResponse.SUCCESS) {
+                log.error("Failed to call Drop task proc at shutdown. Exiting.");
+                printJStack();
+                hardStop(((ClientResponseImpl) cr).toJSONString());
+            }
+        }
+        tasks.clear();
     }
 
     private byte reportDeadThread(Thread th) {
@@ -616,6 +704,9 @@ public class Benchmark {
 
         // connect to one or more servers, loop until success
         connect();
+        if (client2 != null) {
+            client2.connectSync(config.servers, 60, 1, TimeUnit.SECONDS);
+        }
 
         // get partition count
         int pcount = 0;
@@ -641,7 +732,7 @@ public class Benchmark {
 
             // successfully called summarize
             VoltTable t = cr.getResults()[0];
-            long ts = t.fetchRow(0).getLong("ts");
+            long ts = t.fetchRow(0).getTimestampAsLong("ts");
             String tsStr = ts == 0 ? "NO TIMESTAMPS" : String.valueOf(ts) + " / " + new Date(ts).toString();
             long count = t.fetchRow(0).getLong("count");
 
@@ -656,8 +747,8 @@ public class Benchmark {
         clientThreads = new ArrayList<ClientThread>();
         if (!config.disabledThreads.contains("clients")) {
             for (byte cid = (byte) config.threadoffset; cid < config.threadoffset + config.threads; cid++) {
-                ClientThread clientThread = new ClientThread(cid, txnCount, client, processor, permits,
-                        config.allowinprocadhoc, config.mpratio);
+                ClientThread clientThread = new ClientThread(cid, txnCount, client, client2, processor, permits,
+                        config.allowinprocadhoc, config.usepriorities, config.mpratio);
                 //clientThread.start(); # started after preload is complete
                 clientThreads.add(clientThread);
             }
@@ -741,9 +832,8 @@ public class Benchmark {
         // Run the benchmark loop for the requested duration
         // The throughput may be throttled depending on client configuration
         log.info("Running benchmark...");
-        while (((ClientImpl) client).isHashinatorInitialized() == false) {
-            Thread.sleep(1000);
-            System.out.println("Wait for hashinator..");
+        if (!client.waitForTopology(60_000)) {
+            throw new RuntimeException("Timed out waiting for topology info.");
         }
 
         if (!config.disabledThreads.contains("clients")) {
@@ -820,6 +910,7 @@ public class Benchmark {
             log.info("Hashmismatch will fire in " + String.valueOf(config.duration/2) + " seconds");
             Thread hashmismatchthread = new Thread() {
 
+                @Override
                 public void run() {
                     try {
                         // run once halfway through .
@@ -962,6 +1053,17 @@ public class Benchmark {
                         // in disaster recovery scenarios exceptions can be
                         // generated.  at shutdown, we don't really care
                         log.warn("@Statistics call failed during shutdown", e);
+                    }
+                }
+
+                if (config.droptasks) {
+                    log.info("Calling dropAllTasks");
+                    try {
+                        dropAllTasks();
+                    } catch (Exception e) {
+                        // in disaster recovery scenarios exceptions can be
+                        // generated.  at shutdown, we don't really care
+                        log.warn("dropAllTasks call failed during shutdown", e);
                     }
                 }
 

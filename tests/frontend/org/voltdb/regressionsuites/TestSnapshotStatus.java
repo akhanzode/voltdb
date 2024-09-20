@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -54,7 +54,7 @@ public class TestSnapshotStatus extends SaveRestoreBase {
         System.out.println(results[0]);
         // better be four rows, one for each execution site, in the blocking save results:
         assertEquals(4, results[0].getRowCount());
-        results = client.callProcedure("@SnapshotStatus").getResults();
+        results = client.callProcedure("@Statistics", "SnapshotStatus", 0).getResults();
         System.out.println(results[0]);
         // better be six rows, one for each table at each node, in the status results:
         assertEquals(6 + countSnapshotingSystemTables(), results[0].getRowCount());
@@ -83,7 +83,7 @@ public class TestSnapshotStatus extends SaveRestoreBase {
 
         System.out.println(results[0]);
         try {
-            results = client.callProcedure("@SnapshotStatus").getResults();
+            results = client.callProcedure("@Statistics", "SnapshotStatus", 0).getResults();
         } catch (NoConnectionsException e) {
             e.printStackTrace();
         } catch (Exception ex) {
@@ -126,6 +126,7 @@ public class TestSnapshotStatus extends SaveRestoreBase {
         LocalCluster lcconfig = new LocalCluster("testsnapshotstatus.jar", 2, 2, 1,
                                                BackendTarget.NATIVE_EE_JNI);
         assertTrue(lcconfig.compile(project));
+        lcconfig.setHasLocalServer(false);
         builder.addServerConfig(lcconfig, MultiConfigSuiteBuilder.ReuseServer.NEVER);
 
         return builder;

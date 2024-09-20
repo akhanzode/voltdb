@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -255,7 +255,8 @@ public class MpRoSite implements Runnable, SiteProcedureConnection
         @Override
         public boolean updateCatalog(String diffCmds, CatalogContext context,
                 boolean requiresSnapshotIsolation, long txnId, long uniqueId, long spHandle, boolean isReplay,
-                boolean requireCatalogDiffCmdsApplyToEE, boolean requiresNewExportGeneration)
+                boolean requireCatalogDiffCmdsApplyToEE, boolean requiresNewExportGeneration,
+                Map<Byte, String[]> replicableTables)
         {
             throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
         }
@@ -306,18 +307,19 @@ public class MpRoSite implements Runnable, SiteProcedureConnection
         }
 
         @Override
-        public void recoverWithDrAppliedTrackers(Map<Integer, Map<Integer, DRSiteDrIdTracker>> trackers)
+        public void recoverDrState(int clusterId, Map<Integer, Map<Integer, DRSiteDrIdTracker>> trackers,
+                Map<Byte, String[]> replicableTables)
         {
             throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
         }
 
         @Override
-        public void resetDrAppliedTracker() {
+        public void resetAllDrAppliedTracker() {
             throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
         }
 
         @Override
-        public void resetDrAppliedTracker(byte clusterId) {
+        public void resetDrAppliedTracker(int clusterId) {
             throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
         }
 
@@ -623,6 +625,8 @@ public class MpRoSite implements Runnable, SiteProcedureConnection
             Map<String, Map<Integer, ExportSnapshotTuple>> exportSequenceNumbers,
             Map<Integer, Long> drSequenceNumbers,
             Map<Integer, Map<Integer, Map<Integer, DRSiteDrIdTracker>>> allConsumerSiteTrackers,
+            Map<Byte, byte[]> drCatalogCommands,
+            Map<Byte, String[]> replicableTables,
             boolean requireExistingSequenceNumbers,
             long clusterCreateTime)
     {
@@ -798,5 +802,10 @@ public class MpRoSite implements Runnable, SiteProcedureConnection
     @Override
     public long getMaxTotalMpResponseSize() {
         return MpTransactionState.MP_MAX_TOTAL_RESP_SIZE / MpRoSitePool.MAX_POOL_SIZE;
+    }
+
+    @Override
+    public void setReplicableTables(int clusterId, String[] tables, boolean clear) {
+        throw new UnsupportedOperationException();
     }
 }

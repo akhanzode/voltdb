@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -362,9 +362,9 @@ public class TestJDBCSecurityEnabled {
     }
 
     @Test
-    public void testUsingCrendentialFileIncludingSpecialCharactersInPassword()
+    public void testUsingCredentialFileIncludingSpecialCharactersInPassword()
             throws NoConnectionsException, IOException, ProcCallException, InterruptedException {
-        System.out.println("Starting testUsingCrendentialFileIncludingSpecialCharactersInPassword");
+        System.out.println("Starting testUsingCredentialFileIncludingSpecialCharactersInPassword");
         // write username / password to csv
         String[] authData = {"username: userWithAdminPerm2", "password: password!!!"};
         try {

@@ -36,7 +36,7 @@ HOST="localhost"
 
 # remove build artifacts
 function clean() {
-    rm -rf obj debugoutput ${APPNAME}.jar voltdbroot log
+    rm -rf obj debugoutput ${APPNAME}.jar voltdbroot log voltdb_crash*txt
 }
 
 # compile the source code for procedures and the client into jarfiles
@@ -118,9 +118,7 @@ function async-benchmark-help() {
 
 function async-benchmark() {
     benchmark Async \
-        --ratelimit=100000 \
-        --autotune=false $@ \
-        --latencytarget=10
+        --ratelimit=100000
 }
 
 function secure-benchmark() {
@@ -150,8 +148,15 @@ function jdbc-benchmark() {
 }
 
 function help() {
-    echo "Usage: ./run.sh {clean|jars[-ifneeded]|[secure-]server|masked-server|client|...}"
-    echo "       {...|[a]sync-benchmark[-help]|secure-benchmark|jdbc-benchmark[-help]}"
+    echo "
+  Usage: ./run.sh OPTION
+
+  Options:
+      clean | jars |
+      server | secure-server | masked-server | client N |
+      async-benchmark | sync-benchmark | jdbc-benchmark |
+      async-benchmark-help | sync-benchmark-help | jdbc-benchmark-help
+"
 }
 
 # Run the target passed as the first arg on the command line

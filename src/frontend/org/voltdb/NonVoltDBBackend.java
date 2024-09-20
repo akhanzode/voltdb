@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -38,13 +38,11 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
-import org.voltcore.logging.Level;
 import org.voltcore.logging.VoltLogger;
 import org.voltdb.exceptions.ConstraintFailureException;
 import org.voltdb.messaging.FastSerializer;
 import org.voltdb.types.TimestampType;
 import org.voltdb.utils.Encoder;
-import org.voltdb.utils.LogKeys;
 
 /**
  * A wrapper around another database server (and JDBC connection), such as
@@ -943,7 +941,7 @@ public abstract class NonVoltDBBackend {
                 sqlLog.warn(warn.getMessage());
             //LOG.info("SQL DDL execute result: " + (success ? "true" : "false"));
         } catch (SQLException e) {
-            hostLog.l7dlog( Level.ERROR, LogKeys.host_Backend_RunDDLFailed.name(), new Object[] { ddl }, e);
+            hostLog.errorFmt(e, "Attempt to run DDL %s failed", ddl);
         }
 
     }
@@ -989,8 +987,7 @@ public abstract class NonVoltDBBackend {
             indicator.equals("(")) {    // "(" is for "(SELECT ... UNION ...)", et al
             try {
                 Statement stmt = dbconn.createStatement();
-                sqlLog.l7dlog( Level.DEBUG, LogKeys.sql_Backend_ExecutingDML.name(), new Object[] { dml }, null);
-                sqlLog.debug("Executing " + dml);
+                sqlLog.debugFmt("Executing %s", dml);
                 ResultSet rs = stmt.executeQuery(dml);
                 ResultSetMetaData rsmd = rs.getMetaData();
 
@@ -1048,7 +1045,7 @@ public abstract class NonVoltDBBackend {
                 if (e instanceof ExpectedProcedureException) {
                     throw (ExpectedProcedureException)e;
                 }
-                sqlLog.l7dlog( Level.TRACE, LogKeys.sql_Backend_DmlError.name(), e);
+                sqlLog.trace("HSQLDB Backend DML Error", e);
                 throw new ExpectedProcedureException(m_database_type + " Backend DML Error ", e);
             }
         }
@@ -1064,31 +1061,26 @@ public abstract class NonVoltDBBackend {
             } catch(SQLException e) {
                 // glorious hack to determine if the error is a constraint failure
                 if (e.getMessage().contains("constraint")) {
-                    sqlLog.l7dlog( Level.TRACE, LogKeys.sql_Backend_ConvertingHSQLExtoCFEx.name(), e);
+                    sqlLog.trace("Converting HSQL to CFException", e);
                     final byte messageBytes[] = e.getMessage().getBytes();
                     ByteBuffer b = ByteBuffer.allocate(100 + messageBytes.length);
                     b.putInt(messageBytes.length);
                     b.put(messageBytes);
                     b.put(e.getSQLState().getBytes());
                     b.putInt(0); // ConstraintFailure.type
-                    try {
-                        FastSerializer.writeString(m_database_type, b);
-                    }
-                    catch (IOException e1) {
-                        e1.printStackTrace();
-                    }
+                    FastSerializer.writeString(m_database_type, b);
                     b.putInt(0);//Table size is 0
                     b.rewind();
                     throw new ConstraintFailureException(b);
                 }
                 else {
-                    sqlLog.l7dlog( Level.TRACE, LogKeys.sql_Backend_DmlError.name(), e);
+                    sqlLog.trace("HSQLDB Backend DML Error", e);
                     throw new ExpectedProcedureException(m_database_type + " Backend DML Error ", e);
                 }
 
             } catch (Exception e) {
                 // rethrow an expected exception
-                sqlLog.l7dlog( Level.TRACE, LogKeys.sql_Backend_DmlError.name(), e);
+                sqlLog.trace("HSQLDB Backend DML Error", e);
                 throw new ExpectedProcedureException(m_database_type + " Backend DML Error ", e);
             }
         }

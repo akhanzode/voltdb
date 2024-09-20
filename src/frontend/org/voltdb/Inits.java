@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -49,6 +49,7 @@ import org.voltdb.catalog.Catalog;
 import org.voltdb.catalog.CatalogException;
 import org.voltdb.common.Constants;
 import org.voltdb.common.NodeState;
+import org.voltdb.compiler.CatalogChangeResult;
 import org.voltdb.compiler.deploymentfile.DeploymentType;
 import org.voltdb.compiler.deploymentfile.DrRoleType;
 import org.voltdb.compiler.deploymentfile.FeaturesType;
@@ -417,6 +418,7 @@ public class Inits {
                 }
             } while (catalogStuff == null || catalogStuff.catalogBytes.length == 0);
 
+            InMemoryJarfile thisNodeCatalog = null;
             assert( m_rvdb.getStartAction() != StartAction.PROBE );
             if (m_rvdb.getStartAction() == StartAction.CREATE) {
                 // We may have received a staged catalog from the leader.
@@ -425,7 +427,6 @@ public class Inits {
                     String drRole = m_rvdb.getCatalogContext().getCluster().getDrrole();
                     m_rvdb.m_pathToStartupCatalog = Inits.createEmptyStartupJarFile(drRole).getAbsolutePath();
                 }
-                InMemoryJarfile thisNodeCatalog = null;
                 try {
                     thisNodeCatalog = new InMemoryJarfile(m_rvdb.m_pathToStartupCatalog);
                 } catch (IOException e){
@@ -451,10 +452,11 @@ public class Inits {
                 Pair<InMemoryJarfile, String> loadResults =
                     CatalogUtil.loadAndUpgradeCatalogFromJar(catalogStuff.catalogBytes,
                                                              DrRoleType.XDCR.value().equals(m_rvdb.getCatalogContext().getCluster().getDrrole()));
+                thisNodeCatalog = loadResults.getFirst();
                 serializedCatalog =
-                    CatalogUtil.getSerializedCatalogStringFromJar(loadResults.getFirst());
-                catalogJarBytes = loadResults.getFirst().getFullJarBytes();
-                catalogJarHash = loadResults.getFirst().getSha1Hash();
+                    CatalogUtil.getSerializedCatalogStringFromJar(thisNodeCatalog);
+                catalogJarBytes = thisNodeCatalog.getFullJarBytes();
+                catalogJarHash = thisNodeCatalog.getSha1Hash();
             } catch (IOException e) {
                 VoltDB.crashLocalVoltDB("Unable to load catalog", false, e);
             }
@@ -471,16 +473,41 @@ public class Inits {
                 // Disallow recovering from an incompatible Enterprise catalog.
                 VoltDB.crashLocalVoltDB(e.getLocalizedMessage());
             }
-
             serializedCatalog = null;
 
+            // Build validators and validate deployment
+            // Note: the validation an catalog compilation sequence is identical to that of
+            // {@link org.voltdb.sysprocs.UpdateApplicationBase#prepareApplicationCatalogDiff}
+            m_rvdb.buildCatalogValidators(m_config.m_isEnterprise);
+            CatalogChangeResult ccr = new CatalogChangeResult();
+            try {
+                if (!m_rvdb.validateDeployment(catalog, m_deployment, null, ccr)) {
+                    VoltDB.declineCrashFile = "No crash file generated for deployment validation failures";
+                    VoltDB.crashLocalVoltDB(ccr.errorMsg);
+                }
+            }
+            catch (Exception e) {
+                VoltDB.crashLocalVoltDB("Unexpected error validating deployment", true, e);
+            }
+
+            // Compile deployment into catalog
             // note if this fails it will print an error first
             // This is where we compile real catalog and create runtime
-            // catalog context. To validate deployment we compile and create
-            // a starter context which uses a placeholder catalog.
+            // catalog context.
             String result = CatalogUtil.compileDeployment(catalog, m_deployment, false);
             if (result != null) {
+                VoltDB.declineCrashFile = "No crash file generated for deployment compilation exceptions";
                 VoltDB.crashLocalVoltDB(result);
+            }
+
+            // Validate full configuration
+            try {
+                if (!m_rvdb.validateConfiguration(catalog, m_deployment, thisNodeCatalog, null, ccr)) {
+                    VoltDB.crashLocalVoltDB(ccr.errorMsg);
+                }
+            }
+            catch (Exception e) {
+                VoltDB.crashLocalVoltDB("Unexpected error validating configuration", true, e);
             }
 
             try {
@@ -514,15 +541,7 @@ public class Inits {
             // Make the leader the only license enforcer.
             boolean isLeader = (m_rvdb.m_myHostId == 0);
             if (m_config.m_isEnterprise && isLeader && !m_isRejoin) {
-
-                if (!MiscUtils.validateLicense(m_rvdb.getLicenseApi(),
-                                               m_rvdb.m_clusterSettings.get().hostcount(),
-                        DrRoleType.fromValue(m_rvdb.getCatalogContext().getCluster().getDrrole()),
-                        m_rvdb.getConfig().m_startAction))
-                {
-                    // validateLicense logs. Exit call is here for testability.
-                    VoltDB.crashGlobalVoltDB("VoltDB license constraints are not met.", false, null);
-                }
+                m_rvdb.getLicensing().validateLicense();
             }
         }
     }
@@ -620,9 +639,11 @@ public class Inits {
                 if (m_config.m_sslContextFactory != null) {
                     sslEnabled = true;
                 }
-                httpPort = (m_deployment.getHttpd().getPort()==null) ?
-                        (sslEnabled ? VoltDB.DEFAULT_HTTPS_PORT : VoltDB.DEFAULT_HTTP_PORT) :
-                        m_deployment.getHttpd().getPort();
+                httpPort = m_deployment.getHttpd().getPort() == null
+                        ? sslEnabled
+                            ? VoltDB.DEFAULT_HTTPS_PORT
+                            : VoltDB.DEFAULT_HTTP_PORT
+                        : m_deployment.getHttpd().getPort();
                 if (m_deployment.getHttpd().getJsonapi() != null) {
                     m_rvdb.m_jsonEnabled = m_deployment.getHttpd().getJsonapi().isEnabled();
                 }
@@ -727,7 +748,7 @@ public class Inits {
             // Let the Export system read its configuration from the catalog.
             try {
                 FeaturesType features = m_rvdb.m_catalogContext.getDeployment().getFeatures();
-                ExportManagerInterface.initialize(
+                ExportManagerInterface emi = ExportManagerInterface.initialize(
                         features,
                         m_rvdb.m_myHostId,
                         m_config,
@@ -738,6 +759,7 @@ public class Inits {
                         m_rvdb.m_messenger,
                         m_rvdb.getPartitionToSiteMap()
                         );
+                m_rvdb.m_globalServiceElector.registerService(emi);
             } catch (Throwable t) {
                 VoltDB.crashLocalVoltDB("Error setting up export", true, t);
             }

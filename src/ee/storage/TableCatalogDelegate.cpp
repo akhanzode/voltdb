@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -416,7 +416,7 @@ Table* TableCatalogDelegate::constructTableFromCatalog(catalog::Database const& 
     Table* table = TableFactory::getPersistentTable(
             databaseId, tableName.c_str(), schema, columnNames, m_signatureHash,
             m_materialized, partitionColumnIndex, m_tableType, tableAllocationTargetSize,
-            catalogTable.tuplelimit(), m_compactionThreshold, drEnabled, isReplicated);
+            m_compactionThreshold, drEnabled, isReplicated);
     PersistentTable* persistentTable = dynamic_cast<PersistentTable*>(table);
     if ( ! persistentTable) {
         vassert(pkeyIndexId.empty());
@@ -827,6 +827,13 @@ void TableCatalogDelegate::initTupleWithDefaultValues(Pool* pool,
                 break;
         }
     }
+}
+
+// only allowed on streams to handle topic transitions (STREAM <--> CONNECTOR_LESS_STREAM)
+void TableCatalogDelegate::setTableType(TableType tableType) {
+    vassert(tableTypeIsStream(tableType));
+    vassert(tableTypeIsStream(m_tableType));
+    m_tableType = tableType;
 }
 
 }

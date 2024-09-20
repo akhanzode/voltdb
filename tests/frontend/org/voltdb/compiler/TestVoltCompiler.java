@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -75,6 +75,10 @@ import org.voltdb.utils.MiscUtils;
 
 import junit.framework.TestCase;
 
+// Note: as of 2022-01-17, unit tests for
+// CREATE TABLE ...  EXPORT|MIGRATE TO TARGET|TOPIC
+// are in file TestVoltCompilerTableExport.
+
 public class TestVoltCompiler extends TestCase {
     private String nothing_jar;
     private String testout_jar;
@@ -92,105 +96,33 @@ public class TestVoltCompiler extends TestCase {
         File tjar = new File(testout_jar);
         tjar.delete();
     }
-    public void testExportTarget() throws Exception {
-        String ddl = "create table foo EXPORT TO TARGET foo (a integer NOT NULL, b integer, PRIMARY KEY(a));\n";
-        VoltProjectBuilder pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-        assertTrue(pb.compile(Configuration.getPathToCatalogForTest("testExportTarget.jar")));
-
-        ddl = "create table foo EXPORT TO TARGET foo ON INSERT,DELETE,UPDATE_NEW (a integer NOT NULL, b integer, PRIMARY KEY(a));\n";
-        pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-        assertTrue(pb.compile(Configuration.getPathToCatalogForTest("testExportTarget.jar")));
-
-        ddl = "create table foo EXPORT TO TARGET foo ON INSERT,DELETE,UPDATE,UPDATE_NEW (a integer NOT NULL, b integer, PRIMARY KEY(a));\n";
-        pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-        assertFalse(pb.compile(Configuration.getPathToCatalogForTest("testExportTarget.jar")));
-
-        ddl = "create table foo EXPORT TO TARGET foo ON UPDATE_OLD,UPDATE_NEW (a integer NOT NULL, b integer, PRIMARY KEY(a));\n";
-        pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-        assertFalse(pb.compile(Configuration.getPathToCatalogForTest("testExportTarget.jar")));
-
-        // cann't alter target
-        ddl = "create table foo EXPORT TO TARGET foo ON UPDATE_OLD (a integer NOT NULL, b integer, PRIMARY KEY(a));\n" +
-        "alter table foo  alter EXPORT TO TARGET foox ON UPDATE_NEW;\n";
-        pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-        assertFalse(pb.compile(Configuration.getPathToCatalogForTest("testExportTarget.jar")));
-
-        ddl = "create table foo EXPORT TO TARGET foo ON UPDATE_OLD (a integer NOT NULL, b integer, PRIMARY KEY(a));\n" +
-                "alter table foo  alter EXPORT TO TARGET foo ON UPDATE_NEW;\n";
-        pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-        assertTrue(pb.compile(Configuration.getPathToCatalogForTest("testExportTarget.jar")));
-    }
-
-    public void testTableExportWithTTL() throws Exception {
-        String ddl = "create table foo EXPORT TO TARGET foo (a integer NOT NULL, b integer, PRIMARY KEY(a)) \n" +
-                "USING TTL 20 MINUTES ON COLUMN a BATCH_SIZE 10 MAX_FREQUENCY 3;";
-        VoltProjectBuilder pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-        assertTrue(pb.compile(Configuration.getPathToCatalogForTest("testTableExportWithTTL.jar")));
-
-        ddl = "create table foo EXPORT TO TARGET bar ON INSERT,DELETE,UPDATE (a integer NOT NULL, b integer, PRIMARY KEY(a)) \n" +
-                "USING TTL 20 MINUTES ON COLUMN a BATCH_SIZE 10 MAX_FREQUENCY 3;";
-        pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-        assertTrue(pb.compile(Configuration.getPathToCatalogForTest("testTableExportWithTTL.jar")));
-    }
-
-    public void testTableExportAndMigrate() throws Exception {
-        String ddl = "create table foo EXPORT TO TARGET foo MIGRATE TO TARGET bar (a integer NOT NULL, b integer, PRIMARY KEY(a));\n";
-        VoltProjectBuilder pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-        assertFalse(pb.compile(Configuration.getPathToCatalogForTest("testTableExportAndMigrate.jar")));
-
-        ddl = "create table foo MIGRATE TO TARGET bar EXPORT TO TARGET foo (a integer NOT NULL, b integer, PRIMARY KEY(a));\n";
-        pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-        assertFalse(pb.compile(Configuration.getPathToCatalogForTest("testTableExportAndMigrate.jar")));
-
-        ddl = "create table foo EXPORT TO TARGET foo MIGRATE TO TARGET bar (a integer NOT NULL, b integer, PRIMARY KEY(a)) \n" +
-                "USING TTL 20 MINUTES ON COLUMN a BATCH_SIZE 10 MAX_FREQUENCY 3;";
-        pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-        assertFalse(pb.compile(Configuration.getPathToCatalogForTest("testTableExportAndMigrate.jar")));
-
-        ddl = "create table foo MIGRATE TO TARGET bar EXPORT TO TARGET foo (a integer NOT NULL, b integer, PRIMARY KEY(a)) \n" +
-                "USING TTL 20 MINUTES ON COLUMN a BATCH_SIZE 10 MAX_FREQUENCY 3;";
-        pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-        assertFalse(pb.compile(Configuration.getPathToCatalogForTest("testTableExportAndMigrate.jar")));
-    }
 
     public void testDDLCompilerTTL() throws Exception {
-        String ddl = "create table ttl (a integer NOT NULL, b integer, PRIMARY KEY(a)) USING TTL 10 SECONDS ON COLUMN a;\n" +
-                     "alter table ttl alter USING TTL 20 MINUTES ON COLUMN a;\n" +
-                     "alter table ttl alter USING TTL 20 ON COLUMN a;\n" +
-                     "alter table ttl alter USING TTL 20 MINUTES ON COLUMN a BATCH_SIZE 10;\n" +
-                     "alter table ttl alter USING TTL 20 MINUTES ON COLUMN a MAX_FREQUENCY 10;\n" +
-                     "alter table ttl alter USING TTL 20 MINUTES ON COLUMN a BATCH_SIZE 10 MAX_FREQUENCY 1;\n" +
-                     "alter table ttl alter USING TTL 20 MINUTES ON COLUMN a MAX_FREQUENCY 3 BATCH_SIZE 1;\n" +
-                     "alter table ttl alter USING TTL 20 MINUTES ON COLUMN a MAX_FREQUENCY 3;\n" +
-                     "alter table ttl alter USING TTL 20 ON COLUMN a BATCH_SIZE 10;\n" +
+        String ddl = "create table ttl (a integer NOT NULL, b integer, c timestamp default now() not null, PRIMARY KEY(a)) USING TTL 10 SECONDS ON COLUMN c;\n" +
+                     "alter table ttl alter USING TTL 20 MINUTES ON COLUMN c;\n" +
+                     "alter table ttl alter USING TTL 20 ON COLUMN c;\n" +
+                     "alter table ttl alter USING TTL 20 MINUTES ON COLUMN c BATCH_SIZE 10;\n" +
+                     "alter table ttl alter USING TTL 20 MINUTES ON COLUMN c MAX_FREQUENCY 10;\n" +
+                     "alter table ttl alter USING TTL 20 MINUTES ON COLUMN c BATCH_SIZE 10 MAX_FREQUENCY 1;\n" +
+                     "alter table ttl alter USING TTL 20 MINUTES ON COLUMN c MAX_FREQUENCY 3 BATCH_SIZE 1;\n" +
+                     "alter table ttl alter USING TTL 20 MINUTES ON COLUMN c MAX_FREQUENCY 3;\n" +
+                     "alter table ttl alter USING TTL 20 ON COLUMN c BATCH_SIZE 10;\n" +
                      "alter table ttl drop TTL;\n" +
-                     "alter table ttl ADD USING TTL 20 ON COLUMN a BATCH_SIZE 10;\n";
+                     "alter table ttl ADD USING TTL 20 ON COLUMN c BATCH_SIZE 10;\n";
         VoltProjectBuilder pb = new VoltProjectBuilder();
         pb.addLiteralSchema(ddl);
         assertTrue(pb.compile(Configuration.getPathToCatalogForTest("testout.jar")));
 
         // can not drop ttl column
-        ddl = "create table ttl (a integer NOT NULL, b integer, PRIMARY KEY(a)) USING TTL 10 SECONDS ON COLUMN a;\n" +
-              "alter table ttl drop column a;\n";
+        ddl = "create table ttl (a integer NOT NULL, b integer, c timestamp default now() not null, PRIMARY KEY(a)) USING TTL 10 SECONDS ON COLUMN c;\n" +
+              "alter table ttl drop column c;\n";
         pb = new VoltProjectBuilder();
         pb.addLiteralSchema(ddl);
         assertFalse(pb.compile(Configuration.getPathToCatalogForTest("testout.jar")));
 
         // max_fequency must be positive integer
-        ddl = "create table ttl (a integer NOT NULL, b integer, PRIMARY KEY(a)) USING TTL 10 SECONDS ON COLUMN a;\n" +
-              "alter table ttl alter USING TTL 20 MINUTES ON COLUMN a BATCH_SIZE 10 MAX_FREQUENCY 0;\n";
+        ddl = "create table ttl (a integer NOT NULL, b integer, c timestamp default now() not null, PRIMARY KEY(a)) USING TTL 10 SECONDS ON COLUMN c;\n" +
+              "alter table ttl alter USING TTL 20 MINUTES ON COLUMN c BATCH_SIZE 10 MAX_FREQUENCY 0;\n";
         pb = new VoltProjectBuilder();
         pb.addLiteralSchema(ddl);
         assertFalse(pb.compile(Configuration.getPathToCatalogForTest("testout.jar")));
@@ -283,8 +215,10 @@ public class TestVoltCompiler extends TestCase {
 
     private boolean isFeedbackPresent(String expectedError,
             ArrayList<Feedback> fbs) {
+        String expErr = expectedError.replaceAll("\\s+", " ");
         for (Feedback fb : fbs) {
-            if (fb.getStandardFeedbackLine().contains(expectedError)) {
+            String fbLine = fb.getStandardFeedbackLine().replaceAll("\\s+", " ");
+            if (fbLine.contains(expErr)) {
                 return true;
             }
         }
@@ -2133,244 +2067,6 @@ public class TestVoltCompiler extends TestCase {
 
         subTestDDLCompilerMatViewJoin();
     }
-
-    public void testDDLCompilerTableLimit() {
-        String ddl;
-
-        // Test CREATE
-        // test failed cases
-        ddl = "create table t(id integer not null, num integer," +
-                "CONSTRAINT tblimit1 LIMIT PARTITION ROWS 6xx);";
-        checkDDLErrorMessage(ddl, "unexpected token: XX");
-
-        ddl = "create table t(id integer not null, num integer," +
-                "CONSTRAINT tblimit1 LIMIT PARTITION ROWS 66666666666666666666666666666666);";
-        checkDDLErrorMessage(ddl, "incompatible data type in operation");
-
-        ddl = "create table t(id integer not null, num integer," +
-                "CONSTRAINT tblimit1 LIMIT PARTITION ROWS -10);";
-        checkDDLErrorMessage(ddl, "Invalid constraint limit number '-10'");
-
-        ddl = "create table t(id integer not null, num integer," +
-                "CONSTRAINT tblimit1 LIMIT PARTITION ROWS 5, CONSTRAINT tblimit2 LIMIT PARTITION ROWS 7);";
-        checkDDLErrorMessage(ddl, "Multiple LIMIT PARTITION ROWS constraints on table T are forbidden");
-
-        ddl = "create table t(id integer not null, num integer," +
-                "CONSTRAINT tblimit1 LIMIT PARTITION Row 6);";
-        checkDDLErrorMessage(ddl, "unexpected token: ROW required: ROWS");
-
-        ddl = "create table t(id integer not null, num integer," +
-                "CONSTRAINT tblimit1 LIMIT Rows 6);";
-        checkDDLErrorMessage(ddl, "unexpected token: ROWS required: PARTITION");
-
-
-        // Test success cases
-        ddl = "create table t(id integer not null, num integer," +
-                "CONSTRAINT tblimit1 LIMIT PARTITION ROWS 6);";
-        checkDDLErrorMessage(ddl, null);
-
-        ddl = "create table t(id integer not null, num integer," +
-                "LIMIT PARTITION ROWS 6);";
-        checkDDLErrorMessage(ddl, null);
-
-        // Test alter
-        // Test failed cases
-        ddl = "create table t(id integer not null, num integer);" +
-              "alter table t add constraint foo LIMIT PARTITION ROWS 6XX;";
-        checkDDLErrorMessage(ddl, "unexpected token: XX");
-
-        ddl = "create table t(id integer not null, num integer);" +
-              "alter table t add constraint foo LIMIT PARTITION ROWS 66666666666666666666666;";
-        checkDDLErrorMessage(ddl, "incompatible data type in operation");
-
-        ddl = "create table t(id integer not null, num integer);" +
-              "alter table t add constraint foo LIMIT PARTITION ROWS -10;";
-        checkDDLErrorMessage(ddl, "Invalid constraint limit number '-10'");
-
-        ddl = "create table t(id integer not null, num integer);" +
-              "alter table t add constraint foo LIMIT PARTITION ROW 6;";
-        checkDDLErrorMessage(ddl, "unexpected token: ROW required: ROWS");
-
-        ddl = "create table t(id integer not null, num integer);" +
-              "alter table t add constraint foo LIMIT ROWS 6;";
-        checkDDLErrorMessage(ddl, "unexpected token: ROWS required: PARTITION");
-
-        ddl = "create table t(id integer not null, num integer);" +
-              "alter table t2 add constraint foo LIMIT PARTITION ROWS 6;";
-        checkDDLErrorMessage(ddl, "object not found: T2");
-
-        // Test alter successes
-        ddl = "create table t(id integer not null, num integer);" +
-              "alter table t add constraint foo LIMIT PARTITION ROWS 6;";
-        checkDDLErrorMessage(ddl, null);
-
-        ddl = "create table t(id integer not null, num integer);" +
-              "alter table t add LIMIT PARTITION ROWS 6;";
-        checkDDLErrorMessage(ddl, null);
-
-        // Successive alter statements are okay
-        ddl = "create table t(id integer not null, num integer);" +
-              "alter table t add LIMIT PARTITION ROWS 6;" +
-              "alter table t add LIMIT PARTITION ROWS 7;";
-        checkDDLErrorMessage(ddl, null);
-
-        // Alter after constraint set in create is okay
-        ddl = "create table t(id integer not null, num integer," +
-                "CONSTRAINT tblimit1 LIMIT PARTITION ROWS 6);" +
-              "alter table t add LIMIT PARTITION ROWS 7;";
-        checkDDLErrorMessage(ddl, null);
-
-        // Test drop
-        // Test failed cases
-        ddl = "create table t(id integer not null, num integer);" +
-              "alter table t drop constraint tblimit2;";
-        checkDDLErrorMessage(ddl, "object not found: TBLIMIT2");
-
-        ddl = "create table t(id integer not null, num integer," +
-                "CONSTRAINT tblimit1 LIMIT PARTITION ROWS 6);" +
-              "alter table t drop constraint tblimit2;";
-        checkDDLErrorMessage(ddl, "object not found: TBLIMIT2");
-
-        ddl = "create table t(id integer not null, num integer);" +
-              "alter table t add LIMIT PARTITION ROWS 6;" +
-              "alter table t drop constraint tblimit2;";
-        checkDDLErrorMessage(ddl, "object not found: TBLIMIT2");
-
-        ddl = "create table t(id integer not null, num integer);" +
-              "alter table t drop LIMIT PARTITION ROWS;";
-        checkDDLErrorMessage(ddl, "object not found");
-
-        ddl = "create table t(id integer not null, num integer);" +
-              "alter table t drop LIMIT PARTITIONS ROWS;";
-        checkDDLErrorMessage(ddl, "unexpected token: PARTITIONS required: PARTITION");
-
-        ddl = "create table t(id integer not null, num integer);" +
-              "alter table t drop LIMIT PARTITION ROW;";
-        checkDDLErrorMessage(ddl, "unexpected token: ROW required: ROWS");
-
-        ddl = "create table t(id integer not null, num integer);" +
-              "alter table t drop PARTITION ROWS;";
-        checkDDLErrorMessage(ddl, "unexpected token: PARTITION");
-
-        // Test successes
-        // named drop
-        ddl = "create table t(id integer not null, num integer," +
-                "CONSTRAINT tblimit1 LIMIT PARTITION ROWS 6);" +
-              "alter table t drop constraint tblimit1;";
-        checkDDLErrorMessage(ddl, null);
-
-        // magic drop
-        ddl = "create table t(id integer not null, num integer);" +
-              "alter table t add LIMIT PARTITION ROWS 6;" +
-              "alter table t drop LIMIT PARTITION ROWS;";
-        checkDDLErrorMessage(ddl, null);
-
-        // magic drop of named constraint
-        ddl = "create table t(id integer not null, num integer," +
-                "CONSTRAINT tblimit1 LIMIT PARTITION ROWS 6);" +
-              "alter table t drop LIMIT PARTITION ROWS;";
-        checkDDLErrorMessage(ddl, null);
-    }
-
-    void compileLimitDeleteStmtAndCheckCatalog(String ddl, String expectedMessage, String tblName,
-            int expectedLimit, String expectedStmt) {
-        VoltCompiler compiler = new VoltCompiler(false);
-        boolean success = compileDDL(ddl, compiler);
-        checkCompilerErrorMessages(expectedMessage, compiler, success);
-
-        if (success) {
-            // We expected  success and got it.  Verify that the catalog looks how we expect
-            Catalog cat = compiler.getCatalog();
-
-            Table tbl = cat.getClusters().get("cluster").getDatabases().get("database").getTables().getIgnoreCase(tblName);
-
-            if (expectedLimit != -1) {
-                assertEquals(expectedLimit, tbl.getTuplelimit());
-            }
-            else {
-                // no limit is represented as a limit of max int.
-                assertEquals(Integer.MAX_VALUE, tbl.getTuplelimit());
-            }
-
-            String stmt = CatalogUtil.getLimitPartitionRowsDeleteStmt(tbl);
-
-            if (expectedStmt == null) {
-                assertNull("Did not expect to find a LIMIT DELETE statement, but found this one:\n"
-                        + (stmt != null ? stmt : ""),
-                        stmt);
-            }
-            else {
-                // Make sure we have the delete statement that we expected
-                assertNotNull("Expected to find LIMIT DELETE statement, found none",
-                        stmt);
-
-                if (stmt.endsWith(";")) {
-                    // We seem to add a semicolon somewhere.  I guess that's okay.
-                    stmt = stmt.substring(0, stmt.length() - 1);
-                }
-
-                // Remove spaces from both strings so we compare whitespace insensitively
-                // Capturing the DELETE statement in HSQL does not preserve whitespace.
-                expectedStmt = stmt.replace(" ", "");
-                stmt = stmt.replace(" ", "");
-
-                assertEquals("Did not find the LIMIT DELETE statement that we expected",
-                        expectedStmt, stmt);
-            }
-        }
-    }
-
-    public void testDDLCompilerAlterTableLimitWithDelete() {
-        String ddl;
-
-        // See also TestVoltCompilerErrorMsgs for negative tests involving
-        // LIMIT PARTITION ROWS <n> EXECUTE (DELETE ...)
-
-        // This exercises adding a limit constraint with a DELETE statement
-        ddl = "create table t(id integer not null);\n" +
-                "alter table t add limit partition rows 10 execute (delete from t where id > 0);";
-        compileLimitDeleteStmtAndCheckCatalog(ddl, null, "t", 10, "delete from t where id > 0");
-
-        // This exercises making a change to the delete statement of an existing constraint
-        ddl = "create table t(id integer not null, " +
-                "constraint c1 limit partition rows 10 execute (delete from t where id > 0)" +
-                ");\n" +
-                "alter table t add limit partition rows 15 execute (delete from t where id between 0 and 100);";
-        compileLimitDeleteStmtAndCheckCatalog(ddl, null, "t", 15, "delete from t where id between 0 and 100");
-
-        // test dropping a limit contraint with a delete
-        ddl = "create table t(id integer not null, " +
-                "constraint c1 limit partition rows 10 execute (delete from t where id > 0)" +
-                ");\n" +
-                "alter table t drop limit partition rows;";
-        compileLimitDeleteStmtAndCheckCatalog(ddl, null, "t", -1, null);
-
-        // test dropping constraint by referencing the constraint name
-        ddl = "create table t(id integer not null, " +
-                "constraint c1 limit partition rows 10 execute (delete from t where id > 0)" +
-                ");\n" +
-                "alter table t drop constraint c1;";
-        compileLimitDeleteStmtAndCheckCatalog(ddl, null, "t", -1, null);
-
-        // test dropping constraint by referencing the constraint name
-        // Negative test---got the constraint name wrong
-        ddl = "create table t(id integer not null, " +
-                "constraint c1 limit partition rows 10 execute (delete from t where id > 0)" +
-                ");\n" +
-                "alter table t drop constraint c34;";
-        compileLimitDeleteStmtAndCheckCatalog(ddl, "object not found", "t", -1, null);
-
-        // Alter the table by removing the LIMIT DELETE statement, but not the row limit
-        ddl = "create table t(id integer not null, " +
-                "constraint c1 limit partition rows 10 execute (delete from t where id > 0)" +
-                ");\n" +
-                "alter table t add limit partition rows 10;";
-        compileLimitDeleteStmtAndCheckCatalog(ddl, null, "t", 10, null);
-
-        // See also regression testing that ensures EE picks up catalog changes
-        // in TestSQLFeaturesNewSuite
-    }
-
     public void testCreateTableWithGeographyPointValue() throws Exception {
         String ddl =
                 "create table points (" +
@@ -2683,8 +2379,8 @@ public class TestVoltCompiler extends TestCase {
                 "CREATE FUNCTION func FROM METHOD package..class.method",
                 "CREATE FUNCTION func FROM METHOD package.class.method."
         };
-        String expectedError = "Invalid CREATE FUNCTION statement: \"%s\", "
-                + "expected syntax: \"CREATE FUNCTION <name> FROM METHOD <class-name>.<method-name>\"";
+        String expectedError = "Invalid CREATE FUNCTION statement: \"%s\""
+                + " expected syntax: \"CREATE FUNCTION name FROM METHOD class-name.method-name\"";
 
         for (String ddl : ddls) {
             fbs = checkInvalidDDL(ddl + ";");
@@ -2815,7 +2511,7 @@ public class TestVoltCompiler extends TestCase {
                 );
         expectedError = "Invalid CREATE PROCEDURE statement: " +
                 "\"CREATE PROCEDURE FROM GLASS org.voltdb.compiler.procedures.NotAnnotatedPartitionParamInteger\"" +
-                ", expected syntax: \"CREATE PROCEDURE";
+                " expected syntax: \"CREATE PROCEDURE";
         assertTrue(isFeedbackPresent(expectedError, fbs));
 
         fbs = checkInvalidDDL(
@@ -2825,9 +2521,9 @@ public class TestVoltCompiler extends TestCase {
                 "PARTITION PROCEDURE NotAnnotatedPartitionParamInteger FOR TABLE PKEY_INTEGER COLUMN PKEY;"
                 );
         expectedError = "Invalid PARTITION statement: \"PARTITION PROCEDURE " +
-                "NotAnnotatedPartitionParamInteger FOR TABLE PKEY_INTEGER COLUMN PKEY\", " +
-                "expected syntax: PARTITION PROCEDURE <procedure> ON " +
-                "TABLE <table> COLUMN <column> [PARAMETER <parameter-index-no>]";
+                "NotAnnotatedPartitionParamInteger FOR TABLE PKEY_INTEGER COLUMN PKEY\"" +
+                " expected syntax: PARTITION PROCEDURE procedure ON " +
+                "TABLE table COLUMN column [PARAMETER parameter-index-no]";
         assertTrue(isFeedbackPresent(expectedError, fbs));
 
         fbs = checkInvalidDDL(
@@ -2837,9 +2533,9 @@ public class TestVoltCompiler extends TestCase {
                 "PARTITION PROCEDURE NotAnnotatedPartitionParamInteger ON TABLE PKEY_INTEGER CLUMN PKEY PARMTR 0;"
                 );
         expectedError = "Invalid PARTITION statement: \"PARTITION PROCEDURE " +
-                "NotAnnotatedPartitionParamInteger ON TABLE PKEY_INTEGER CLUMN PKEY PARMTR 0\", " +
-                "expected syntax: PARTITION PROCEDURE <procedure> ON " +
-                "TABLE <table> COLUMN <column> [PARAMETER <parameter-index-no>]";
+                "NotAnnotatedPartitionParamInteger ON TABLE PKEY_INTEGER CLUMN PKEY PARMTR 0\"" +
+                " expected syntax: PARTITION PROCEDURE procedure ON " +
+                "TABLE table COLUMN column [PARAMETER parameter-index-no]";
         assertTrue(isFeedbackPresent(expectedError, fbs));
 
         fbs = checkInvalidDDL(
@@ -2849,9 +2545,9 @@ public class TestVoltCompiler extends TestCase {
                 "PARTITION PROCEDURE NotAnnotatedPartitionParamInteger ON TABLE PKEY_INTEGER COLUMN PKEY PARAMETER hello;"
                 );
         expectedError = "Invalid PARTITION statement: \"PARTITION PROCEDURE " +
-                "NotAnnotatedPartitionParamInteger ON TABLE PKEY_INTEGER COLUMN PKEY PARAMETER hello\", " +
-                "expected syntax: PARTITION PROCEDURE <procedure> ON " +
-                "TABLE <table> COLUMN <column> [PARAMETER <parameter-index-no>]";
+                "NotAnnotatedPartitionParamInteger ON TABLE PKEY_INTEGER COLUMN PKEY PARAMETER hello\"" +
+                " expected syntax: PARTITION PROCEDURE procedure ON " +
+                "TABLE table COLUMN column [PARAMETER parameter-index-no]";
         assertTrue(isFeedbackPresent(expectedError, fbs));
 
         fbs = checkInvalidDDL(
@@ -2862,9 +2558,9 @@ public class TestVoltCompiler extends TestCase {
                 );
         expectedError = "Invalid PARTITION statement: " +
                 "\"PARTITION PROGEDURE NotAnnotatedPartitionParamInteger ON TABLE PKEY_INTEGER " +
-                "COLUMN PKEY PARAMETER hello\", expected syntax: \"PARTITION TABLE <table> " +
-                "ON COLUMN <column>\" or \"PARTITION PROCEDURE <procedure> ON " +
-                "TABLE <table> COLUMN <column> [PARAMETER <parameter-index-no>]\"";
+                "COLUMN PKEY PARAMETER hello\" expected syntax: \"PARTITION TABLE table " +
+                "ON COLUMN column\" or: \"PARTITION PROCEDURE procedure ON " +
+                "TABLE table COLUMN column [PARAMETER parameter-index-no]\"";
         assertTrue(isFeedbackPresent(expectedError, fbs));
 
         fbs = checkInvalidDDL(
@@ -2875,7 +2571,7 @@ public class TestVoltCompiler extends TestCase {
                 );
         expectedError = "Invalid CREATE PROCEDURE statement: " +
                 "\"CREATE PROCEDURE OUTOF CLASS org.voltdb.compiler.procedures.NotAnnotatedPartitionParamInteger\"" +
-                ", expected syntax: \"CREATE PROCEDURE";
+                " expected syntax: \"CREATE PROCEDURE";
         assertTrue(isFeedbackPresent(expectedError, fbs));
 
         fbs = checkInvalidDDL(
@@ -2980,9 +2676,9 @@ public class TestVoltCompiler extends TestCase {
                 "PARTITION PROCEDURE NotAnnotatedPartitionParamInteger TABLE PKEY_INTEGER ON TABLE PKEY_INTEGER COLUMN PKEY;"
                 );
         expectedError = "Invalid PARTITION statement: \"PARTITION PROCEDURE " +
-                "NotAnnotatedPartitionParamInteger TABLE PKEY_INTEGER ON TABLE PKEY_INTEGER COLUMN PKEY\", " +
-                "expected syntax: PARTITION PROCEDURE <procedure> ON " +
-                "TABLE <table> COLUMN <column> [PARAMETER <parameter-index-no>]";
+                "NotAnnotatedPartitionParamInteger TABLE PKEY_INTEGER ON TABLE PKEY_INTEGER COLUMN PKEY\"" +
+                " expected syntax: PARTITION PROCEDURE procedure ON " +
+                "TABLE table COLUMN column [PARAMETER parameter-index-no]";
         assertTrue(isFeedbackPresent(expectedError, fbs));
     }
 
@@ -3311,7 +3007,7 @@ public class TestVoltCompiler extends TestCase {
         else {
             assertFalse(String.format("Expected error (\"%s\")\n\nDDL: %s", errorRegex, ddl), success);
             assertFalse("Expected at least one error message.", error.isEmpty());
-            Matcher m = Pattern.compile(errorRegex).matcher(error);
+            Matcher m = Pattern.compile(errorRegex, Pattern.DOTALL).matcher(error);
             assertTrue(String.format("%s\nEXPECTED: %s", error, errorRegex), m.matches());
         }
     }
@@ -3402,7 +3098,7 @@ public class TestVoltCompiler extends TestCase {
                                       StringUtils.join(ddl, " ")),
                         success);
             assertFalse("Expected at least one error message.", error.isEmpty());
-            Matcher m = Pattern.compile(errorRegex).matcher(error);
+            Matcher m = Pattern.compile(errorRegex, Pattern.DOTALL).matcher(error);
             assertTrue(String.format("%s\nEXPECTED: %s", error, errorRegex), m.matches());
             return null;
         }
@@ -3663,12 +3359,20 @@ public class TestVoltCompiler extends TestCase {
                 "create stream 1table_name_not_valid (id integer, f1 varchar(16));"
                 );
 
-        badDDLAgainstSimpleSchema("Invalid CREATE STREAM statement:.*",
+        badDDLAgainstSimpleSchema(".+unexpected token:.*",
                "create stream foo export to target bar1,bar2 (i bigint not null);"
                 );
 
-        badDDLAgainstSimpleSchema("Invalid CREATE STREAM statement:.*",
+        badDDLAgainstSimpleSchema(".+unexpected token:.*",
+                "create stream foo export to topic bar1,bar2 (i bigint not null);"
+                 );
+
+        badDDLAgainstSimpleSchema(".+unexpected token:.*",
                 "create stream foo,foo2 export to target bar (i bigint not null);"
+                );
+
+        badDDLAgainstSimpleSchema(".+unexpected token:.*",
+                "create stream foo,foo2 export to topic bar (i bigint not null);"
                 );
 
         badDDLAgainstSimpleSchema("Invalid CREATE STREAM statement:.*",
@@ -3677,6 +3381,10 @@ public class TestVoltCompiler extends TestCase {
 
         badDDLAgainstSimpleSchema("Streams cannot be configured with indexes.*",
                 "create stream foo export to target bar (id integer, primary key(id));"
+                );
+
+        badDDLAgainstSimpleSchema("Invalid topic bar: stream FOO must be partitioned",
+                "create stream foo export to topic bar (id integer, primary key(id));"
                 );
 
         badDDLAgainstSimpleSchema("Stream configured with materialized view without partitioned.*",
@@ -3732,8 +3440,8 @@ public class TestVoltCompiler extends TestCase {
     }
 
     public void testDDLCompilerStreamType() {
-        String ddl = "create table ttl MIGRATE TO TARGET TEST (a integer not null, b integer, PRIMARY KEY(a)) " +
-                " USING TTL 20 MINUTES ON COLUMN a BATCH_SIZE 10 MAX_FREQUENCY 3;\n" +
+        String ddl = "create table ttl MIGRATE TO TARGET TEST (a integer not null, b integer, c timestamp default now() not null, PRIMARY KEY(a)) " +
+                " USING TTL 20 MINUTES ON COLUMN c BATCH_SIZE 10 MAX_FREQUENCY 3;\n" +
                 "partition table ttl on column a;" +
                 "ALTER TABLE TTL DROP COLUMN B;";
         Database db = checkDDLAgainstGivenSchema(null,
@@ -3758,7 +3466,7 @@ public class TestVoltCompiler extends TestCase {
                 );
 
         // non-stream table
-        badDDLAgainstSimpleSchema(".+Invalid DROP STREAM statement: table e2 is not a stream.*",
+        badDDLAgainstSimpleSchema(".+Invalid DROP STREAM statement: e2 is not a stream.*",
                 "CREATE TABLE e2 (D1 INTEGER, D2 INTEGER, D3 INTEGER, VAL1 INTEGER, VAL2 INTEGER, VAL3 INTEGER);\n" +
                         "DROP STREAM e2;\n"
                 );
@@ -3998,84 +3706,6 @@ public class TestVoltCompiler extends TestCase {
                                    "which is not supported.*",
                                    ddl,
                                    "create index faulty on alpha(id = (select id + id from alpha));");
-    }
-
-    public void testDDLCompilerNibbleExport() throws Exception {
-        String ddl = "create table ttl MIGRATE TO TARGET TEST (a integer not null, b integer, PRIMARY KEY(a)) " +
-                " USING TTL 20 MINUTES ON COLUMN a BATCH_SIZE 10 MAX_FREQUENCY 3;\n";
-        VoltProjectBuilder pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-        assertTrue(pb.compile(Configuration.getPathToCatalogForTest("testout.jar")));
-
-        ddl = "create table ttl MIGRATE TO TARGET TEST (a integer not null, b integer, PRIMARY KEY(a)) " +
-                "USING TTL 20 MINUTES ON COLUMN a BATCH_SIZE 10 MAX_FREQUENCY 3;\n" +
-                "alter table ttl alter USING TTL 20 MINUTES ON COLUMN a BATCH_SIZE 200 MAX_FREQUENCY 20;\n";
-        pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-        // does not alter target but other params
-        assertTrue(pb.compile(Configuration.getPathToCatalogForTest("testout.jar")));
-
-        ddl = "create table ttl MIGRATE TO TARGET TEST (a integer not null, b integer, PRIMARY KEY(a)) " +
-              "USING TTL 20 MINUTES ON COLUMN a BATCH_SIZE 10 MAX_FREQUENCY 3;\n" +
-              "partition table ttl on column a;\n" +
-              "dr table ttl;";
-        pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-
-        // can not create target via alter
-        assertTrue(pb.compile(Configuration.getPathToCatalogForTest("testout.jar")));
-
-        ddl = "create table ttl MIGRATE TO TARGET TEST (a integer not null, b integer, PRIMARY KEY(a)) " +
-              "USING TTL 20 MINUTES ON COLUMN a BATCH_SIZE 10 MAX_FREQUENCY 3;\n" +
-              "partition table ttl on column a;\n" +
-              "alter table ttl drop TTL;\n";
-        pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-
-        // can not drop target
-        assertFalse(pb.compile(Configuration.getPathToCatalogForTest("testout.jar")));
-
-        ddl = "create table ttl MIGRATE TO TARGET TEST (a integer not null, b integer, PRIMARY KEY(a)) " +
-              "USING TTL 20 MINUTES ON COLUMN a BATCH_SIZE 10 MAX_FREQUENCY 3;\n" +
-              "partition table ttl on column a;\n";
-                pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-        assertTrue(pb.compile(Configuration.getPathToCatalogForTest("testout.jar")));
-
-        ddl = "create table ttl MIGRATE TO TARGET TEST (a integer not null, b integer, PRIMARY KEY(a)) " +
-                "USING TTL 20 MINUTES ON COLUMN a;\n" +
-                "partition table ttl on column a;\n";
-        pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-        assertTrue(pb.compile(Configuration.getPathToCatalogForTest("testout.jar")));
-
-        ddl = "create table ttl MIGRATE TO TARGET TEST (a integer not null, b integer, PRIMARY KEY(a)) " +
-                "USING TTL 20 MINUTES ON COLUMN a BATCH_SIZE 10;\n" +
-                "partition table ttl on column a;\n";
-        pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-        assertTrue(pb.compile(Configuration.getPathToCatalogForTest("testout.jar")));
-
-        ddl = "create table ttl MIGRATE TO TEST (a integer not null, b integer, PRIMARY KEY(a)) " +
-                "USING TTL 20 MINUTES ON COLUMN a BATCH_SIZE 10;\n" +
-                "partition table ttl on column a;\n";
-        pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-        assertFalse(pb.compile(Configuration.getPathToCatalogForTest("testout.jar")));
-
-        ddl = "create table ttl MIGRATE TO TARGET TEST (a integer not null, b integer, PRIMARY KEY(a));\n" +
-                "partition table ttl on column a;\n";
-        pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-        assertTrue(pb.compile(Configuration.getPathToCatalogForTest("testout.jar")));
-
-        // shouldn't have batch size here since it is a parameter for ttl
-        ddl = "create table ttl MIGRATE TO TARGET TEST (a integer not null, b integer, PRIMARY KEY(a)) " +
-                "BATCH_SIZE 10;\n" +
-                "partition table ttl on column a;\n";
-        pb = new VoltProjectBuilder();
-        pb.addLiteralSchema(ddl);
-        assertFalse(pb.compile(Configuration.getPathToCatalogForTest("testout.jar")));
     }
 
     private int countStringsMatching(List<String> diagnostics, String pattern) {

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -23,12 +23,14 @@
 
 package org.voltdb.types;
 
+import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
+import org.voltdb.messaging.FastSerializer;
 import org.voltdb.types.GeographyValue.XYZPoint;
 
 import junit.framework.TestCase;
@@ -141,7 +143,7 @@ public class TestGeographyValue extends TestCase {
         pos += printOneGVRowOfZerosForDoc(pos, 33, "Internal fields plus the bounding box of the polygon.  Initially zero(0).");
     }
 
-    public void testGeographyValuePositive() {
+    public void testGeographyValuePositive() throws IOException {
         GeographyValue geog;
         GeographyValue rtGeog;
         // The Bermuda Triangle
@@ -180,6 +182,13 @@ public class TestGeographyValue extends TestCase {
         assertEquals(270, buf.position());
 
         buf.position(0);
+
+        FastSerializer fs = new FastSerializer();
+        geog.serialize(fs);
+        ByteBuffer serBuf = fs.getBuffer();
+        assertEquals(buf, serBuf);
+        fs.discard();
+
         GeographyValue newGeog = GeographyValue.unflattenFromBuffer(buf);
         assertEquals("POLYGON ((-64.751 32.305, -80.437 25.244, -66.371 18.476, -64.751 32.305), "
                 + "(-68.874 28.066, -68.855 25.361, -73.381 28.376, -68.874 28.066))",

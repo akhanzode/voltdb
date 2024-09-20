@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -20,16 +20,16 @@ import java.util.HashMap;
 import java.util.Iterator;
 
 import org.voltdb.VoltTable.ColumnInfo;
+import org.voltdb.stats.StatsColumn;
 
 /**
  * Abstract superclass of all sources of statistical information inside the Java frontend.
  */
 public abstract class StatsSource {
 
-    protected final int NUM_PREDEFINED_COLS = 3;
-
     private final Integer m_hostId;
     private final String m_hostname;
+    protected final VoltDBInterface voltDb;
 
     /**
      * Statistics from ee are already formatted in VoltTable
@@ -42,7 +42,7 @@ public abstract class StatsSource {
     /**
      * Column schema for statistical result rows
      */
-    private final ArrayList<ColumnInfo> columns = new ArrayList<ColumnInfo>();
+    private final ArrayList<ColumnInfo> columns = new ArrayList<>();
 
     /**
      * Map from the name of a column to its index in the a result row. In
@@ -50,7 +50,16 @@ public abstract class StatsSource {
      * hierarchy from the integer index in the result row this map is used for
      * lookups instead of hard coding an index.
      */
-    protected final HashMap<String, Integer> columnNameToIndex = new HashMap<String, Integer>();
+    protected final HashMap<String, Integer> columnNameToIndex = new HashMap<>();
+
+    public enum StatsCommon {
+        TIMESTAMP                   (VoltType.BIGINT),
+        HOST_ID                     (VoltType.INTEGER),
+        HOSTNAME                    (VoltType.STRING);
+
+        public final VoltType m_type;
+        StatsCommon(VoltType type) { m_type = type; }
+    }
 
     /**
      * Initialize this source of statistical information with the specified
@@ -59,6 +68,11 @@ public abstract class StatsSource {
      * @param isEE If this source represents statistics from EE
      */
     public StatsSource(boolean isEE) {
+        this(isEE, VoltDB.instance());
+    }
+
+    public StatsSource(boolean isEE, VoltDBInterface voltDb) {
+        this.voltDb = voltDb;
         populateColumnSchema(columns);
 
         for (int ii = 0; ii < columns.size(); ii++) {
@@ -67,10 +81,10 @@ public abstract class StatsSource {
 
         String hostname = "";
         int hostId = 0;
-        if (VoltDB.instance() != null) {
-            if (VoltDB.instance().getHostMessenger() != null) {
-                hostname = VoltDB.instance().getHostMessenger().getHostname();
-                hostId = VoltDB.instance().getHostMessenger().getHostId();
+        if (voltDb != null) {
+            if (voltDb.getHostMessenger() != null) {
+                hostname = voltDb.getHostMessenger().getHostname();
+                hostId = voltDb.getHostMessenger().getHostId();
             }
         }
         m_hostname = hostname;
@@ -92,10 +106,41 @@ public abstract class StatsSource {
      * @param columns Output list for the column schema.
      */
     protected void populateColumnSchema(ArrayList<ColumnInfo> columns) {
-        columns.add(new ColumnInfo("TIMESTAMP", VoltType.BIGINT));
-        columns.add(new ColumnInfo(VoltSystemProcedure.CNAME_HOST_ID,
-                                   VoltSystemProcedure.CTYPE_ID));
-        columns.add(new ColumnInfo("HOSTNAME", VoltType.STRING));
+        for (StatsCommon col : StatsCommon.values()) {
+            columns.add(new VoltTable.ColumnInfo(col.name(), col.m_type));
+        }
+    }
+
+    // TODO pk - reflection should be replaced with interface method call
+    protected <E extends Enum<E>> void populateColumnSchema(ArrayList<ColumnInfo> columns, Class<E> extraColumns) {
+        for (StatsCommon col : StatsCommon.values()) {
+            columns.add(new VoltTable.ColumnInfo(col.name(), col.m_type));
+        }
+        populateExtraColumns(columns, extraColumns);
+    }
+
+    protected <E extends Enum<E>> void populateExtraColumns(ArrayList<ColumnInfo> columns, Class<E> extraColumns) {
+        try {
+            // elements returned in order of declaration
+            for (E col : extraColumns.getEnumConstants()) {
+                java.lang.reflect.Field f = col.getClass().getDeclaredField("m_type");
+                f.setAccessible(true);
+                VoltType type = (VoltType) f.get(col);
+                columns.add(new ColumnInfo(col.name(), type));
+            }
+        } catch (Exception e) {
+            VoltDB.crashLocalVoltDB("Failed to populate column schema for statistics " + extraColumns.getName(), true, e);
+        }
+    }
+
+    protected void populateColumnSchema(ArrayList<ColumnInfo> columns, StatsColumn... extraColumns) {
+        for (StatsCommon col : StatsCommon.values()) {
+            columns.add(new VoltTable.ColumnInfo(col.name(), col.m_type));
+        }
+
+        for (StatsColumn col : extraColumns) {
+            columns.add(new VoltTable.ColumnInfo(col.name(), col.getType()));
+        }
     }
 
     /**
@@ -125,10 +170,10 @@ public abstract class StatsSource {
 
     protected Object[][] retrieveStatsRows(boolean interval) {
         Iterator<Object> i = getStatsRowKeyIterator(interval);
-        ArrayList<Object[]> rows = new ArrayList<Object[]>();
+        ArrayList<Object[]> rows = new ArrayList<>();
         while (i.hasNext()) {
             Object rowKey = i.next();
-            Object rowValues[] = new Object[columns.size()];
+            Object[] rowValues = new Object[columns.size()];
             updateStatsRow(rowKey, rowValues);
             rows.add(rowValues);
         }
@@ -184,11 +229,14 @@ public abstract class StatsSource {
      * implementation.
      * @param rowKey Key identifying the specific row to be populated
      * @param rowValues Output parameter. Array of values to be updated.
+     * @return next column index to write
      */
-    protected void updateStatsRow(Object rowKey, Object rowValues[]) {
-        rowValues[0] = now;
-        rowValues[1] = m_hostId;
-        rowValues[2] = m_hostname;
+    protected int updateStatsRow(Object rowKey, Object[] rowValues) {
+        int index = 0;
+        rowValues[index++] = now;
+        rowValues[index++] = m_hostId;
+        rowValues[index++] = m_hostname;
+        return index;
     }
 
     public Integer getHostId() {
@@ -197,6 +245,13 @@ public abstract class StatsSource {
 
     public String getHostname() {
         return m_hostname;
+    }
+
+    /**
+     * Gets an index for a named column
+     */
+    public int getStatsColumnIndex(String columnName) {
+        return columnNameToIndex.get(columnName);
     }
 
     /**

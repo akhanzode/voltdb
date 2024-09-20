@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -32,12 +32,16 @@ import org.voltdb.catalog.ColumnRef;
 import org.voltdb.catalog.Constraint;
 import org.voltdb.catalog.Database;
 import org.voltdb.catalog.Function;
+import org.voltdb.catalog.Group;
+import org.voltdb.catalog.GroupRef;
 import org.voltdb.catalog.Index;
 import org.voltdb.catalog.ProcParameter;
 import org.voltdb.catalog.Procedure;
 import org.voltdb.catalog.Table;
 import org.voltdb.catalog.Task;
 import org.voltdb.catalog.TaskParameter;
+import org.voltdb.catalog.Topic;
+import org.voltdb.catalog.User;
 import org.voltdb.task.TaskScope;
 import org.voltdb.types.ConstraintType;
 import org.voltdb.types.IndexType;
@@ -53,6 +57,7 @@ public class JdbcDatabaseMetaDataGenerator
     public static final String JSON_PARTITION_PARAMETER_TYPE = "partitionParameterType";
     public static final String JSON_SINGLE_PARTITION = "singlePartition";
     public static final String JSON_READ_ONLY = "readOnly";
+    public static final String JSON_COMPOUND = "compound";
     public static final String JSON_PARTITION_COLUMN = "partitionColumn";
     public static final String JSON_SOURCE_TABLE = "sourceTable";
     public static final String JSON_LIMIT_PARTITION_ROWS_DELETE_STMT = "limitPartitionRowsDeleteStmt";
@@ -72,6 +77,16 @@ public class JdbcDatabaseMetaDataGenerator
                           new ColumnInfo("SELF_REFERENCING_COL_NAME", VoltType.STRING),
                           new ColumnInfo("REF_GENERATION", VoltType.STRING)
                          };
+
+    static public final ColumnInfo[] USER_SCHEMA = new ColumnInfo[] {
+        new ColumnInfo("USER", VoltType.STRING),
+        new ColumnInfo("ROLES", VoltType.STRING)
+    };
+
+    static public final ColumnInfo[] ROLE_SCHEMA = new ColumnInfo[] {
+        new ColumnInfo("ROLE", VoltType.STRING),
+        new ColumnInfo("PERMISSIONS", VoltType.STRING)
+    };
 
     static public final ColumnInfo[] COLUMN_SCHEMA =
         new ColumnInfo[] {
@@ -222,6 +237,14 @@ public class JdbcDatabaseMetaDataGenerator
             new ColumnInfo("ENABLED", VoltType.STRING)
     };
 
+    static public final ColumnInfo[] TOPICS_SCHEMA = new ColumnInfo[] {
+            new ColumnInfo("TOPIC_NAME", VoltType.STRING),
+            new ColumnInfo("IS_SINGLE", VoltType.STRING),
+            new ColumnInfo("IS_OPAQUE", VoltType.STRING),
+            new ColumnInfo("STREAM_NAME", VoltType.STRING),
+            new ColumnInfo("PROCEDURE_NAME", VoltType.STRING)
+    };
+
     JdbcDatabaseMetaDataGenerator(Catalog catalog, DefaultProcedureManager defaultProcs, InMemoryJarfile jarfile)
     {
         m_catalog = catalog;
@@ -240,6 +263,14 @@ public class JdbcDatabaseMetaDataGenerator
         else if (selector.equalsIgnoreCase("COLUMNS"))
         {
             result = getColumns();
+        }
+        else if (selector.equalsIgnoreCase("ROLES"))
+        {
+            result = getRoles();
+        }
+        else if (selector.equalsIgnoreCase("USERS"))
+        {
+            result = getUsers();
         }
         else if (selector.equalsIgnoreCase("INDEXINFO"))
         {
@@ -272,6 +303,8 @@ public class JdbcDatabaseMetaDataGenerator
             result = getClasses();
         } else if (selector.equalsIgnoreCase("TASKS")) {
             result = getTasks();
+        } else if (selector.equalsIgnoreCase("TOPICS")) {
+            result = getTopics();
         }
         return result;
     }
@@ -313,11 +346,6 @@ public class JdbcDatabaseMetaDataGenerator
                     if (type.equals("VIEW")) {
                         jsObj.put(JSON_SOURCE_TABLE, table.getMaterializer().getTypeName());
                     }
-                }
-
-                String deleteStmt = CatalogUtil.getLimitPartitionRowsDeleteStmt(table);
-                if (deleteStmt != null) {
-                    jsObj.put(JSON_LIMIT_PARTITION_ROWS_DELETE_STMT, deleteStmt);
                 }
 
                 if (table.getIsdred()) {
@@ -486,6 +514,39 @@ public class JdbcDatabaseMetaDataGenerator
         return is_nullable;
     }
 
+    VoltTable getUsers() {
+        VoltTable results = new VoltTable(USER_SCHEMA);
+        for (User user : m_database.getUsers()) {
+            StringBuilder roles = new StringBuilder();
+            String sep = "";
+            for (GroupRef role : user.getGroups()) {
+                roles.append(sep).append(role.getTypeName());
+                sep = ",";
+            }
+            results.addRow(user.getTypeName(),
+                           roles.toString());
+        }
+        return results;
+    }
+
+    VoltTable getRoles() {
+        VoltTable results = new VoltTable(ROLE_SCHEMA);
+        for (Group group : m_database.getGroups()) {
+            StringBuilder permissions = new StringBuilder();
+            String sep = "";
+            for ( String field : group.getFields()) {
+                if((Boolean)group.getField(field)) {
+                    permissions.append(sep).append(field);
+                    sep = ",";
+                }
+            }
+            results.addRow(group.getTypeName(),
+                           permissions.toString());
+        }
+        return results;
+    }
+
+
     VoltTable getColumns()
     {
         VoltTable results = new VoltTable(COLUMN_SCHEMA);
@@ -652,6 +713,7 @@ public class JdbcDatabaseMetaDataGenerator
                         jsObj.put(JSON_PARTITION_PARAMETER_TYPE, proc.getPartitioncolumn().getType());
                     }
                 }
+                jsObj.put(JSON_COMPOUND, CatalogUtil.isCompoundProcedure(proc));
                 remark = jsObj.toString();
             } catch (JSONException e) {
                 hostLog.warn("You have encountered an unexpected error while generating results for the " +
@@ -825,7 +887,8 @@ public class JdbcDatabaseMetaDataGenerator
         for (String classname : m_jarfile.getLoader().getClassNames()) {
             try {
                 Class<?> clazz = m_jarfile.getLoader().loadClass(classname);
-                boolean isProc = VoltProcedure.class.isAssignableFrom(clazz);
+                boolean isProc = VoltProcedure.class.isAssignableFrom(clazz)
+                        || VoltCompoundProcedure.class.isAssignableFrom(clazz);
                 boolean isActive = false;
                 if (isProc) {
                     for (Procedure proc : m_database.getProcedures()) {
@@ -854,6 +917,15 @@ public class JdbcDatabaseMetaDataGenerator
                     task.getScheduleclass(), getParamsString(task.getScheduleparameters()), task.getOnerror(),
                     TaskScope.translateIdToName(task.getScope()), task.getUser(), Boolean.toString(task.getEnabled()));
 
+        }
+        return results;
+    }
+
+    VoltTable getTopics() {
+        VoltTable results = new VoltTable(TOPICS_SCHEMA);
+        for (Topic topic : m_database.getTopics()) {
+            results.addRow(topic.getTypeName(), Boolean.toString(topic.getIssingle()), Boolean.toString(topic.getIsopaque()),
+                    topic.getStreamname(), topic.getProcedurename());
         }
         return results;
     }

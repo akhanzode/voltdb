@@ -21,6 +21,7 @@ create procedure from class sqlcmdtest.Trivial;
 @GC                       
 @GetPartitionKeys         	varchar
 @JStack                   	int
+@Note                     	varchar
 @Pause                    
 @Ping                     
 @Promote                  
@@ -36,7 +37,7 @@ create procedure from class sqlcmdtest.Trivial;
 @SnapshotSave             	varchar
 @SnapshotSave             	varchar, varchar, bit
 @SnapshotScan             	varchar
-@SnapshotStatus           
+@Statistics               	statisticscomponent
 @Statistics               	statisticscomponent, bit
 @StopNode                 	int
 @SwapTables               	varchar, varchar
@@ -79,6 +80,7 @@ Command succeeded.
 @GC                       
 @GetPartitionKeys         	varchar
 @JStack                   	int
+@Note                     	varchar
 @Pause                    
 @Ping                     
 @Promote                  
@@ -94,7 +96,7 @@ Command succeeded.
 @SnapshotSave             	varchar
 @SnapshotSave             	varchar, varchar, bit
 @SnapshotScan             	varchar
-@SnapshotStatus           
+@Statistics               	statisticscomponent
 @Statistics               	statisticscomponent, bit
 @StopNode                 	int
 @SwapTables               	varchar, varchar
@@ -121,6 +123,7 @@ Command succeeded.
 @GC                       
 @GetPartitionKeys         	varchar
 @JStack                   	int
+@Note                     	varchar
 @Pause                    
 @Ping                     
 @Promote                  
@@ -136,7 +139,7 @@ Command succeeded.
 @SnapshotSave             	varchar
 @SnapshotSave             	varchar, varchar, bit
 @SnapshotScan             	varchar
-@SnapshotStatus           
+@Statistics               	statisticscomponent
 @Statistics               	statisticscomponent, bit
 @StopNode                 	int
 @SwapTables               	varchar, varchar
@@ -211,6 +214,7 @@ create procedure from class sqlcmdtest.Trivial;
 @GC                       
 @GetPartitionKeys         	varchar
 @JStack                   	int
+@Note                     	varchar
 @Pause                    
 @Ping                     
 @Promote                  
@@ -226,7 +230,7 @@ create procedure from class sqlcmdtest.Trivial;
 @SnapshotSave             	varchar
 @SnapshotSave             	varchar, varchar, bit
 @SnapshotScan             	varchar
-@SnapshotStatus           
+@Statistics               	statisticscomponent
 @Statistics               	statisticscomponent, bit
 @StopNode                 	int
 @SwapTables               	varchar, varchar
@@ -274,6 +278,7 @@ Command succeeded.
 @GC                       
 @GetPartitionKeys         	varchar
 @JStack                   	int
+@Note                     	varchar
 @Pause                    
 @Ping                     
 @Promote                  
@@ -289,7 +294,7 @@ Command succeeded.
 @SnapshotSave             	varchar
 @SnapshotSave             	varchar, varchar, bit
 @SnapshotScan             	varchar
-@SnapshotStatus           
+@Statistics               	statisticscomponent
 @Statistics               	statisticscomponent, bit
 @StopNode                 	int
 @SwapTables               	varchar, varchar
@@ -345,6 +350,7 @@ Command succeeded.
 @GC                       
 @GetPartitionKeys         	varchar
 @JStack                   	int
+@Note                     	varchar
 @Pause                    
 @Ping                     
 @Promote                  
@@ -360,7 +366,7 @@ Command succeeded.
 @SnapshotSave             	varchar
 @SnapshotSave             	varchar, varchar, bit
 @SnapshotScan             	varchar
-@SnapshotStatus           
+@Statistics               	statisticscomponent
 @Statistics               	statisticscomponent, bit
 @StopNode                 	int
 @SwapTables               	varchar, varchar
@@ -417,6 +423,7 @@ Command succeeded.
 @GC                       
 @GetPartitionKeys         	varchar
 @JStack                   	int
+@Note                     	varchar
 @Pause                    
 @Ping                     
 @Promote                  
@@ -432,7 +439,7 @@ Command succeeded.
 @SnapshotSave             	varchar
 @SnapshotSave             	varchar, varchar, bit
 @SnapshotScan             	varchar
-@SnapshotStatus           
+@Statistics               	statisticscomponent
 @Statistics               	statisticscomponent, bit
 @StopNode                 	int
 @SwapTables               	varchar, varchar
@@ -488,6 +495,7 @@ Command succeeded.
 @GC                       
 @GetPartitionKeys         	varchar
 @JStack                   	int
+@Note                     	varchar
 @Pause                    
 @Ping                     
 @Promote                  
@@ -503,7 +511,7 @@ Command succeeded.
 @SnapshotSave             	varchar
 @SnapshotSave             	varchar, varchar, bit
 @SnapshotScan             	varchar
-@SnapshotStatus           
+@Statistics               	statisticscomponent
 @Statistics               	statisticscomponent, bit
 @StopNode                 	int
 @SwapTables               	varchar, varchar

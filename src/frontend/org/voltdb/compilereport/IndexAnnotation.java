@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -21,7 +21,6 @@ import java.util.SortedSet;
 import java.util.TreeSet;
 
 import org.voltdb.catalog.Procedure;
-import org.voltdb.catalog.Statement;
 
 /**
  * Extra information generated during the compilation process, used by the ReportMaker.
@@ -30,9 +29,6 @@ import org.voltdb.catalog.Statement;
  *
  */
 public class IndexAnnotation {
-    // Statements are only inserted when the index is used in a LIMIT PARTITION ROWS trigger
-    public SortedSet<Statement> statementsThatUseThis = new TreeSet<Statement>();
-
     // Procedures are inserted when the query statements inside use the index
     public SortedSet<Procedure> proceduresThatUseThis = new TreeSet<Procedure>();
 }

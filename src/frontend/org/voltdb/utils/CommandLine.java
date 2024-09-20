@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -29,6 +29,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.stream.Collectors;
 
+import org.voltcore.network.LoopbackAddress;
 import org.voltdb.BackendTarget;
 import org.voltdb.StartAction;
 import org.voltdb.VoltDB;
@@ -80,6 +81,7 @@ public class CommandLine extends VoltDB.Configuration
         cl.m_pathToLicense = m_pathToLicense;
         cl.m_noLoadLibVOLTDB = m_noLoadLibVOLTDB;
         cl.m_zkInterface = m_zkInterface;
+        cl.m_zkPort = m_zkPort;
         cl.m_port = m_port;
         cl.m_adminPort = m_adminPort;
         cl.m_internalPort = m_internalPort;
@@ -116,7 +118,7 @@ public class CommandLine extends VoltDB.Configuration
         cl.rmi_host_name = rmi_host_name;
         cl.log4j = log4j;
         cl.gcRollover = gcRollover;
-        cl.voltFilePrefix = voltFilePrefix;
+        cl.voltSnapshotFilePrefix = voltSnapshotFilePrefix;
         cl.initialHeap = initialHeap;
         cl.maxHeap = maxHeap;
         cl.classPath = classPath;
@@ -130,7 +132,6 @@ public class CommandLine extends VoltDB.Configuration
         cl.m_hostCount = m_hostCount;
         cl.m_enableAdd = m_enableAdd;
         cl.m_voltdbRoot = m_voltdbRoot;
-        cl.m_newCli = m_newCli;
         cl.m_sslEnable = m_sslEnable;
         cl.m_sslExternal = m_sslExternal;
         cl.m_sslInternal = m_sslInternal;
@@ -145,7 +146,7 @@ public class CommandLine extends VoltDB.Configuration
         }
         cl.m_missingHostCount = m_missingHostCount;
         cl.m_topicsHostPort = m_topicsHostPort;
-
+        cl.m_topicsPublicHostPort = m_topicsPublicHostPort;
         return cl;
     }
 
@@ -195,19 +196,6 @@ public class CommandLine extends VoltDB.Configuration
 
     public CommandLine httpPort(int httpPort) {
         m_httpPort = httpPort;
-        return this;
-    }
-
-    public CommandLine startCommand(String command)
-    {
-        StartAction action = StartAction.monickerFor(command);
-        if (action == null) {
-            // command wasn't a valid enum type, throw an exception.
-            String msg = "Unknown action: " + command + ". ";
-            hostLog.warn(msg);
-            throw new IllegalArgumentException(msg);
-        }
-        m_startAction = action;
         return this;
     }
 
@@ -289,9 +277,15 @@ public class CommandLine extends VoltDB.Configuration
     int zkport = -1;
     public CommandLine zkport(int zkport) {
         this.zkport = zkport;
-        m_zkInterface = "127.0.0.1:" + zkport;
+        m_zkInterface = LoopbackAddress.get();
+        m_zkPort = zkport;
         return this;
     }
+
+    public int zkport() {
+        return m_zkPort;
+    }
+
     public String zkinterface() {
         return m_zkInterface;
     }
@@ -345,13 +339,9 @@ public class CommandLine extends VoltDB.Configuration
         return this;
     }
 
-    String voltFilePrefix = "";
-    public CommandLine voltFilePrefix(String voltFilePrefix) {
-        if (m_newCli) {
-            return this;
-        }
-
-        this.voltFilePrefix = voltFilePrefix;
+    String voltSnapshotFilePrefix = "";
+    public CommandLine voltSnapshotFilePrefix(String voltSnapshotFilePrefix) {
+        this.voltSnapshotFilePrefix = voltSnapshotFilePrefix;
         return this;
     }
 
@@ -425,7 +415,7 @@ public class CommandLine extends VoltDB.Configuration
     }
 
     public CommandLine voltdbRoot(String voltdbRoot) {
-        m_voltdbRoot = new VoltFile(voltdbRoot);
+        m_voltdbRoot = new File(voltdbRoot);
         return this;
     }
 
@@ -448,7 +438,7 @@ public class CommandLine extends VoltDB.Configuration
         return this;
     }
 
-    String jmxHost = "127.0.0.1";
+    String jmxHost = LoopbackAddress.get();
     public CommandLine jmxHost(String jmxHost)
     {
         this.jmxHost = jmxHost;
@@ -505,7 +495,7 @@ public class CommandLine extends VoltDB.Configuration
     public void dumpToFile(String filename) {
         try {
             FileWriter out = new FileWriter(filename);
-            List<String> lns = createCommandLine();
+            List<String> lns = createCommandLine(true);
             for (String l : lns) {
                 assert(l != null);
                 out.write(l.toCharArray());
@@ -522,7 +512,7 @@ public class CommandLine extends VoltDB.Configuration
     public String toString()
     {
         StringBuilder sb = new StringBuilder();
-        List<String> lns = createCommandLine();
+        List<String> lns = createCommandLine(true);
         for (String l : lns)
         {
             sb.append(l).append(" ");
@@ -540,7 +530,7 @@ public class CommandLine extends VoltDB.Configuration
     }
 
     // Return a command line list compatible with ProcessBuilder.command()
-    public List<String> createCommandLine() {
+    public List<String> createCommandLine(boolean enableVoltSnapshotFilePrefix) {
         List<String> cmdline = new ArrayList<>(50);
         cmdline.add(javaExecutable);
         cmdline.add("-XX:+HeapDumpOnOutOfMemoryError");
@@ -593,12 +583,12 @@ public class CommandLine extends VoltDB.Configuration
         }
         cmdline.add("-classpath"); cmdline.add(classPath);
 
+        if (enableVoltSnapshotFilePrefix) {
+            cmdline.add("-DVoltSnapshotFilePrefix=" + voltSnapshotFilePrefix);
+        }
         if (includeTestOpts)
         {
             cmdline.add("-DLOG_SEGMENT_SIZE=8");
-            if (!m_newCli) {
-                cmdline.add("-DVoltFilePrefix=" + voltFilePrefix);
-            }
             cmdline.add("-ea");
             cmdline.add("-XX:MaxDirectMemorySize=2g");
         }
@@ -657,7 +647,7 @@ public class CommandLine extends VoltDB.Configuration
         // VOLTDB main() parameters
         //
         cmdline.add("org.voltdb.VoltDB");
-        cmdline.add(m_startAction.verb());
+        cmdline.addAll(m_startAction.verbs());
 
         if (m_startAction == StartAction.PROBE && m_safeMode) {
             cmdline.add("safemode");
@@ -823,6 +813,11 @@ public class CommandLine extends VoltDB.Configuration
             cmdline.add(m_topicsHostPort.toString());
         }
 
+        if (m_topicsPublicHostPort != null) {
+            cmdline.add("topicspublic");
+            cmdline.add(m_topicsPublicHostPort.toString());
+        }
+
         return cmdline;
     }
 
@@ -981,7 +976,6 @@ public class CommandLine extends VoltDB.Configuration
 
         /**
          * Truncate the option so that it may be looked up in
-         * {@link $mayOtherwiseSpecify} and {@link $mayNotSpecify}
          *
          * @param option an option token
          * @return an optionally truncated option
@@ -1081,13 +1075,6 @@ public class CommandLine extends VoltDB.Configuration
             return sb.toString();
         }
     }
-
-    boolean m_newCli = false;
-    //Return true if we are going to run init and start.
-    boolean isNewCli() {
-        return m_newCli;
-    }
-    public void setNewCli(boolean flag) { m_newCli = flag; };
 
     String m_placementGroup = "";
     public void setPlacementGroup(String placementGroup) {

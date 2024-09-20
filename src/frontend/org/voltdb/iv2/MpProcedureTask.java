@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -24,11 +24,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
-import org.voltcore.logging.Level;
 import org.voltcore.messaging.Mailbox;
 import org.voltcore.utils.CoreUtils;
 import org.voltdb.ClientResponseImpl;
 import org.voltdb.SiteProcedureConnection;
+import org.voltdb.StoredProcedureInvocation;
 import org.voltdb.SystemProcedureCatalog;
 import org.voltdb.VoltTable;
 import org.voltdb.client.ClientResponse;
@@ -36,9 +36,9 @@ import org.voltdb.messaging.CompleteTransactionMessage;
 import org.voltdb.messaging.InitiateResponseMessage;
 import org.voltdb.messaging.Iv2InitiateTaskMessage;
 import org.voltdb.rejoin.TaskLog;
-import org.voltdb.utils.LogKeys;
 import org.voltdb.utils.VoltTrace;
 
+import com.google_voltpatches.common.base.Supplier;
 import com.google_voltpatches.common.collect.Maps;
 
 /**
@@ -61,13 +61,24 @@ public class MpProcedureTask extends ProcedureTask
     // Only used for MP scoreboard at TransactionTaskQueue to track restarted MP transactions.
     final private MpRestartSequenceGenerator m_restartSeqGenerator;
 
+    static MpProcedureTask create(Mailbox mailbox, String procName, TransactionTaskQueue queue,
+            Iv2InitiateTaskMessage msg, List<Long> pInitiators, Map<Integer, Long> partitionMasters, Supplier<Long> buddySupplier,
+            boolean isRestart, int leaderId, boolean nPartTxn) {
+        StoredProcedureInvocation spi = msg.getStoredProcedureInvocation();
+        return spi != null && spi.isBatchCall()
+                ? new BatchProcedureTask.MpBatch(mailbox, procName, queue, msg, pInitiators, partitionMasters,
+                        buddySupplier, isRestart, leaderId, nPartTxn)
+                : new MpProcedureTask(mailbox, procName, queue, msg, pInitiators, partitionMasters, buddySupplier,
+                        isRestart, leaderId, nPartTxn);
+    }
+
     MpProcedureTask(Mailbox mailbox, String procName, TransactionTaskQueue queue,
                   Iv2InitiateTaskMessage msg, List<Long> pInitiators, Map<Integer, Long> partitionMasters,
-                  long buddyHSId, boolean isRestart, int leaderId, boolean nPartTxn)
+                  Supplier<Long> buddySupplier, boolean isRestart, int leaderId, boolean nPartTxn)
     {
         super(mailbox, procName,
               new MpTransactionState(mailbox, msg, pInitiators, partitionMasters,
-                                     buddyHSId, isRestart, nPartTxn),
+                      buddySupplier, isRestart, nPartTxn),
               queue);
         m_isRestart = isRestart;
         m_msg = msg;
@@ -82,6 +93,7 @@ public class MpProcedureTask extends ProcedureTask
      * Currently only thread-"safe" by virtue of only calling this on
      * MpProcedureTasks which are not at the head of the MPI's TransactionTaskQueue.
      */
+    @Override
     public void updateMasters(List<Long> masters, Map<Integer, Long> partitionMasters)
     {
         m_initiatorHSIds.clear();
@@ -218,7 +230,7 @@ public class MpProcedureTask extends ProcedureTask
                 // Set the source HSId (ugh) to ourselves so we track the message path correctly
                 response.m_sourceHSId = m_initiator.getHSId();
                 m_initiator.deliver(response);
-                execLog.l7dlog( Level.TRACE, LogKeys.org_voltdb_ExecutionSite_SendingCompletedWUToDtxn.name(), null);
+                execLog.trace("ExecutionSite sending completed workunit to dtxn.");
                 if (hostLog.isDebugEnabled()) {
                     hostLog.debug("[MpProcedureTask] COMPLETE: " + this);
                 }
@@ -332,6 +344,7 @@ public class MpProcedureTask extends ProcedureTask
         return sb.toString();
     }
 
+    @Override
     public boolean needCoordination() {
         return false;
     }

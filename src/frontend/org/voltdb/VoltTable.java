@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -146,8 +146,13 @@ public final class VoltTable extends VoltTableRow implements JSONString {
     private int m_memoizedRowOffset = NO_MEMOIZED_ROW_OFFSET;
     private int m_memoizedBufferOffset;
 
-    // cache column indexes for column names used for lookup
-    private HashMap<String,Integer> m_columnNameIndexMap;
+    // cache column indexes for getColumnIndex()
+    private HashMap<String,Integer> m_columnNamesMap;
+
+    // cache previous index and position for getColumnName()
+    private int m_lastColumnNamePosition;
+    private int m_lastColumnNameIndex = 0;
+
 
     // JSON KEYS FOR SERIALIZATION
     static final String JSON_NAME_KEY = "name";
@@ -419,6 +424,29 @@ public final class VoltTable extends VoltTableRow implements JSONString {
     }
 
     /**
+     * get a not fully constructed and validated VoltTable.
+     * DO NOT use it for production
+     * @param buf The buffer containing VoltTable buffer.
+     * @return VoltTable instance
+     */
+    public static VoltTable getInstanceForTest(ByteBuffer buf) {
+        return new VoltTable(buf);
+    }
+
+    /**
+     * This VoltTable is not fully instantiated/validated and is for test only.
+     */
+    private VoltTable(ByteBuffer backing) {
+        // no test metadata when creating tables from buffers
+        m_extraMetadata = null;
+        m_buffer = backing;
+        m_rowStart = m_buffer.getInt(0) + 4;
+        m_colCount = m_buffer.getShort(POS_COL_COUNT);
+        m_buffer.position(m_buffer.limit());
+        m_readOnly = true;
+    }
+
+    /**
      * Given a column and an array of columns, return a new array of columns with the
      * single guy prepended onto the others. This function is used in the constructor
      * below so that one constructor can call another without breaking Java rules about
@@ -649,21 +677,35 @@ public final class VoltTable extends VoltTableRow implements JSONString {
 
         // move to the start of the list of column names
         int pos = POS_COL_TYPES + m_colCount;
-        String name = null;
-        for (int i = 0; i < index; i++) {
+        int startIndex = 0;
+
+        if (index >= m_lastColumnNameIndex && m_lastColumnNameIndex > 0) {
+            startIndex = m_lastColumnNameIndex;
+            pos = m_lastColumnNamePosition;
+        }
+
+        for (int i = startIndex; i < index; i++) {
             pos += m_buffer.getInt(pos) + 4;
         }
-        name = readString(pos, METADATA_ENCODING);
+
+        // read column name string
+        String name = readString(pos, METADATA_ENCODING);
         assert(name != null);
 
         assert(verifyTableInvariants());
+
+        m_lastColumnNamePosition = pos;
+        m_lastColumnNameIndex = index;
+
         return name;
     }
 
     @Override
     public final VoltType getColumnType(int index) {
         assert(verifyTableInvariants());
-        assert(index < m_colCount);
+        if (index < 0 || index >= m_colCount) {
+            throw new IllegalArgumentException("Not a valid column index: " + index);
+        }
         // move to the right place
         VoltType retval = VoltType.get(m_buffer.get(POS_COL_TYPES + index));
 
@@ -728,24 +770,29 @@ public final class VoltTable extends VoltTableRow implements JSONString {
     @Override
     public final int getColumnIndex(String name) {
 
-        if (m_columnNameIndexMap == null) {
-            m_columnNameIndexMap = new HashMap<String, Integer>(m_colCount);
-            for (int i = 0; i < m_colCount; i++) {
-                m_columnNameIndexMap.put(getColumnName(i).toUpperCase(), Integer.valueOf(i));
+        if (m_columnNamesMap == null) {
+            m_columnNamesMap = new HashMap<>(m_colCount,1.0F);
+        }
+        String upperName = name.toUpperCase();
+        Integer columnIndex = m_columnNamesMap.get(upperName);
+        if (columnIndex == null) { // name not in map
+            for (int i = m_columnNamesMap.size(); i < m_colCount; i++) {
+                String n = getColumnName(i).toUpperCase();
+                m_columnNamesMap.put(n, i);
+                if (n.equals(upperName)) { // stop when requested column found
+                    columnIndex = i;
+                    break;
+                }
             }
         }
-
-        Integer cachedIndex = m_columnNameIndexMap.get(name.toUpperCase());
-
-        if (cachedIndex == null) {
+        if (columnIndex == null) {
             String msg = "No Column named '" + name + "'. Existing columns are:";
             for (int i = 0; i < m_colCount; i++) {
                 msg += "[" + i + "]" + getColumnName(i) + ",";
             }
             throw new IllegalArgumentException(msg);
         }
-
-        return cachedIndex;
+        return columnIndex;
     }
 
     /**

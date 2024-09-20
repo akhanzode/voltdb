@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -55,6 +55,7 @@ import org.voltdb.client.NoConnectionsException;
 import org.voltdb.client.ProcCallException;
 import org.voltdb.client.ProcedureCallback;
 import org.voltdb.client.SyncCallback;
+import org.voltdb.client.UpdateApplicationCatalog;
 import org.voltdb.compiler.VoltCompiler;
 import org.voltdb.compiler.VoltProjectBuilder;
 import org.voltdb.compiler.VoltProjectBuilder.ProcedureInfo;
@@ -139,7 +140,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
         // add a procedure "InsertOrderLineBatched"
         newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-expanded.jar");
         callback = new CatTestCallback(ClientResponse.SUCCESS);
-        client.updateApplicationCatalog(callback, new File(newCatalogURL), null);
+        UpdateApplicationCatalog.update(client, callback, new File(newCatalogURL), null);
 
         // don't care if this succeeds or fails.
         // calling the new proc before the cat change returns is not guaranteed to work
@@ -192,7 +193,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
             //
             String newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-enable_snapshot.jar");
             String deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-enable_snapshot.xml");
-            VoltTable[] results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+            VoltTable[] results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
             assertTrue(results.length == 1);
             Thread.sleep(5000);
 
@@ -208,7 +209,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
             //
             newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-change_snapshot.jar");
             deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-change_snapshot.xml");
-            results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+            results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
             assertTrue(results.length == 1);
             Thread.sleep(5000);
 
@@ -224,7 +225,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
             //
             newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-change_snapshot_dir_not_exist.jar");
             deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-change_snapshot_dir_not_exist.xml");
-            results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+            results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
             assertTrue(results.length == 1);
 
             System.out.println("Waiting for failed snapshots");
@@ -235,7 +236,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
             //
             newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base.jar");
             deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base.xml");
-            results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+            results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
             assertTrue(results.length == 1);
             Thread.sleep(5000);
 
@@ -251,7 +252,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
             //
             newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base.jar");
             deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base.xml");
-            results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+            results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
             assertTrue(results.length == 1);
             for (File f : m_config.listFiles(new File("/tmp/snapshotdir2"))) {
                 f.delete();
@@ -269,7 +270,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
             //
             newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-enable_snapshot.jar");
             deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-enable_snapshot.xml");
-            results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+            results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
             assertTrue(results.length == 1);
             Thread.sleep(5000);
 
@@ -285,7 +286,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
             //
             newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base.jar");
             deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base.xml");
-            results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+            results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
             assertTrue(results.length == 1);
             Thread.sleep(1000);
 
@@ -311,7 +312,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
         String newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-expanded.jar");
         String deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-expanded.xml");
         try {
-            client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL));
+            UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL));
             fail("Update catalog with procs from class should fail in PAUSE mode");
         } catch(ProcCallException e) {
             assertEquals(ClientResponse.SERVER_UNAVAILABLE, e.getClientResponse().getStatus());
@@ -320,7 +321,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
         newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-adhocproc.jar");
         deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-adhocproc.xml");
         try {
-            client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL));
+            UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL));
             fail("Update catalog with adhoc procs should fail in PAUSE mode");
         } catch(ProcCallException e) {
             assertEquals(ClientResponse.SERVER_UNAVAILABLE, e.getClientResponse().getStatus());
@@ -329,7 +330,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
         newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-adhocschema.jar");
         deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-adhocschema.xml");
         try {
-            client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL));
+            UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL));
             fail("Update catalog with adhoc schema change should fail in PAUSE mode");
         } catch(ProcCallException e) {
             assertEquals(ClientResponse.SERVER_UNAVAILABLE, e.getClientResponse().getStatus());
@@ -347,7 +348,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
         }
 
         // admin should pass
-        resp = adminClient.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL));
+        resp = UpdateApplicationCatalog.update(adminClient, new File(newCatalogURL), new File(deploymentURL));
         assertEquals(ClientResponse.SUCCESS, resp.getStatus());
 
         resp = adminClient.callProcedure("@Resume");
@@ -375,7 +376,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
         newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-expanded.jar");
         deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-expanded.xml");
         callback = new CatTestCallback(ClientResponse.SUCCESS);
-        client.updateApplicationCatalog(callback, new File(newCatalogURL), new File(deploymentURL));
+        UpdateApplicationCatalog.update(client, callback, new File(newCatalogURL), new File(deploymentURL));
 
         // don't care if this succeeds or fails.
         // calling the new proc before the cat change returns is not guaranteed to work
@@ -405,7 +406,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
         // this is a do nothing change... shouldn't affect anything
         newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-expanded.jar");
         deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-expanded.xml");
-        results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+        results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
         assertTrue(results.length == 1);
         assertCallbackSuccess(client);
 
@@ -422,7 +423,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
         newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base.jar");
         deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base.xml");
         callback = new CatTestCallback(ClientResponse.SUCCESS);
-        client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL));
+        UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL));
 
         // don't care if this works now
         x = 4;
@@ -453,7 +454,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
         // change the insert new order procedure
         newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-conflict.jar");
         deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-conflict.xml");
-        results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+        results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
         assertTrue(results.length == 1);
 
         // call the new proc and make sure the one we want gets run
@@ -464,13 +465,14 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
         // load a big catalog change just to make sure nothing fails horribly
         newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-many.jar");
         deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-many.xml");
-        results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+        results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
         assertTrue(results.length == 1);
 
         loadSomeData(client, 65, 5);
 
         //Check that if a catalog update blocker exists the catalog update fails
-        ZooKeeper zk = ZKUtil.getClient(((LocalCluster) m_config).zkinterface(0), 10000, new HashSet<Long>());
+        LocalCluster lc = (LocalCluster) m_config;
+        ZooKeeper zk = ZKUtil.getClient(lc.zkInterface(0), lc.zkPort(0), 10000, new HashSet<Long>());
         final String catalogUpdateBlockerPath = zk.create(
                 VoltZK.rejoinInProgress,
                 null,
@@ -485,7 +487,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
             deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base.xml");
             boolean threw = false;
             try {
-                client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL));
+                UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL));
             } catch (ProcCallException e) {
                 e.printStackTrace();
                 threw = true;
@@ -497,7 +499,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
         }
 
         //Expect success
-        client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL));
+        UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL));
 
         assertCallbackSuccess(client);
         assertTrue(true);
@@ -513,7 +515,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
 
         String newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base-secure.jar");
         String deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base-secure.xml");
-        VoltTable[] results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+        VoltTable[] results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
         assertTrue(results.length == 1);
 
         // a new client should need a username/password other than the regression suite default.
@@ -560,7 +562,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
         String newCatalogURL = URLDecoder.decode(url.getPath(), "UTF-8");
         String deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-addtables.xml");
         try {
-            client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL));
+            UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL));
             fail();
         }
         catch (Exception e) {
@@ -600,7 +602,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
         // add index to NEW_ORDER
         String newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-addindex.jar");
         String deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-addindex.xml");
-        VoltTable[] results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+        VoltTable[] results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
         assertTrue(results.length == 1);
 
         // check the index for non-zero size
@@ -645,7 +647,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
         // revert to the original schema
         newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base.jar");
         deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base.xml");
-        results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+        results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
         assertTrue(results.length == 1);
 
         // do a call that uses the index
@@ -680,7 +682,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
         // add index to NEW_ORDER
         String newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-addexpressindex.jar");
         String deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-addexpressindex.xml");
-        VoltTable[] results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+        VoltTable[] results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
         assertTrue(results.length == 1);
 
         loadSomeData(client, 0, 10);
@@ -728,7 +730,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
         // revert to the original schema
         newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base.jar");
         deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base.xml");
-        results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+        results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
         assertTrue(results.length == 1);
 
         // do a call that uses the index
@@ -772,7 +774,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
         // add tables O1, O2, O3
         String newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-addtables.jar");
         String deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-addtables.xml");
-        VoltTable[] results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+        VoltTable[] results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
         assertTrue(results.length == 1);
 
         // verify that the new table(s) support an insert
@@ -801,7 +803,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
         // revert to the original schema
         newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base.jar");
         deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base.xml");
-        results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+        results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
         assertTrue(results.length == 1);
 
         // requests to the dropped table should fail
@@ -832,7 +834,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
         // add new tables and materialized view
         String newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-addtableswithmatview.jar");
         String deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-addtableswithmatview.xml");
-        VoltTable[] results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+        VoltTable[] results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
         assertTrue(results.length == 1);
 
         // verify that the new table(s) support an insert
@@ -876,7 +878,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
             // add tables O1, O2, O3
             String newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-addtables.jar");
             String deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-addtables.xml");
-            VoltTable[] results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+            VoltTable[] results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
             assertTrue(results.length == 1);
 
             // Thread.sleep(2000);
@@ -887,7 +889,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
             // revert to the original schema
             newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base.jar");
             deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base.xml");
-            results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+            results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
             assertTrue(results.length == 1);
         }
     }
@@ -902,7 +904,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
         assertCallbackSuccess(client);
 
         try {
-            VoltTable[] results = client.updateApplicationCatalog(new File(hugeCatalogJarPath), new File(hugeCatalogXMLPath)).getResults();
+            VoltTable[] results = UpdateApplicationCatalog.update(client, new File(hugeCatalogJarPath), new File(hugeCatalogXMLPath)).getResults();
             assertTrue(results.length == 1);
         }
         catch (ProcCallException e) {
@@ -924,25 +926,25 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
 
         newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-timeout-1000.jar");
         deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-timeout-1000.xml");
-        results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+        results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
         assertTrue(results.length == 1);
         checkDeploymentPropertyValue(client, key, "1000");
 
         newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-timeout-5000.jar");
         deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-timeout-5000.xml");
-        results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+        results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
         assertTrue(results.length == 1);
         checkDeploymentPropertyValue(client, key, "5000");
 
         newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-timeout-600.jar");
         deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-timeout-600.xml");
-        results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+        results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
         assertTrue(results.length == 1);
         checkDeploymentPropertyValue(client, key, "600");
 
         newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base.jar");
         deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-base.xml");
-        results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+        results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
         assertTrue(results.length == 1);
         checkDeploymentPropertyValue(client, key, "10000"); // check default value
 
@@ -953,7 +955,7 @@ public class TestCatalogUpdateSuite extends RegressionSuite {
 
         newCatalogURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-elastic-100-5.jar");
         deploymentURL = Configuration.getPathToCatalogForTest("catalogupdate-cluster-elastic-100-5.xml");
-        results = client.updateApplicationCatalog(new File(newCatalogURL), new File(deploymentURL)).getResults();
+        results = UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL)).getResults();
         assertTrue(results.length == 1);
         checkDeploymentPropertyValue(client, duration, "100");
         checkDeploymentPropertyValue(client, throughput, "5");

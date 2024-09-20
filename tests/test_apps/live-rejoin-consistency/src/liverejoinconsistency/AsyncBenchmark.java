@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -81,6 +81,7 @@ import org.voltdb.client.NoConnectionsException;
 import org.voltdb.client.NullCallback;
 import org.voltdb.client.ProcCallException;
 import org.voltdb.client.ProcedureCallback;
+import org.voltdb.client.UpdateApplicationCatalog;
 
 import sun.misc.Signal;
 import sun.misc.SignalHandler;
@@ -174,12 +175,6 @@ public class AsyncBenchmark {
         @Option(desc = "Maximum TPS rate for benchmark.")
         int ratelimit = 100000;
 
-        @Option(desc = "Determine transaction rate dynamically based on latency.")
-        boolean autotune = false;
-
-        @Option(desc = "Server-side latency target for auto-tuning.")
-        int latencytarget = 5;
-
         @Option(desc = "Filename to write raw summary statistics to.")
         String statsfile = "";
 
@@ -197,8 +192,6 @@ public class AsyncBenchmark {
                 exitWithMessageAndUsage("displayinterval must be > 0");
             if (ratelimit <= 0)
                 exitWithMessageAndUsage("ratelimit must be > 0");
-            if (latencytarget <= 0)
-                exitWithMessageAndUsage("latencytarget must be > 0");
         }
     }
 
@@ -240,12 +233,8 @@ public class AsyncBenchmark {
 
         ClientConfig clientConfig = new ClientConfig(config.user,
                 config.password, new StatusListener());
-        if (config.autotune) {
-            clientConfig.enableAutoTune();
-            clientConfig.setAutoTuneTargetInternalLatency(config.latencytarget);
-        } else {
-            clientConfig.setMaxTransactionsPerSecond(config.ratelimit);
-        }
+        clientConfig.setMaxTransactionsPerSecond(config.ratelimit);
+
         // for adhoc limit number of outstanding tx
         clientConfig.setMaxOutstandingTxns(200);
         client = ClientFactory.createClient(clientConfig);
@@ -408,10 +397,6 @@ public class AsyncBenchmark {
         log.info(" System Server Statistics");
         log.info(HORIZONTAL_RULE);
 
-        if (config.autotune) {
-            System.out.printf("Targeted Internal Avg Latency: %,9d ms\n",
-                    config.latencytarget);
-        }
         System.out.printf("Reported Internal Avg Latency: %,9.2f ms\n",
                 stats.getAverageInternalLatency());
 
@@ -586,7 +571,7 @@ public class AsyncBenchmark {
                     File file2 = new File(catPath + "/deployment.xml");
                     // Flip the catalog
                     lastCatalog = (lastCatalog+1) % 2;
-                    response = client.updateApplicationCatalog(catalog_files[ lastCatalog ], file2);
+                    response = UpdateApplicationCatalog.update(client, catalog_files[ lastCatalog ], file2);
                     if (response.getStatus() != ClientResponse.SUCCESS) {
                         log.error(_F("UAC operation failed with %s\n", response.getStatusString()));
                         throw new RuntimeException();

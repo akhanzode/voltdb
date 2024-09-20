@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -196,10 +196,26 @@ public interface CommandLog {
     public void requestTruncationSnapshot(final boolean queueIfPending);
 
     /**
+     * Report when a truncation snapshot has started so CommandLogging does not submit
+     * a new request until after the truncation work is complete
+     */
+    public default void notifyTruncationSnapshotStarted() {
+        // Ignore snapshot start notification when Command Logging is disabled
+    }
+
+    /**
      * Statistics-related interface
      * Implementation should populate the stats based on column name to index mapping
      */
-    public void populateCommandLogStats(Map<String, Integer> columnNameToIndex, Object[] rowValues);
+    public void populateCommandLogStats(int offset, Object[] rowValues);
+
+    /**
+     * Statistics-related interface, used by ActivityStats.
+     * Implementaton should return outstanding byte count
+     * in out[0], outstanding txn count in out[1].
+     * If counts are not available, ok to do nothing.
+     */
+    public void getCommandLogOutstanding(long[] out);
 
     /**
      * Does this logger do synchronous logging

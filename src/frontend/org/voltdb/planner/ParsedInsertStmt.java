@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -33,7 +33,6 @@ import org.voltdb.expressions.AbstractExpression;
 import org.voltdb.expressions.ConstantValueExpression;
 import org.voltdb.expressions.FunctionExpression;
 import org.voltdb.planner.parseinfo.StmtSubqueryScan;
-import org.voltdb.utils.CatalogUtil;
 
 /**
  *
@@ -149,7 +148,7 @@ public class ParsedInsertStmt extends AbstractParsedStmt {
                 int id = Integer.parseInt(timeValue.split(":")[1]);
 
                 FunctionExpression funcExpr = new FunctionExpression();
-                funcExpr.setAttributes(name, null, id);
+                funcExpr.setAttributes(name, null, null, id);
 
                 funcExpr.setValueType(VoltType.TIMESTAMP);
                 funcExpr.setValueSize(VoltType.TIMESTAMP.getMaxLengthInBytes());
@@ -223,15 +222,6 @@ public class ParsedInsertStmt extends AbstractParsedStmt {
     public boolean isOrderDeterministicInSpiteOfUnorderedSubqueries() {
         assert(getSubselectStmt() != null);
         return getSubselectStmt().isOrderDeterministicInSpiteOfUnorderedSubqueries();
-    }
-
-    /**
-     * Returns true if the table being inserted into has a trigger executed
-     * when row limit is met
-     */
-    public boolean targetTableHasLimitRowsTrigger() {
-        assert(m_tableList.size() == 1);
-        return CatalogUtil.getLimitPartitionRowsDeleteStmt(m_tableList.get(0)) != null;
     }
 
     @Override

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -32,6 +32,8 @@ public enum ConstraintType {
     PRIMARY_KEY  (4),
     NOT_NULL     (5),
     PARTITIONING (6),
+    // Note: LIMIT is not supported but the constraint remains
+    // to preserve the value of the constraint following.
     LIMIT        (7),
     NUMERIC      (8);
 

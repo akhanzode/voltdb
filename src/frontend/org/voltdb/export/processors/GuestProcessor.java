@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -164,6 +164,8 @@ public class GuestProcessor implements ExportDataProcessor {
             final Class<?> clientClass = Class.forName(exportClientClass);
             ExportClientBase client = (ExportClientBase) clientClass.newInstance();
             client.configure(properties);
+        } catch(RuntimeException re) {
+            throw re;
         } catch(Throwable t) {
             throw new RuntimeException(t);
         }

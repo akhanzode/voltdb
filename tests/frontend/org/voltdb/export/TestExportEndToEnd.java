@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -23,19 +23,8 @@
 
 package org.voltdb.export;
 
-import com.google_voltpatches.common.collect.Maps;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
-import org.voltdb.BackendTarget;
-import org.voltdb.VoltTable;
-import org.voltdb.client.Client;
-import org.voltdb.client.ClientResponse;
-import org.voltdb.compiler.VoltProjectBuilder;
-import org.voltdb.compiler.deploymentfile.ServerExportEnum;
-import org.voltdb.export.TestExportBaseSocketExport.ServerListener;
-import org.voltdb.regressionsuites.LocalCluster;
-import org.voltdb.utils.VoltFile;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -43,8 +32,21 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
+import org.voltdb.BackendTarget;
+import org.voltdb.VoltTable;
+import org.voltdb.client.Client;
+import org.voltdb.client.ClientResponse;
+import org.voltdb.client.ProcCallException;
+import org.voltdb.compiler.VoltProjectBuilder;
+import org.voltdb.compiler.deploymentfile.ServerExportEnum;
+import org.voltdb.export.TestExportBaseSocketExport.ServerListener;
+import org.voltdb.regressionsuites.LocalCluster;
+
+import com.google_voltpatches.common.collect.ImmutableMap;
+import com.google_voltpatches.common.collect.Maps;
 
 public class TestExportEndToEnd extends ExportLocalClusterBase {
 
@@ -83,7 +85,6 @@ public class TestExportEndToEnd extends ExportLocalClusterBase {
     public void setUp() throws Exception {
         streamNames.clear();
         resetDir();
-        VoltFile.resetSubrootForThisProcess();
         VoltProjectBuilder builder = new VoltProjectBuilder();
         builder.setUseDDLSchema(true);
         builder.setPartitionDetectionEnabled(true);
@@ -105,7 +106,6 @@ public class TestExportEndToEnd extends ExportLocalClusterBase {
         startListener();
 
         m_cluster = new LocalCluster("testFlushExportBuffer.jar", SPH, HOST_COUNT, KFACTOR, BackendTarget.NATIVE_EE_JNI);
-        m_cluster.setNewCli(true);
         m_cluster.setHasLocalServer(false);
         m_cluster.overrideAnyRequestForValgrind();
         // Config custom socket exporter
@@ -134,7 +134,6 @@ public class TestExportEndToEnd extends ExportLocalClusterBase {
     public void testInsertAllNulls_ENG_19237() throws Exception {
         Client client = getClient(m_cluster);
         // only interested in nullable stream
-        streamNames.add("nullable");
         ClientResponse response = client.callProcedure("@AdHoc", NULLABLE_SCHEMA);
         assertEquals(ClientResponse.SUCCESS, response.getStatus());
         response = client.callProcedure("@AdHoc",
@@ -142,7 +141,7 @@ public class TestExportEndToEnd extends ExportLocalClusterBase {
         assertEquals(ClientResponse.SUCCESS, response.getStatus());
 
         // no crash
-        TestExportBaseSocketExport.waitForExportAllRowsDelivered(client, streamNames);
+        TestExportBaseSocketExport.waitForExportRowsToBeDelivered(client, ImmutableMap.of("nullable", 1L));
         assertEquals(3, m_cluster.getLiveNodeCount());
     }
 
@@ -151,32 +150,48 @@ public class TestExportEndToEnd extends ExportLocalClusterBase {
     public void testExportRejoinThenDropStream_ENG_15740() throws Exception
     {
         Client client = getClient(m_cluster);
-        streamNames.add("t_1");
         ClientResponse response = client.callProcedure("@AdHoc", T1_SCHEMA);
         assertEquals(ClientResponse.SUCCESS, response.getStatus());
-        streamNames.add("t_2");
         response = client.callProcedure("@AdHoc", T2_SCHEMA);
         assertEquals(ClientResponse.SUCCESS, response.getStatus());
         // Generate PBD files
         Object[] data = new Object[3];
         Arrays.fill(data, 1);
         insertToStream("t_1", 0, 100, client, data);
-        insertToStream("t_2", 0, 100, client, data);
+        insertToStream("t_2", 0, 100, client, data, false);
 
         // kill one node
         m_cluster.killSingleHost(1);
 
         // drop stream
-        response = client.callProcedure("@AdHoc", "DROP STREAM t_1");
+        boolean stillInRepair;
+        int loopCnt = 0;
+        do {
+            // NOTE: This try block can be removed if killSingleHost does not return until
+            //       repair completes or if LocalCluster supported an API @StopNode. However,
+            //       if a new API was supported, LocalCluster would need to maintain a mapping
+            //       of HostIds to processes. (1) above really means the second process.
+            stillInRepair = false;
+            try {
+                response = client.callProcedure("@AdHoc", "DROP STREAM t_1");
+            }
+            catch (ProcCallException e) {
+                if (e.getMessage().endsWith("transaction repair are in progress")) {
+                    stillInRepair = true;
+                    Thread.sleep(500);
+                    loopCnt++;
+                }
+            }
+        } while (stillInRepair && loopCnt < 10);
+        assertTrue("Repair took more than 5 seconds", loopCnt < 10);
         assertEquals(ClientResponse.SUCCESS, response.getStatus());
-        streamNames.remove("t_1");
+        m_verifier.dropStream("t_1");
 
         // rejoin node back
         m_cluster.rejoinOne(1);
         client.drain();
 
-        client = getClient(m_cluster);
-        TestExportBaseSocketExport.waitForExportAllRowsDelivered(client, streamNames);
+        m_verifier.waitForTuplesAndVerify(client);
         assertEquals(3, m_cluster.getLiveNodeCount());
     }
 
@@ -184,10 +199,8 @@ public class TestExportEndToEnd extends ExportLocalClusterBase {
     public void testExportRejoinOldGenerationStream_ENG_16239() throws Exception
     {
         Client client = getClient(m_cluster);
-        streamNames.add("t_1");
         ClientResponse response = client.callProcedure("@AdHoc", T1_SCHEMA);
         assertEquals(ClientResponse.SUCCESS, response.getStatus());
-        streamNames.add("t_2");
         response = client.callProcedure("@AdHoc", T2_SCHEMA);
         assertEquals(ClientResponse.SUCCESS, response.getStatus());
         // Generate PBD files
@@ -202,21 +215,39 @@ public class TestExportEndToEnd extends ExportLocalClusterBase {
         m_cluster.killSingleHost(0);
 
         // drop stream
-        response = client.callProcedure("@AdHoc", "DROP STREAM t_1");
+        boolean stillInRepair;
+        int loopCnt = 0;
+        do {
+            // NOTE: This try block can be removed if killSingleHost does not return until
+            //       repair completes or if LocalCluster supported an API @StopNode. However,
+            //       if a new API was supported, LocalCluster would need to maintain a mapping
+            //       of HostIds to processes. (1) above really means the second process.
+            stillInRepair = false;
+            try {
+                response = client.callProcedure("@AdHoc", "DROP STREAM t_1");
+            }
+            catch (ProcCallException e) {
+                if (e.getMessage().endsWith("transaction repair are in progress")) {
+                    stillInRepair = true;
+                    Thread.sleep(500);
+                    loopCnt++;
+                }
+            }
+        } while (stillInRepair && loopCnt < 10);
+        assertTrue("Repair took more than 5 seconds", loopCnt < 10);
         assertEquals(ClientResponse.SUCCESS, response.getStatus());
+        m_verifier.dropStream("t_1");
         response = client.callProcedure("@AdHoc", T1_SCHEMA);
         assertEquals(ClientResponse.SUCCESS, response.getStatus());
 
         pkeyStart = 1000;
         insertToStream("t_1", pkeyStart, 100, client, data);
         client.drain();
+
         // rejoin node back
         m_cluster.rejoinOne(0);
+        m_verifier.waitForTuples(client);
 
-        client = getClient(m_cluster);
-        client.drain();
-        client.callProcedure("@Quiesce");
-        TestExportBaseSocketExport.waitForExportAllRowsDelivered(client, streamNames);
         // make sure no partition has more than active stream
         VoltTable stats = client.callProcedure("@Statistics", "export", 0).getResults()[0];
         Map<String, Integer> masterCounters = Maps.newHashMap();

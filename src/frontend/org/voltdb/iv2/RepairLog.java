@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -25,7 +25,6 @@ import java.util.Deque;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import org.voltcore.logging.VoltLogger;
@@ -40,8 +39,6 @@ import org.voltdb.messaging.FragmentTaskMessage;
 import org.voltdb.messaging.Iv2InitiateTaskMessage;
 import org.voltdb.messaging.Iv2RepairLogResponseMessage;
 import org.voltdb.messaging.RepairLogTruncationMessage;
-
-import com.google_voltpatches.common.collect.Sets;
 
 /**
  * The repair log stores messages received from a partition initiator (leader) in case
@@ -161,7 +158,7 @@ public class RepairLog
         return m_txnCommitInterests.isEmpty();
     }
 
-    void notifyTxnCommitInterests(long handle) {
+    private void notifyTxnCommitInterests(long handle) {
         for (TransactionCommitInterest txnCommitInterest : m_txnCommitInterests) {
             txnCommitInterest.transactionCommitted(handle);
         }
@@ -263,11 +260,9 @@ public class RepairLog
         }
 
         RepairLog.Item item = null;
-        Set<Long> truncatedTxns = Sets.newHashSet();
         while ((item = deq.peek()) != null) {
             if (item.canTruncate(handle)) {
                 deq.poll();
-                truncatedTxns.add(item.m_txnId);
             } else {
                 break;
             }

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -87,7 +87,11 @@ public:
     static void create();
     static void destroy();
     static void init(int32_t sitesPerHost, EngineLocals& newEngineLocals);
-    static void resetMemory(int32_t partitionId);
+    static void resetMemory(int32_t partitionId
+#ifdef VOLT_POOL_CHECKING
+      , bool shutdown = false
+#endif
+    );
     static void updateSitePerHost(int32_t sitePerHost);
     static void deactiveEngineLocals(int32_t partitionId);
 

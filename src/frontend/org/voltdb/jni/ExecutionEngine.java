@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -27,7 +27,6 @@ import java.util.Map.Entry;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
 
-import org.voltcore.logging.Level;
 import org.voltcore.logging.VoltLogger;
 import org.voltcore.utils.CoreUtils;
 import org.voltcore.utils.DBBPool;
@@ -56,7 +55,6 @@ import org.voltdb.planner.ActivePlanRepository;
 import org.voltdb.sysprocs.saverestore.HiddenColumnFilter;
 import org.voltdb.types.PlanNodeType;
 import org.voltdb.types.TimestampType;
-import org.voltdb.utils.LogKeys;
 import org.voltdb.utils.VoltTableUtil;
 import org.voltdb.utils.VoltTrace;
 
@@ -375,29 +373,24 @@ public abstract class ExecutionEngine implements FastDeserializer.Deserializatio
          */
         void verifyDependencySanity(final Integer dependencyId, final List<VoltTable> dependencies) {
             if (dependencies == null) {
-                hostLog.l7dlog(Level.FATAL, LogKeys.host_ExecutionSite_DependencyNotFound.name(),
-                               new Object[] { dependencyId }, null);
+                hostLog.fatalFmt("dependency(id=%s) was not found.", dependencyId);
                 VoltDB.crashLocalVoltDB("No additional info.", false, null);
                 // Prevent warnings.
                 return;
             }
             for (final Object dependency : dependencies) {
                 if (dependency == null) {
-                    hostLog.l7dlog(Level.FATAL, LogKeys.host_ExecutionSite_DependencyContainedNull.name(),
-                                   new Object[] { dependencyId },
-                            null);
+                    hostLog.fatalFmt("dependency(id=%s) contained a null.", dependencyId);
                     VoltDB.crashLocalVoltDB("No additional info.", false, null);
                     // Prevent warnings.
                     return;
                 }
                 if (hostLog.isTraceEnabled()) {
-                    hostLog.l7dlog(Level.TRACE, LogKeys.org_voltdb_ExecutionSite_ImportingDependency.name(),
-                               new Object[] { dependencyId, dependency.getClass().getName(), dependency.toString() },
-                               null);
+                    hostLog.traceFmt("importing a dependency (id=%s):%s: toString=%s ...",
+                                     dependencyId, dependency.getClass().getName(), dependency.toString());
                 }
                 if (!(dependency instanceof VoltTable)) {
-                    hostLog.l7dlog(Level.FATAL, LogKeys.host_ExecutionSite_DependencyNotVoltTable.name(),
-                                   new Object[] { dependencyId }, null);
+                    hostLog.fatalFmt("dependency(id=%s) was not VoltTable type", dependencyId);
                     VoltDB.crashLocalVoltDB("No additional info.", false, null);
                 }
             }
@@ -669,11 +662,16 @@ public abstract class ExecutionEngine implements FastDeserializer.Deserializatio
     protected abstract void coreLoadCatalog(final long timestamp, final byte[] catalogBytes) throws EEException;
 
     /** Pass diffs to apply to the EE's catalog to update it */
-    public final void updateCatalog(final long timestamp, final boolean isStreamUpdate, final String diffCommands) throws EEException {
+    public final void updateCatalog(final long timestamp, final boolean isStreamUpdate, final String diffCommands,
+            Map<Byte, String[]> replicableTables) throws EEException {
         try {
             setupProcedure(null);
             m_fragmentContext = FragmentContext.CATALOG_UPDATE;
             coreUpdateCatalog(timestamp, isStreamUpdate, diffCommands);
+
+            if (replicableTables != null) {
+                replicableTables.forEach(this::setReplicableTables);
+            }
         }
         finally {
             m_fragmentContext = FragmentContext.UNKNOWN;
@@ -990,6 +988,25 @@ public abstract class ExecutionEngine implements FastDeserializer.Deserializatio
      */
     public abstract void deleteExpiredTopicsOffsets(long undoToken, TimestampType deleteOlderThan);
 
+    /**
+     * Set the list of tables which can be replicated to from {@code clusterId}
+     *
+     * @param clusterId of producer cluster
+     * @param tables    which match in both schemas and can be the target of replication. If {@code null} then the
+     *                  tables will be removed
+     */
+    public abstract void setReplicableTables(int clusterId, String[] tables);
+
+    /**
+     * Clear all clusters replicable tables
+     */
+    public abstract void clearAllReplicableTables();
+
+    /**
+     * Clear replicable tables for cluster
+     */
+    public abstract void clearReplicableTables(int clusterId);
+
     /*
      * Declare the native interface. Structurally, in Java, it would be cleaner to
      * declare this in ExecutionEngineJNI.java. However, that would necessitate multiple
@@ -1043,6 +1060,9 @@ public abstract class ExecutionEngine implements FastDeserializer.Deserializatio
             byte hostname[],
             int drClusterId,
             int defaultDrBufferSize,
+            boolean drIgnoreConflicts,
+            int drCrcErrorIgnoreMax,
+            boolean drCrcErrorIgnoreFatal,
             long tempTableMemory,
             boolean createDrReplicatedStream,
             int compactionThreshold);
@@ -1433,6 +1453,29 @@ public abstract class ExecutionEngine implements FastDeserializer.Deserializatio
      * @return 0 on success otherwise 1
      */
     native static protected int nativeDeleteExpiredTopicsOffsets(long pointer, long undoToken, long deleteOlderThan);
+
+    /**
+     * Set the list of tables which can be replicated to from {@code clusterId}
+     *
+     * @param pointer   to execution engine
+     * @param clusterId of producer cluster
+     * @param tables    which match in both schemas and can be the target of replication
+     */
+    native static protected int nativeSetReplicableTables(long pointer, int clusterId, byte[][] tables);
+
+    /**
+     * Clear the map of replicable tables for all clusters
+     *
+     * @param pointer to execution engine
+     */
+    native static protected int nativeClearAllReplicableTables(long pointer);
+
+    /**
+     * Clear the map of replicable tables for a clusters
+     *
+     * @param pointer to execution engine
+     */
+    native static protected int nativeClearReplicableTables(long pointer, int clusterId);
 
     public static byte[] getTestDRBuffer(int partitionId,
                                          int partitionKeyValues[], int flags[],

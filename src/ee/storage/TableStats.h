@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -94,6 +94,8 @@ private:
     int64_t m_lastAllocatedTupleMemory;
     int64_t m_lastOccupiedTupleMemory;
     int64_t m_lastStringDataMemory;
+    voltdb::NValue m_trueValue;
+    voltdb::NValue m_falseValue;
 };
 
 }

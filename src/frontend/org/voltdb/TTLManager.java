@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -31,23 +31,43 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
-
+import org.apache.commons.lang3.StringUtils;
+import org.hsqldb_voltpatches.HSQLInterface;
 import org.hsqldb_voltpatches.TimeToLiveVoltDB;
 import org.hsqldb_voltpatches.lib.StringUtil;
+import org.json_voltpatches.JSONObject;
 import org.voltcore.logging.Level;
 import org.voltcore.logging.VoltLogger;
 import org.voltcore.utils.CoreUtils;
 import org.voltdb.VoltTable.ColumnInfo;
+import org.voltdb.catalog.Column;
+import org.voltdb.catalog.ColumnRef;
+import org.voltdb.catalog.Index;
 import org.voltdb.catalog.Table;
 import org.voltdb.catalog.TimeToLive;
 import org.voltdb.client.ClientResponse;
 import org.voltdb.client.ProcedureCallback;
 import org.voltdb.iv2.MpTransactionState;
+import org.voltdb.sysprocs.LowImpactDeleteNT.ResultTable;
+import org.voltdb.sysprocs.MigrateRowsNT.MigrateResultTable;
 import org.voltdb.utils.CatalogUtil;
+import org.voltdb.utils.TimeUtils;
 
 //schedule and process time-to-live feature via @LowImpactDeleteNT. The host with smallest host id
 //will get the task done.
 public class TTLManager extends StatsSource{
+
+    public enum TTL {
+        TIMESTAMP               (VoltType.BIGINT),
+        TABLE_NAME              (VoltType.STRING),
+        ROWS_DELETED            (VoltType.BIGINT),
+        ROWS_DELETED_LAST_ROUND (VoltType.BIGINT),
+        ROWS_REMAINING          (VoltType.BIGINT),
+        LAST_DELETE_TIMESTAMP   (VoltType.TIMESTAMP);
+
+        public final VoltType m_type;
+        TTL(VoltType type) { m_type = type; }
+    }
 
     //exception is thrown if  DR consumer gets a chunk of larger than 50MB
     //DRTupleStream.cpp
@@ -58,6 +78,7 @@ public class TTLManager extends StatsSource{
     static final int TIMEOUT = Integer.getInteger("TIME_TO_LIVE_TIMEOUT", 2000);
     public static final int NT_PROC_TIMEOUT = Integer.getInteger("NT_PROC_TIMEOUT", 1000 * 120);
     static final int LOG_SUPPRESSION_INTERVAL_SECONDS = 60;
+
     public static class TTLStats {
         final String tableName;
         long rowsLeft = 0L;
@@ -136,19 +157,9 @@ public class TTLManager extends StatsSource{
                 return ttl.getTtlvalue();
             }
             TimeUnit timeUnit = TimeUnit.SECONDS;
-            if(!ttl.getTtlunit().isEmpty()) {
-                final char frequencyUnit = ttl.getTtlunit().toLowerCase().charAt(0);
-                switch (frequencyUnit) {
-                case 'm':
-                    timeUnit = TimeUnit.MINUTES;
-                    break;
-                case 'h':
-                    timeUnit = TimeUnit.HOURS;
-                    break;
-                case 'd':
-                    timeUnit = TimeUnit.DAYS;
-                    break;
-                default:
+            if (!ttl.getTtlunit().isEmpty()) {
+                timeUnit = TimeUtils.convertTimeUnit(ttl.getTtlunit().substring(0,1));
+                if (timeUnit == null) { // error, not one of smhd, so just ignore?
                     timeUnit = TimeUnit.SECONDS;
                 }
             }
@@ -237,10 +248,10 @@ public class TTLManager extends StatsSource{
         final Random random = new Random();
         for (Table t : ttlTables.values()) {
             TimeToLive ttl = t.getTimetolive().get(TimeToLiveVoltDB.TTL_NAME);
-            if (!CatalogUtil.isColumnIndexed(t, ttl.getTtlcolumn())) {
-                hostLog.warn("An index is missing on column " + t.getTypeName() + "." + ttl.getTtlcolumn().getName() +
-                        " for TTL. No records will be purged until an index is added.");
-                continue;
+            if (!checkTTLIndex(t, ttl.getTtlcolumn())) {
+                //
+                // NOTE: we let the TTL task be created in order to log rate limited error messages
+                // repeatedly in the logs, complaining about the missing or incorrect index.
             }
             TTLTask task = m_tasks.get(t.getTypeName());
             if (task == null) {
@@ -263,6 +274,39 @@ public class TTLManager extends StatsSource{
         }
     }
 
+    private boolean checkTTLIndex(Table table, Column column) {
+        boolean migrate = TableType.isPersistentMigrate(table.getTabletype());
+        for (Index index : table.getIndexes()) {
+            if (index.getTypeName().equals(HSQLInterface.AUTO_GEN_MATVIEW_IDX)) {
+                // skip the views auto-generated index, which never has the migrate qualifiers
+                continue;
+            }
+
+            for (ColumnRef colRef : index.getColumns()) {
+                if (column.equals(colRef.getColumn())){
+                    if (migrate && !index.getMigrating()) {
+                        hostLog.warnFmt("The index on column %s.%s must be declared as \"CREATE INDEX %s ON %s (%s) WHERE NOT MIGRATING\"."
+                                + " Until this is corrected, no records will be migrated.",
+                                table.getTypeName(), column.getName(), index.getTypeName(), table.getTypeName(), column.getName());
+                        return false;
+                    }
+                    return true;
+                }
+            }
+        }
+
+        if (migrate) {
+            hostLog.warnFmt("An index is missing on column %s.%s for migrating."
+                    + " It must be declared as \"CREATE INDEX myIndex ON %s (%s) WHERE NOT MIGRATING\"."
+                    + " Until this is corrected, no records will be migrated.",
+                    table.getTypeName(), column.getName(), table.getTypeName(), column.getName());
+        } else {
+            hostLog.warnFmt("An index is missing on column %s.%s for TTL. No records will be purged until an index is added.",
+                    table.getTypeName(), column.getName());
+        }
+        return false;
+    }
+
     public void shutDown() {
         for (Map.Entry<String, ScheduledFuture<?>> fut: m_futures.entrySet()) {
             fut.getValue().cancel(true);
@@ -282,12 +326,9 @@ public class TTLManager extends StatsSource{
 
     @Override
     protected void populateColumnSchema(ArrayList<ColumnInfo> columns) {
-        columns.add(new ColumnInfo("TIMESTAMP", VoltType.BIGINT));
-        columns.add(new ColumnInfo("TABLE_NAME", VoltType.STRING));
-        columns.add(new ColumnInfo("ROWS_DELETED", VoltType.BIGINT));
-        columns.add(new ColumnInfo("ROWS_DELETED_LAST_ROUND", VoltType.BIGINT));
-        columns.add(new ColumnInfo("ROWS_REMAINING", VoltType.BIGINT));
-        columns.add(new ColumnInfo("LAST_DELETE_TIMESTAMP", VoltType.TIMESTAMP));
+        for (TTL col : TTL.values()) {
+            columns.add(new VoltTable.ColumnInfo(col.name(), col.m_type));
+        };
     }
 
     @Override
@@ -298,16 +339,18 @@ public class TTLManager extends StatsSource{
     }
 
     @Override
-    protected void updateStatsRow(Object rowKey, Object[] rowValues) {
+    protected int updateStatsRow(Object rowKey, Object[] rowValues) {
         TTLStats stats = m_stats.get(rowKey);
         if (stats != null) {
-            rowValues[columnNameToIndex.get("TIMESTAMP")] = System.currentTimeMillis();
-            rowValues[columnNameToIndex.get("TABLE_NAME")] = rowKey;
-            rowValues[columnNameToIndex.get("ROWS_DELETED")] = stats.rowsDeleted;
-            rowValues[columnNameToIndex.get("ROWS_DELETED_LAST_ROUND")] = stats.rowsLastDeleted;
-            rowValues[columnNameToIndex.get("ROWS_REMAINING")] = stats.rowsLeft;
-            rowValues[columnNameToIndex.get("LAST_DELETE_TIMESTAMP")] = stats.ts;
+            rowValues[TTL.TIMESTAMP.ordinal()] = System.currentTimeMillis();
+            rowValues[TTL.TABLE_NAME.ordinal()] = rowKey;
+            rowValues[TTL.ROWS_DELETED.ordinal()] = stats.rowsDeleted;
+            rowValues[TTL.ROWS_DELETED_LAST_ROUND.ordinal()] = stats.rowsLastDeleted;
+            rowValues[TTL.ROWS_REMAINING.ordinal()] = stats.rowsLeft;
+            rowValues[TTL.LAST_DELETE_TIMESTAMP.ordinal()] = stats.ts;
+            return TTL.values().length;
         }
+        return 0;
     }
 
     protected void migrate(ClientInterface cl, TTLTask task) {
@@ -319,16 +362,31 @@ public class TTLManager extends StatsSource{
                     hostLog.warn(String.format("Fail to execute nibble export on table: %s, column: %s, status: %s",
                             task.tableName, task.getColumnName(), resp.getStatusString()));
                 }
+                else if (resp.getResults() != null && resp.getResults().length > 0) {
+                    // Procedure call may succeed but response may carry a migration error
+                    VoltTable t = resp.getResults()[0];
+                    t.advanceRow();
+                    long status = t.getLong(MigrateResultTable.STATUS);
+                    if (status != ClientResponse.SUCCESS) {
+                        String error = t.getString(ResultTable.MESSAGE);
+                        if (t.wasNull()) {
+                            error = null;
+                        }
+                        hostLog.rateLimitedLog(LOG_SUPPRESSION_INTERVAL_SECONDS, Level.WARN, null,
+                                "Error migrating table %s: %s", task.tableName,
+                                parseTTLError(error));
+                    }
+                }
                 latch.countDown();
             }
         };
-        cl.getDispatcher().getInternelAdapterNT().callProcedure(cl.getInternalUser(), true, NT_PROC_TIMEOUT, cb,
+        cl.getDispatcher().getInternalAdapterNT().callProcedure(cl.getInternalUser(), true, NT_PROC_TIMEOUT, cb,
                 "@MigrateRowsNT", new Object[] {task.tableName, task.getColumnName(), task.getValue(), "<=", task.getBatchSize(),
                         TIMEOUT, task.getMaxFrequency(), INTERVAL});
         try {
-            latch.await(NT_PROC_TIMEOUT, TimeUnit.SECONDS);
+            latch.await(NT_PROC_TIMEOUT, TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
-            hostLog.warn("Nibble export waiting interrupted" + e.getMessage());
+            // ignored
         }
     }
 
@@ -344,7 +402,7 @@ public class TTLManager extends StatsSource{
                 if (resp.getResults() != null && resp.getResults().length > 0) {
                     VoltTable t = resp.getResults()[0];
                     t.advanceRow();
-                    String error = t.getString("MESSAGE");
+                    String error = t.getString(ResultTable.MESSAGE);
                     if (!error.isEmpty()) {
                         String drLimitError = "";
                         if (error.indexOf(TTLManager.DR_LIMIT_MSG) > -1) {
@@ -362,21 +420,55 @@ public class TTLManager extends StatsSource{
                             }
                         }
                         hostLog.rateLimitedLog(LOG_SUPPRESSION_INTERVAL_SECONDS, Level.WARN, null,
-                                "Errors occured on TTL table %s: %s %s", task.tableName, error, drLimitError);
+                                "Errors occured on TTL table %s: %s %s", task.tableName,
+                                parseTTLError(error), drLimitError);
                     } else {
-                        task.stats.update(t.getLong("ROWS_DELETED"), t.getLong("ROWS_LEFT"), t.getLong("LAST_DELETE_TIMESTAMP"));
+                        task.stats.update(t.getLong(ResultTable.ROWS_DELETED),
+                                          t.getLong(ResultTable.ROWS_LEFT),
+                                          t.getLong(ResultTable.LAST_DELETE_TIMESTAMP));
                     }
                 }
                 latch.countDown();
             }
         };
-        cl.getDispatcher().getInternelAdapterNT().callProcedure(cl.getInternalUser(), true, NT_PROC_TIMEOUT, cb,
+        cl.getDispatcher().getInternalAdapterNT().callProcedure(cl.getInternalUser(), true, NT_PROC_TIMEOUT, cb,
                 "@LowImpactDeleteNT", new Object[] {task.tableName, task.getColumnName(), task.getValue(), "<=", task.getBatchSize(),
                         TIMEOUT, task.getMaxFrequency(), INTERVAL});
         try {
-            latch.await(NT_PROC_TIMEOUT, TimeUnit.SECONDS);
+            latch.await(NT_PROC_TIMEOUT, TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             hostLog.warn("TTL waiting interrupted" + e.getMessage());
         }
     }
+
+    private String parseTTLError(String errorMsg) {
+        String ret = "no reported error";
+        if (StringUtils.isBlank(errorMsg)) {
+            return ret;
+        }
+        ret = errorMsg;
+
+        // Some of the reported errors may be JSON-serialized ClientResponseImpl objects
+        try {
+            JSONObject jsonObj = new JSONObject(errorMsg);
+            String jsonMsg = jsonObj.getString("statusstring");
+            if (!StringUtils.isBlank(jsonMsg)) {
+                ret = jsonMsg;
+            }
+        }
+        catch (Exception ex) {
+            // Ignore any errors/exceptions occurring in this branch
+        }
+
+        // Keep only the first line if the message seems to contain a backtrace,
+        // e.g. the most probable error on incorrect index for migrate:
+        // "VOLTDB ERROR: USER ABORT Could not find migrating index. example: CREATE INDEX myindex ON ORDERS() WHERE NOT MIGRATING\n    at org.voltdb.sysprocs.MigrateRowsSP.run(MigrateRowsSP.java:28)"
+        int idx = ret.indexOf('\n');
+        if (idx != -1 && ret.contains("at org.")) {
+            ret = ret.substring(0, idx);
+        }
+
+        return ret;
+    }
+
 }

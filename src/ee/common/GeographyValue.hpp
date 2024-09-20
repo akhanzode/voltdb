@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -79,7 +79,7 @@ public:
 
     static std::size_t serializedLengthNoLoops();
 
-    std::size_t serializedLength();
+    std::size_t serializedLength() const;
 
     double getDistance(const GeographyPointValue &point) {
         const S2Point s2Point = point.toS2Point();
@@ -539,9 +539,9 @@ inline std::size_t Polygon::serializedLengthNoLoops() {
         BOUND_SERIALIZED_SIZE;
 }
 
-inline std::size_t Polygon::serializedLength() {
+inline std::size_t Polygon::serializedLength() const {
     std::size_t answer = serializedLengthNoLoops();
-    std::vector<S2Loop *> &theLoops = loops();
+    const std::vector<S2Loop *> &theLoops = loops();
     for (int i = 0; i < theLoops.size(); i += 1) {
         answer += Loop::serializedLength(theLoops.at(i)->num_vertices());
     }

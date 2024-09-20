@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -28,11 +28,14 @@ import java.util.TreeMap;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
+import org.voltcore.logging.VoltLogger;
 import org.voltcore.messaging.Mailbox;
 import org.voltcore.network.Connection;
 import org.voltcore.utils.CoreUtils;
@@ -41,6 +44,9 @@ import org.voltdb.SystemProcedureCatalog.Config;
 import org.voltdb.catalog.CatalogMap;
 import org.voltdb.catalog.Procedure;
 import org.voltdb.messaging.InitiateResponseMessage;
+
+import org.voltdb.compiler.deploymentfile.DeploymentType;
+import org.voltdb.compiler.deploymentfile.CompoundProcPolicyType;
 
 import com.google_voltpatches.common.collect.ImmutableMap;
 import com.google_voltpatches.common.util.concurrent.ThreadFactoryBuilder;
@@ -58,12 +64,13 @@ import com.google_voltpatches.common.util.concurrent.ThreadFactoryBuilder;
  *
  */
 public class NTProcedureService {
+    public static final VoltLogger LOG = new VoltLogger("NT");
 
     /**
      * If the NTProcedureService is paused, we add pending requests to a pending
      * list using this simple class.
      */
-    static class PendingInvocation {
+    private static class PendingInvocation {
         final long ciHandle;
         final AuthUser user;
         final Connection ccxn;
@@ -84,50 +91,76 @@ public class NTProcedureService {
     }
 
     // User-supplied non-transactional procedures
-    Map<String, ProcedureRunnerNTGenerator> m_procs = ImmutableMap.<String, ProcedureRunnerNTGenerator>builder().build();
+    private Map<String, ProcedureRunnerNTGenerator> m_procs = ImmutableMap.<String, ProcedureRunnerNTGenerator>builder().build();
     // Non-transactional system procedures
-    Map<String, ProcedureRunnerNTGenerator> m_sysProcs = ImmutableMap.<String, ProcedureRunnerNTGenerator>builder().build();
+    private Map<String, ProcedureRunnerNTGenerator> m_sysProcs = ImmutableMap.<String, ProcedureRunnerNTGenerator>builder().build();
 
     // A tracker of currently executing procedures by id, where id is a long that increments with each call
     final Map<Long, ProcedureRunnerNT> m_outstanding = new ConcurrentHashMap<>();
+
+    // Create a singleton scheduled thread pool for timeouts - create only if Compound procedures are used
+    private ScheduledThreadPoolExecutor m_timeoutExecutor = null;
+    private Map<Long, ScheduledFuture<?>> m_timeouts = null;
+
     // This lets us respond over the network directly
     final LightweightNTClientResponseAdapter m_internalNTClientAdapter;
     // Mailbox for the client interface is used to send messages directly to other nodes (sysprocs only)
-    final Mailbox m_mailbox;
+    private final Mailbox m_mailbox;
     // We pause the service mid-catalog update for stats reasons
-    boolean m_paused = false;
+    private boolean m_paused = false;
     // Transactions that arrived when paused (should always be empty if not paused)
-    final Queue<PendingInvocation> m_pendingInvocations = new ArrayDeque<>();
+    private final Queue<PendingInvocation> m_pendingInvocations = new ArrayDeque<>();
     // increments for every procedure call
-    long nextProcedureRunnerId = 0;
+    private long nextProcedureRunnerId = 0;
 
     // no need for thread safety as this can't race with @UAC at startup
     boolean isRestoring;
 
     // names for threads in the exec service
+    // (exposed for test use)
     final static String NTPROC_THREADPOOL_NAMEPREFIX = "NTPServiceThread-";
     final static String NTPROC_THREADPOOL_PRIORITY_SUFFIX = "Priority-";
+    final static String COMPROC_THREADPOOL_NAMEPREFIX = "CompoundProcSvcThread-";
 
     public static final String NTPROCEDURE_RUN_EVERYWHERE_TIMEOUT = "NTPROCEDURE_RUN_EVERYWHERE_TIMEOUT";
 
-    // runs the initial run() method of nt procs
-    // (doesn't run nt procs if started by other nt procs)
-    // from 2 to 20 threads in parallel, with a bounded queue
-    private final ExecutorService m_primaryExecutorService = new ThreadPoolExecutor(
-            2, 20, 60, TimeUnit.SECONDS, new ArrayBlockingQueue<>(10000),
-            new ThreadFactoryBuilder().setNameFormat(NTPROC_THREADPOOL_NAMEPREFIX + "%d").build());
+    // Parameters for threadpool executors
+    // (For the compound proc executor, these are now set by the deployment file)
+    private static int defaultThreadLimit = Math.max(CoreUtils.availableProcessors(), 4);
+    private static int NTPROC_THREADS = Integer.getInteger("NTPROC_THREADS", defaultThreadLimit);
+    private static int NTPROC_QUEUEMAX = Integer.getInteger("NTPROC_QUEUEMAX", 10_000);
 
-    // runs any follow-up work from nt procs' run() method,
-    // including other nt procs, or other callbacks.
-    // This one has no unbounded queue, but will create an unbounded number of threads
-    // hopefully the number of actual threads will be limited by the number of concurrent
-    // nt procs running in the first queue.
-    // No unbounded queue here -- direct handoff of work to thread
-    // note: threads are cached by default
-    private final ExecutorService m_priorityExecutorService = Executors.newCachedThreadPool(
+    // Runs the initial run() method of nt procs.
+    //  (doesn't run nt procs if started by other nt procs).
+    // Uses multiple threads, created on demand up to a limit.
+    // After that there is a bounded queue.
+    // Threads do not idle out, despite the timeout setting.
+    private final ExecutorService m_primaryExecutorService = new ThreadPoolExecutor(
+            NTPROC_THREADS, NTPROC_THREADS, 60, TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(NTPROC_QUEUEMAX),
+            new ThreadFactoryBuilder()
+                .setNameFormat(NTPROC_THREADPOOL_NAMEPREFIX + "%d")
+                .build());
+
+    // Runs any follow-up work from nt procs' run() method,
+    //  including other nt procs, or other callbacks.
+    // Use of synchronous queue causes direct handoff to new thread.
+    // The number of threads is unbounded.
+    // Threads are cached but idle out after 60 secs.
+    private final ExecutorService m_priorityExecutorService = new ThreadPoolExecutor(
+            0, Integer.MAX_VALUE, 60, TimeUnit.SECONDS,
+            new SynchronousQueue(),
             new ThreadFactoryBuilder()
                 .setNameFormat(NTPROC_THREADPOOL_NAMEPREFIX + NTPROC_THREADPOOL_PRIORITY_SUFFIX + "%d")
                 .build());
+
+    // Used for requests for compound procs, and responses
+    // from subprocs. Subprocs issued by the compound proc
+    // will execute on the usual site thread. See primary
+    // thread for other comments. Created only if we have
+    // compound procedures loaded.
+    private ExecutorService m_compoundProcExecutorService;
+    private boolean m_compoundProcsExist;
 
     /**
      * All of the slow load-time stuff for each procedure is cached here.
@@ -135,16 +168,20 @@ public class NTProcedureService {
      * These actually create new ProcedureRunnerNT instances for each NT
      * procedure call.
      */
-    class ProcedureRunnerNTGenerator {
+    private class ProcedureRunnerNTGenerator {
         final String m_procedureName;
         final Class<? extends VoltNonTransactionalProcedure> m_procClz;
         final Method m_procMethod;
         final Class<?>[] m_paramTypes;
         final ProcedureStatsCollector m_statsCollector;
+        final CompoundProcCallStats m_compoundCallStats;
+        final boolean m_isCompound;
 
         ProcedureRunnerNTGenerator(Class<? extends VoltNonTransactionalProcedure> clz) {
             m_procClz = clz;
             m_procedureName = m_procClz.getSimpleName();
+            m_isCompound = VoltCompoundProcedure.class.isAssignableFrom(clz);
+            NTProcedureService.this.m_compoundProcsExist |= m_isCompound;
 
             // reflect
             Method procMethod = null;
@@ -162,17 +199,33 @@ public class NTProcedureService {
             m_procMethod = procMethod;
             m_paramTypes = paramTypes;
 
-            // make a stats source for this proc
-            m_statsCollector = new ProcedureStatsCollector(
-                    CoreUtils.getSiteIdFromHSId(m_mailbox.getHSId()), 0, m_procClz.getName(),
-                    false, null, false);
-            VoltDB.instance().getStatsAgent().registerStatsSource(
-                    StatsSelector.PROCEDURE, CoreUtils.getSiteIdFromHSId(m_mailbox.getHSId()), m_statsCollector);
+            // make any stats sources for this proc
+            int siteId = CoreUtils.getSiteIdFromHSId(m_mailbox.getHSId());
+            ProcedureStatsCollector.ProcType procType = m_isCompound
+                ? ProcedureStatsCollector.ProcType.COMPOUND
+                :  ProcedureStatsCollector.ProcType.NONTRANS;
+            StatsAgent sa = VoltDB.instance().getStatsAgent();
+            m_statsCollector = new ProcedureStatsCollector(siteId,
+                                                           -1, // no partition
+                                                           m_procClz.getName(), // full class name
+                                                           false, // not single partition
+                                                           null, // no statement list
+                                                           procType);
+            sa.registerStatsSource(StatsSelector.PROCEDURE, siteId, m_statsCollector);
+
+            if (m_isCompound) {
+                m_compoundCallStats = new CompoundProcCallStats(m_procClz.getName()); // same as above
+                sa.registerStatsSource(StatsSelector.COMPOUNDPROCCALLS, -1, m_compoundCallStats);
+            }
+            else {
+                m_compoundCallStats = null;
+            }
         }
 
         /**
          * From the generator, create an actual procedure runner to be used
-         * for a single invocation of an NT procedure run.
+         * for a single invocation of an NT procedure run. We are synchronized
+         * on the NTProcedureService when this method is called.
          */
         ProcedureRunnerNT generateProcedureRunnerNT(
                 AuthUser user, Connection ccxn, boolean isAdmin, long ciHandle, long clientHandle, int timeout)
@@ -181,12 +234,20 @@ public class NTProcedureService {
             // in NTProcedureService
             long id = nextProcedureRunnerId++;
             final VoltNonTransactionalProcedure procedure = m_procClz.newInstance();
-            return new ProcedureRunnerNT(
-                    id, user, ccxn, isAdmin, ciHandle, clientHandle, timeout, procedure, m_procedureName,
+            if (m_isCompound) {
+                return new CompoundProcedureRunner(
+                    id, user, ccxn, isAdmin, ciHandle, clientHandle, timeout,
+                    (VoltCompoundProcedure)procedure, m_procedureName,
+                    m_procMethod, m_paramTypes, m_compoundProcExecutorService,
+                    NTProcedureService.this, m_mailbox, m_statsCollector, m_compoundCallStats);
+            } else {
+                return new ProcedureRunnerNT(
+                    id, user, ccxn, isAdmin, ciHandle, clientHandle, timeout,
+                    procedure, m_procedureName,
                     m_procMethod, m_paramTypes, m_priorityExecutorService, // use priority to avoid deadlocks
                     NTProcedureService.this, m_mailbox, m_statsCollector);
+            }
         }
-
     }
 
     NTProcedureService(ClientInterface clientInterface, InvocationDispatcher dispatcher, Mailbox mailbox) {
@@ -284,17 +345,23 @@ public class NTProcedureService {
                     VoltDB.crashLocalVoltDB(msg, false, null);
                 }
             }
+
             // The ProcedureRunnerNTGenerator has all of the dangerous and slow
             // stuff in it. Like classfinding, instantiation, and reflection.
             runnerGeneratorMap.put(procedure.getTypeName(), new ProcedureRunnerNTGenerator(clz));
         }
-
         m_procs = ImmutableMap.<String, ProcedureRunnerNTGenerator>builder().putAll(runnerGeneratorMap).build();
 
         // reload all sysprocs
         loadSystemProcedures(false);
 
-        // Set the system to start accepting work again now that ebertything is updated.
+        // Start a compound proc executor if we now need one
+        if (m_compoundProcsExist && m_compoundProcExecutorService == null) {
+            LOG.info("Catalog contains one or more compound procedures");
+            m_compoundProcExecutorService = initCompoundProcExecution();
+        }
+
+        // Set the system to start accepting work again now that everything is updated.
         // We had to stop because stats would be wonky if we called a proc while updating
         // this stuff.
         m_paused = false;
@@ -307,7 +374,12 @@ public class NTProcedureService {
 
     /**
      * Invoke an NT procedure asynchronously on one of the exec services.
-     * @returns ClientResponseImpl if something goes wrong.
+     * Principally called from InvocationDispatcher, though also called
+     * from above code in the case of exiting 'paused' state.
+     *
+     * 'ntPriority' is used to select the executor service.
+     * It is false for a request from a client to an NT proc,
+     * and would be true if that NT proc called further NT procs.
      */
     synchronized void callProcedureNT(
             final long ciHandle, final AuthUser user, final Connection ccxn, final boolean isAdmin,
@@ -330,11 +402,23 @@ public class NTProcedureService {
         }
 
         final ProcedureRunnerNT runner;
-        try {
-            runner = prntg.generateProcedureRunnerNT(user, ccxn, isAdmin, ciHandle, task.getClientHandle(), task.getBatchTimeout());
-        } catch (InstantiationException | IllegalAccessException e1) {
-            // I don't expect to hit this, but it's here...
-            // must be done as IRM to CI mailbox for backpressure accounting
+        boolean isCompound = prntg.m_isCompound;
+        if (isCompound && m_compoundProcExecutorService == null) { // should never happen
+            LOG.error("Internal error: no compound procedure executor service");
+            runner = null;
+        }
+        else {
+            ProcedureRunnerNT temp;
+            try {
+                temp = prntg.generateProcedureRunnerNT(user, ccxn, isAdmin, ciHandle, task.getClientHandle(), task.getBatchTimeout());
+            } catch (InstantiationException | IllegalAccessException e1) {
+                temp = null; // error handled below
+            }
+            runner = temp;
+        }
+
+        // Must be done as IRM to CI mailbox for backpressure accounting
+        if (runner == null) {
             ClientResponseImpl response = new ClientResponseImpl(
                     ClientResponseImpl.UNEXPECTED_FAILURE, new VoltTable[0],
                     "Could not create running context for " + procName + ".", task.getClientHandle());
@@ -343,7 +427,9 @@ public class NTProcedureService {
             m_mailbox.deliver(irm);
             return;
         }
+
         m_outstanding.put(runner.m_id, runner);
+        startTimeout(runner, task.getRequestTimeout());
 
         Runnable invocationRunnable = () -> {
             try {
@@ -354,25 +440,30 @@ public class NTProcedureService {
             }
         };
 
+        // compound procedures always execute out of a dedicated thread pool.
+        // for all other cases, pick the executor service based on nt priority.
+        // - new (from user) txns get regular one
+        // - sub tasks and sub nt procs generated by nt procs get
+        //   immediate exec service (priority)
+        ExecutorService exec = isCompound ? m_compoundProcExecutorService :
+                               ntPriority ? m_priorityExecutorService :
+                               m_primaryExecutorService;
+
         try {
-            // pick the executor service based on priority
-            // - new (from user) txns get regular one
-            // - sub tasks and sub procs generated by nt procs get
-            //   immediate exec service (priority)
-            if (ntPriority) {
-                m_priorityExecutorService.submit(invocationRunnable);
-            } else {
-                m_primaryExecutorService.submit(invocationRunnable);
-            }
+            exec.submit(invocationRunnable);
         } catch (RejectedExecutionException e) {
             handleNTProcEnd(runner);
 
             // I really don't expect this to happen... but it's here.
             // must be done as IRM to CI mailbox for backpressure accounting
-            ClientResponseImpl response = new ClientResponseImpl(
-                    ClientResponseImpl.UNEXPECTED_FAILURE, new VoltTable[0],
-                    "Could not submit NT procedure " + procName + " to exec service for .",
-                    task.getClientHandle());
+            // TODO: and yet it happens. Richard can repro it. Comment needs fixing.
+            String err = isCompound ?
+                String.format("Could not submit compound procedure %s to executor service.", procName) :
+                String.format("Could not submit NT procedure %s to %s executor service.", procName,
+                              ntPriority ? "priority" : "primary");
+            ClientResponseImpl response =
+                new ClientResponseImpl(ClientResponseImpl.UNEXPECTED_FAILURE, new VoltTable[0],
+                                       err, task.getClientHandle());
             InitiateResponseMessage irm = InitiateResponseMessage.messageForNTProcResponse(
                     ciHandle, ccxn.connectionId(), response);
             m_mailbox.deliver(irm);
@@ -385,6 +476,23 @@ public class NTProcedureService {
      */
     void handleNTProcEnd(ProcedureRunnerNT runner) {
         m_outstanding.remove(runner.m_id);
+        cancelTimeout(runner);
+    }
+
+    /**
+     * Debugging use - dump out list of outstanding NT Procs
+     * to standard out. Not ordinarily used.
+     */
+    void dumpOutstanding() {
+        boolean empty = true;
+        System.out.println("Outstanding NT procs:");
+        for (ProcedureRunnerNT runner : m_outstanding.values()) {
+            System.out.println(runner);
+            empty = false;
+        }
+        if (empty) {
+            System.out.println("  none");
+        }
     }
 
     /**
@@ -397,5 +505,106 @@ public class NTProcedureService {
         for (ProcedureRunnerNT runner : m_outstanding.values()) {
             runner.processAnyCallbacksFromFailedHosts(failedHosts);
         }
+    }
+
+    /**
+     * Start a timeout on the procedure, if required by the runner
+     * <p>
+     * NOTE: assumes called from synchronized block
+     *
+     * @param runner        the procedure runner
+     * @param taskTimeout   the specific timeout for this invocation, or {@code StoredProcedureInvocation.NO_TIMEOUT}
+     */
+    private synchronized void startTimeout(ProcedureRunnerNT runner, int taskTimeout) {
+        int defaultTimeout = runner.getTimeout();
+        if (defaultTimeout <= 0) {
+            // Not a procedure that can time out
+            return;
+        }
+
+        // If procedures that time out are used, create a timeout executor. Note that if those procedures are
+        // subsequently removed, the executor will remain in order to service any active  procedures pending timeout.
+        if (m_timeoutExecutor == null) {
+            m_timeoutExecutor = CoreUtils.getScheduledThreadPoolExecutor("NT Procedures Timeouts", 1, CoreUtils.MEDIUM_STACK_SIZE);
+            m_timeouts = new ConcurrentHashMap<>();
+            LOG.info("Created NT procedure timeout executor");
+        }
+
+        // Override timeout with task timeout, if provided, and schedule it
+        int effectiveTimeout = taskTimeout != StoredProcedureInvocation.NO_TIMEOUT ? taskTimeout : defaultTimeout;
+        ScheduledFuture<?> timeoutTask = m_timeoutExecutor.schedule(() -> runner.timeoutCall(effectiveTimeout),
+                effectiveTimeout, TimeUnit.MICROSECONDS);
+
+        ScheduledFuture<?> prev = m_timeouts.put(runner.m_id, timeoutTask);
+        assert prev == null : "Procedure " + runner.getProcedureName() + " has multiple timeouts";
+    }
+
+    /**
+     * Cancel a running timeout, if required by the runner
+     *
+     * @param runner
+     */
+    private void cancelTimeout(ProcedureRunnerNT runner) {
+
+        if (runner.getTimeout() <= 0) {
+            return;
+        }
+        assert m_timeoutExecutor != null : "No timeout executor to handle procedure timeouts";
+        assert m_timeouts != null : "No timeouts map to handle procedure timeouts";
+
+        ScheduledFuture<?> tmo = m_timeouts.remove(runner.m_id);
+        if (tmo != null) {
+            tmo.cancel(false);
+        }
+        else if (LOG.isDebugEnabled()){
+            LOG.debugFmt("Timeout %d, procedure %s was already canceled", runner.m_id, runner.getProcedureName());
+        }
+    }
+
+    /*
+     * Early check for compound procedure by name. Takes advantage of
+     * handy runner generator we have made for every NT procedure.
+     */
+    boolean isCompoundProc(String procName) {
+        ProcedureRunnerNTGenerator gen = m_procs.get(procName);
+        return (gen != null && gen.m_isCompound);
+    }
+
+    /*
+     * Set up everything for compound proc execution using parameters
+     * from the deployment file.
+     */
+    private static ExecutorService initCompoundProcExecution() {
+        int threadLimit = defaultThreadLimit;
+        int queueLimit = 10_000;
+
+        CatalogContext cat = VoltDB.instance().getCatalogContext();
+        if (cat != null) {
+            DeploymentType dep = cat.getDeploymentSafely();
+            if (dep != null) {
+                CompoundProcPolicyType pol = dep.getCompoundproc();
+                if (pol != null) {
+                    if (pol.getThreads() != null) {
+                        threadLimit = pol.getThreads();
+                    }
+                    if (pol.getQueuelimit() != null) {
+                        queueLimit = pol.getQueuelimit();
+                    }
+                    CompoundProcedureRunner.setExecutionPolicy(pol);
+                }
+            }
+        }
+
+        LOG.infoFmt("Compound procedure executor service: %,d threads, queue limit %,d",
+                    threadLimit, queueLimit);
+        ThreadPoolExecutor exec =
+            new ThreadPoolExecutor(threadLimit, threadLimit,
+                                   60, TimeUnit.SECONDS, // ineffective on fixed-size pool
+                                   new ArrayBlockingQueue<>(queueLimit),
+                                   new ThreadFactoryBuilder()
+                                   .setNameFormat(COMPROC_THREADPOOL_NAMEPREFIX + "%d")
+                                   .build());
+        exec.prestartAllCoreThreads();
+        return exec;
     }
 }

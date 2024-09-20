@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -22,27 +22,32 @@
  */
 package org.voltdb.regressionsuites;
 
-import java.io.IOException;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.Set;
-
+import com.google_voltpatches.common.collect.ImmutableMap;
+import junit.framework.AssertionFailedError;
+import junit.framework.Test;
 import org.voltdb.BackendTarget;
 import org.voltdb.ProcedurePartitionData;
 import org.voltdb.VoltTable;
 import org.voltdb.compiler.VoltProjectBuilder;
 import org.voltdb.iv2.MpInitiator;
+import org.voltdb.regressionsuites.MultiConfigSuiteBuilder.ReuseServer;
 import org.voltdb.utils.MiscUtils;
 import org.voltdb_testprocs.regressionsuites.malicious.GoSleep;
 
-import junit.framework.Test;
+import java.io.IOException;
+import java.time.Duration;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.function.Consumer;
 
 public class StatisticsTestSuiteBase extends SaveRestoreBase {
 
     protected final static int SITES = 2;
     protected final static int HOSTS = 3;
-    protected final static int KFACTOR = MiscUtils.isPro() ? 1 : 0;
+    protected final static int KFACTOR = 1;
     protected final static int PARTITIONS = (SITES * HOSTS) / (KFACTOR + 1);
     protected final static String jarName = "statistics-cluster.jar";
     protected final static boolean hasLocalServer = false;
@@ -182,7 +187,8 @@ public class StatisticsTestSuiteBase extends SaveRestoreBase {
         assertEquals(PARTITIONS, partsSeen.size());
     }
 
-    static public Test suite(Class classzz, boolean isCommandLogTest) throws IOException {
+    static public Test suite(Class<? extends StatisticsTestSuiteBase> classzz, boolean isCommandLogTest)
+            throws IOException {
         return suite(classzz, isCommandLogTest, -1);
     }
 
@@ -191,16 +197,25 @@ public class StatisticsTestSuiteBase extends SaveRestoreBase {
     // helpers to allow multiple backends.
     // JUnit magic that uses the regression suite helper classes.
     //
-    static public Test suite(Class classzz, boolean isCommandLogTest, int replicationPort) throws IOException {
-        return suite(classzz, isCommandLogTest, replicationPort, MultiConfigSuiteBuilder.ReuseServer.DEFAULT);
+    static public Test suite(Class<? extends StatisticsTestSuiteBase> classzz, boolean isCommandLogTest,
+            int replicationPort) throws IOException {
+        return suite(classzz, isCommandLogTest, replicationPort, ReuseServer.DEFAULT, ImmutableMap.of());
     }
 
-    static public Test suite(Class classzz, boolean isCommandLogTest, int replicationPort,
-            MultiConfigSuiteBuilder.ReuseServer reuseServer) throws IOException {
-        VoltServerConfig config = null;
+    static public Test suite(Class<? extends StatisticsTestSuiteBase> classzz, Map<String, String> envs) throws IOException {
+        return suite(classzz, false, -1, ReuseServer.DEFAULT, envs);
+    }
 
-        MultiConfigSuiteBuilder builder
-                = new MultiConfigSuiteBuilder(classzz);
+    static public Test suite(Class<? extends StatisticsTestSuiteBase> classzz, boolean isCommandLogTest,
+                             int replicationPort, ReuseServer reuseServer) throws IOException {
+        return suite(classzz, isCommandLogTest, replicationPort, reuseServer, ImmutableMap.of());
+    }
+
+    static public Test suite(Class<? extends StatisticsTestSuiteBase> classzz, boolean isCommandLogTest,
+            int replicationPort, ReuseServer reuseServer, Map<String, String> envs) throws IOException {
+        LocalCluster config = null;
+
+        MultiConfigSuiteBuilder builder = new MultiConfigSuiteBuilder(classzz);
 
         // Not really using TPCC functionality but need a database.
         // The testLoadMultipartitionTable procedure assumes partitioning
@@ -235,6 +250,8 @@ public class StatisticsTestSuiteBase extends SaveRestoreBase {
         project.addPartitionInfo("NEW_ORDER", "NO_W_ID");
         project.addProcedure(GoSleep.class, new ProcedurePartitionData("NEW_ORDER", "NO_W_ID"));
 
+        project.setClockSkewInterval(getClockSkewInterval(envs));
+
         // Enable asynchronous logging for test of commandlog test
         if (MiscUtils.isPro() && isCommandLogTest) {
             project.configureLogging(null, null, false, true, FSYNC_INTERVAL_GOLD, null, null);
@@ -249,19 +266,19 @@ public class StatisticsTestSuiteBase extends SaveRestoreBase {
         config = new LocalCluster(jarName, StatisticsTestSuiteBase.SITES,
                 StatisticsTestSuiteBase.HOSTS, StatisticsTestSuiteBase.KFACTOR,
                 BackendTarget.NATIVE_EE_JNI);
-        ((LocalCluster) config).setHasLocalServer(hasLocalServer);
-
+        config.setHasLocalServer(hasLocalServer);
+        config.getAdditionalProcessEnv().putAll(envs);
         if (MiscUtils.isPro() && isCommandLogTest) {
-            ((LocalCluster) config).setJavaProperty("LOG_SEGMENT_SIZE", "1");
-            ((LocalCluster) config).setJavaProperty("LOG_SEGMENTS", "1");
+            config.setJavaProperty("LOG_SEGMENT_SIZE", "1");
+            config.setJavaProperty("LOG_SEGMENTS", "1");
         }
 
         if (replicationPort > 0) {
             // cluster id is default to 0
             project.addLiteralSchema(drSchema);
             project.setDrProducerEnabled();
-            ((LocalCluster) config).setReplicationPort(replicationPort);
-            ((LocalCluster) config).overrideAnyRequestForValgrind();
+            config.setReplicationPort(replicationPort);
+            config.overrideAnyRequestForValgrind();
         }
 
         boolean success = config.compile(project);
@@ -269,5 +286,14 @@ public class StatisticsTestSuiteBase extends SaveRestoreBase {
         builder.addServerConfig(config, reuseServer);
 
         return builder;
+    }
+
+    private static Duration getClockSkewInterval(Map<String, String> envs) {
+        String intervalString = envs.get("CLOCK_SKEW_SCHEDULER_INTERVAL");
+        if (intervalString != null) {
+            return Duration.parse(intervalString);
+        } else {
+            return null;
+        }
     }
 }

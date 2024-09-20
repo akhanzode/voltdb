@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -18,12 +18,36 @@
 package org.voltdb.client;
 
 /**
- * Collect the client's opinion of the operation of client affinity.  For the
- * given partition ID, affinityWrites tracks write transactions that the client
- * believes it knows the master for.  AffinityReads tracks read transactions
- * the the client believes it found a replica for.  Round-robin stats reflect
- * the client's lack of information when client affinity is on and indicate
- * transactions that were routed using the default round-robin algorithm.
+ * Collect the client's opinion of the operation of client affinity.
+ * <p>
+ * <b>Single-partition procedures</b>
+ * <p>
+ * For the given partition id, affinityWrites and affinityReads track
+ * transactions that the client believes it knows the master for, and
+ * for which it has an active network connection.
+ * <p>
+ * rrWrites and rrReads reflect transactions routed using round-robin,
+ * which can happen if the client has no active connection to the
+ * partition master.
+ * <p>
+ * <b>Multi-partition procedures</b>
+ * <p>
+ * Multipartitioned procedures are treated as single-partition procedures,
+ * using the special partition id <code>16383</code>.
+ * <p>
+ * <b>Other cases</b>
+ * <p>
+ * A statistics entry with partition id <code>-1</code> is used when:
+ * <ul>
+ * <li> The client has not yet acquired partitioning data from the
+ *      VoltDB server.
+ * <li> The procedure name is not yet known to the client, or does
+ *      not exist in the catalog.
+ * <li> The application has failed to provide a value for the
+ *      partitioning column.
+ * <li> The procedure is a 'compound procedure'; this type of
+ *      procedure has no natural affinity to any one node.
+ * </ul>
  */
 public class ClientAffinityStats {
 
@@ -32,6 +56,10 @@ public class ClientAffinityStats {
     private long m_rrWrites;
     private long m_affinityReads;
     private long m_rrReads;
+
+    ClientAffinityStats(int partitionId) {
+        m_partitionId = partitionId;
+    }
 
     ClientAffinityStats(int partitionId, long affinityWrites, long rrWrites,
             long affinityReads, long rrReads)

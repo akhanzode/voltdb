@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -27,6 +27,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import java.io.File;
 import java.net.URL;
 import java.net.URLDecoder;
 import java.util.Collections;
@@ -50,16 +51,37 @@ public class TestDDLFeatures extends AdhocDDLTestBase {
     String catalogJar = "DDLFeature.jar";
     String pathToCatalog = Configuration.getPathToCatalogForTest("DDLFeature.jar");
     String pathToDeployment = Configuration.getPathToCatalogForTest("DDLFeature.xml");
+    private static String snapshotDir = "/tmp/voltdb/backup/";
 
     VoltProjectBuilder builder = new VoltProjectBuilder();
 
     @Before
     public void setUp() throws Exception
     {
+        // Clean up a snapshot taken if any for unchanged update classes test
+        File dir = new File(snapshotDir);
+        try {
+            if (!dir.exists()) {
+                dir.mkdirs();
+            }
+            else {
+                for (File file : dir.listFiles()) {
+                    file.delete();
+                }
+            }
+        } catch (Exception x) {
+            System.exit(-1);
+        }
+
         final URL url = TestDDLFeatures.class.getResource("fullDDL.sql");
         String schemaPath = URLDecoder.decode(url.getPath(), "UTF-8");
         builder.addSchema(schemaPath);
         builder.setUseDDLSchema(true);
+        builder.configureLogging(VoltDB.Configuration.getPathToCatalogForTest("test-snap"),
+                VoltDB.Configuration.getPathToCatalogForTest("cmdlogd"), false, false, 1, 1, 3);
+        builder.setHTTPDPort(-1);
+        builder.setDrNone();
+        builder.setFlushIntervals(2000, 5000, 5000);
 
         boolean success = builder.compile(pathToCatalog);
         assertTrue(success);
@@ -352,20 +374,6 @@ public class TestDDLFeatures extends AdhocDDLTestBase {
         }
         assertTrue("Shouldn't violate ASSUMEUNIQUE constraint", threw);
 
-        // Test for T16
-        assertTrue(findTableInSystemCatalogResults("T16"));
-        resp = m_client.callProcedure("T16.insert", 1);
-        assertEquals(resp.getResults()[0].getRowCount(), 1);
-
-        threw = false;
-        try {
-            m_client.callProcedure("T16.insert", 2);
-        } catch (ProcCallException pce) {
-            pce.printStackTrace();
-            threw = true;
-        }
-        assertTrue("Shouldn't violate LIMIT PARTITION ROW constraint", threw);
-
         // Test for T21
         assertTrue(findTableInSystemCatalogResults("T21"));
         assertEquals(indexedColumnCount("T21"), 3);
@@ -399,20 +407,6 @@ public class TestDDLFeatures extends AdhocDDLTestBase {
         assertTrue(findTableInSystemCatalogResults("T19"));
         resp = m_client.callProcedure("T19.insert", 1, 2);
         assertEquals(resp.getResults()[0].getRowCount(), 1);
-
-        // Test for T20
-        assertTrue(findTableInSystemCatalogResults("T20"));
-        resp = m_client.callProcedure("T20.insert", 1);
-        assertEquals(resp.getResults()[0].getRowCount(), 1);
-
-        threw = false;
-        try {
-            m_client.callProcedure("T20.insert", 2);
-        } catch (ProcCallException pce) {
-            pce.printStackTrace();
-            threw = true;
-        }
-        assertTrue("Shouldn't violate LIMIT PARTITION ROW constraint", threw);
     }
 
     @Test
@@ -499,7 +493,7 @@ public class TestDDLFeatures extends AdhocDDLTestBase {
         assertColumnSizeEquals("T63", "A1", 15);
         assertColumnIsNullable("T63", "A1");
         assertColumnDefaultValueEquals   ("T63", "A1", "'abc'");
-        assertColumnOrdinalPositionEquals("T63", "A1", 3);
+        assertColumnOrdinalPositionEquals("T63", "A1", 4);
         assertColumnOrdinalPositionEquals("T63", "C2", 1);
         assertColumnOrdinalPositionEquals("T63", "C3", 2);
 
@@ -647,20 +641,6 @@ public class TestDDLFeatures extends AdhocDDLTestBase {
         assertTrue("Shouldn't violate UNIQUE constraint", threw);
         assertEquals(indexedColumnCount("T35"), 1);
 
-        // Test for T35A
-        assertTrue(findTableInSystemCatalogResults("T35A"));
-        resp = m_client.callProcedure("T35A.insert", 1);
-        assertEquals(resp.getResults()[0].getRowCount(), 1);
-
-        threw = false;
-        try {
-            m_client.callProcedure("T35A.insert", 1);
-        } catch (ProcCallException pce) {
-            threw = true;
-        }
-        assertFalse("Shouldn't violate LIMIT PARTITION ROWS constraint", threw);
-        assertEquals(indexedColumnCount("T35A"), 0);
-
         // Test for T36
         assertTrue(findTableInSystemCatalogResults("T36"));
         resp = m_client.callProcedure("T36.insert", 1);
@@ -702,21 +682,6 @@ public class TestDDLFeatures extends AdhocDDLTestBase {
         }
         assertFalse("Shouldn't violate UNIQUE constraint", threw);
         assertEquals(indexedColumnCount("T38"), 0);
-
-        // Test for T39
-        assertTrue(findTableInSystemCatalogResults("T39"));
-        resp = m_client.callProcedure("T39.insert", 1);
-        assertEquals(resp.getResults()[0].getRowCount(), 1);
-
-        threw = false;
-        try {
-            m_client.callProcedure("T39.insert", 2);
-        } catch (ProcCallException pce) {
-            pce.printStackTrace();
-            threw = true;
-        }
-        assertFalse("Shouldn't violate LIMIT PARTITION ROW constraint", threw);
-        assertEquals(indexedColumnCount("T39"), 0);
     }
 
     @Test
@@ -779,21 +744,6 @@ public class TestDDLFeatures extends AdhocDDLTestBase {
             threw = true;
         }
         assertTrue("Shouldn't violate ASSUMEUNIQUE constraint", threw);
-
-        // Test for T43
-        assertTrue(findTableInSystemCatalogResults("T43"));
-        resp = m_client.callProcedure("T43.insert", 1);
-        assertEquals(resp.getResults()[0].getRowCount(), 1);
-
-        threw = false;
-        try {
-            m_client.callProcedure("T43.insert", 2);
-        } catch (ProcCallException pce) {
-            threw = true;
-        }
-        assertTrue("Shouldn't violate LIMIT PARTITION ROW constraint", threw);
-        assertEquals(indexedColumnCount("T43"), 0);
-
     }
 
     @Test
@@ -960,4 +910,31 @@ public class TestDDLFeatures extends AdhocDDLTestBase {
         assertEquals(4, indexedColumnCount("GEO"));
     }
 
+// This test will not pass until the deployment file and the first catalog context's catalog are consistent
+// See ENG-20845
+//    @Test
+//    public void testUpdateClasses() throws Exception {
+//        InMemoryJarfile boom = new InMemoryJarfile();
+//        VoltCompiler comp = new VoltCompiler(false);
+//        comp.addClassToJar(boom, org.voltdb_testprocs.updateclasses.InnerClassesTestProc.class);
+//
+//        InMemoryJarfile startingCatalogJar = VoltDB.instance().getCatalogContext().getCatalogJar();
+//        String serializedCatalogString = CatalogUtil.getSerializedCatalogStringFromJar(startingCatalogJar);
+//        System.out.print(serializedCatalogString);
+//        Catalog startingCatalog = new Catalog();
+//        startingCatalog.execute(serializedCatalogString);
+//
+//        m_client.callProcedure("@SnapshotSave", snapshotDir, "FIRST", 1);
+//        m_client.callProcedure("@UpdateClasses", boom.getFullJarBytes(), null);
+//
+//        InMemoryJarfile lastCatalogJar = VoltDB.instance().getCatalogContext().getCatalogJar();
+//        serializedCatalogString = CatalogUtil.getSerializedCatalogStringFromJar(lastCatalogJar);
+//        System.out.print(serializedCatalogString);
+//        Catalog lastCatalog = new Catalog();
+//        lastCatalog.execute(serializedCatalogString);
+//
+//        CatalogDiffEngine diff = new CatalogDiffEngine(startingCatalog, lastCatalog);
+//        String diffCmds = diff.commands();
+//        assertTrue(diffCmds.isEmpty());
+//    }
 }

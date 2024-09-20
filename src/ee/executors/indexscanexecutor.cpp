@@ -1,8 +1,8 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This file contains original code and/or modifications of original code.
- * Any modifications made by VoltDB Inc. are licensed under the following
+ * Any modifications made by Volt Active Data Inc. are licensed under the following
  * terms and conditions:
  *
  * This program is free software: you can redistribute it and/or modify
@@ -406,13 +406,13 @@ bool IndexScanExecutor::p_execute(const NValueArray &params) {
     //
     // END EXPRESSION
     //
-    AbstractExpression* end_expression = m_node->getEndExpression();
+    AbstractExpression const* end_expression = m_node->getEndExpression();
     if (end_expression != nullptr) {
         VOLT_DEBUG("End Expression:\n%s", end_expression->debug(true).c_str());
     }
 
     // INITIAL EXPRESSION
-    AbstractExpression* initial_expression = m_node->getInitialExpression();
+    AbstractExpression const* initial_expression = m_node->getInitialExpression();
     if (initial_expression != nullptr) {
         VOLT_DEBUG("Initial Expression:\n%s", initial_expression->debug(true).c_str());
     }
@@ -420,7 +420,7 @@ bool IndexScanExecutor::p_execute(const NValueArray &params) {
     //
     // SKIP NULL EXPRESSION
     //
-    AbstractExpression* skipNullExpr = m_node->getSkipNullPredicate();
+    AbstractExpression const* skipNullExpr = m_node->getSkipNullPredicate();
     // For reverse scan edge case NULL values and forward scan underflow case.
     if (skipNullExpr != nullptr) {
         VOLT_DEBUG("COUNT NULL Expression:\n%s", skipNullExpr->debug(true).c_str());
@@ -489,8 +489,25 @@ bool IndexScanExecutor::p_execute(const NValueArray &params) {
     //
     while (postfilter.isUnderLimit() && getNextTuple(
                 localLookupType, &tuple, tableIndex, &indexCursor, activeNumOfSearchKeys)) {
-        if (tuple.isPendingDelete()) {
+        bool skip = tuple.isPendingDelete();
+        if (! skip && initial_expression != nullptr) { // jump until initial expression is satisified
+            try {           // ENG-20394: Evaluating on the row may throw.
+                // initial expr that does not match filter need to be skipped
+                skip = ! initial_expression->eval(&tuple, nullptr).isTrue();
+            } catch (SQLException const&) {
+                skip = true;
+            }
+        }
+        if (skip) {
             continue;
+        } else if (initial_expression) {
+            /**
+             * ENG-20904
+             * Evaluate all tuples on initial_expression, until we no
+             * longer need to skip, after which there is no futher need to
+             * evaluate on initial_expression.
+             */
+            initial_expression = nullptr;
         }
         VOLT_TRACE("LOOPING in indexscan: tuple: '%s'\n", tuple.debug("tablename").c_str());
 
@@ -509,7 +526,7 @@ bool IndexScanExecutor::p_execute(const NValueArray &params) {
         //
         // First check whether the end_expression is now false
         //
-        if (end_expression != nullptr && !end_expression->eval(&tuple, nullptr).isTrue()) {
+        if (end_expression != nullptr && ! end_expression->eval(&tuple, nullptr).isTrue()) {
             VOLT_TRACE("End Expression evaluated to false, stopping scan");
             break;
         }
@@ -537,13 +554,11 @@ bool IndexScanExecutor::p_execute(const NValueArray &params) {
     return true;
 }
 
-void IndexScanExecutor::outputTuple(CountingPostfilter& postfilter, TableTuple& tuple) {
+void IndexScanExecutor::outputTuple(CountingPostfilter&, TableTuple& tuple) {
     if (m_aggExec != nullptr) {
         m_aggExec->p_execute_tuple(tuple);
-        return;
     } else if (m_insertExec != nullptr) {
         m_insertExec->p_execute_tuple(tuple);
-        return;
     } else {
         //
         // Insert the tuple into our output table

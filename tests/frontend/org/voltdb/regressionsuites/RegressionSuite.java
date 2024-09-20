@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -94,7 +94,7 @@ public class RegressionSuite extends TestCase {
     protected VoltServerConfig m_config;
     protected String m_username = "default";
     protected String m_password = "password";
-    private final ArrayList<Client> m_clients = new ArrayList<>();
+    protected final ArrayList<Client> m_clients = new ArrayList<>();
     private final ArrayList<SocketChannel> m_clientChannels = new ArrayList<>();
     final String m_methodName;
     // If the current RegressionSuite instance is the last one in the current VoltServerConfig,
@@ -1186,60 +1186,6 @@ public class RegressionSuite extends TestCase {
         for (int i = 0; i < result.getColumnCount(); i++) {
             assertEquals("Failed name column: " + i, expected.getColumnName(i), result.getColumnName(i));
             assertEquals("Failed type column: " + i, expected.getColumnType(i), result.getColumnType(i));
-        }
-    }
-
-    static protected void validStatisticsForTableLimit(Client client, String tableName, long limit) throws Exception {
-        validStatisticsForTableLimitAndPercentage(client, tableName, limit, -1);
-    }
-
-    static void validStatisticsForTableLimitAndPercentage(Client client, String tableName, long limit, long percentage)
-            throws Exception {
-        long start = System.currentTimeMillis();
-        while (true) {
-            long lastLimit =-1, lastPercentage = -1;
-            Thread.sleep(1000);
-            if (System.currentTimeMillis() - start > 10000) {
-                String percentageStr = "";
-                if (percentage >= 0) {
-                    percentageStr = ", last seen percentage: " + lastPercentage;
-                }
-                fail("Took too long or have wrong answers: last seen limit: " + lastLimit + percentageStr);
-            }
-
-            VoltTable[] results = client.callProcedure("@Statistics", "TABLE", 0).getResults();
-            for (VoltTable t: results) { System.out.println(t.toString()); }
-            if (results[0].getRowCount() == 0) {
-                continue;
-            }
-
-            boolean foundTargetTuple = false;
-            boolean limitExpected = false;
-            boolean percentageExpected = percentage < 0 ? true: false;
-
-            for (VoltTable vt: results) {
-                while(vt.advanceRow()) {
-                    String name = vt.getString("TABLE_NAME");
-                    if (tableName.equals(name)) {
-                        foundTargetTuple = true;
-                        lastLimit = vt.getLong("TUPLE_LIMIT");
-                        if (limit == lastLimit) {
-                            limitExpected = true;
-                        }
-                        if (percentageExpected || percentage == (lastPercentage = vt.getLong("PERCENT_FULL")) ) {
-                            percentageExpected = true;
-                        }
-
-                        if (limitExpected && percentageExpected) {
-                            return;
-                        }
-                        break;
-                    }
-                }
-                if (foundTargetTuple) {
-                    break;
-                }
-            }
         }
     }
 

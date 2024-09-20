@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -54,9 +54,10 @@ public class BinaryPayloadMessage extends VoltMessage {
     public void initFromBuffer(ByteBuffer buf) {
         m_metadata = new byte[buf.getShort()];
         buf.get(m_metadata);
-        final int payloadLength = buf.getInt();
-        if (payloadLength > -1) {
-            m_payload = new byte[payloadLength];
+        m_startPos = 0;
+        m_length = buf.getInt();
+        if (m_length > -1) {
+            m_payload = new byte[m_length];
             buf.get(m_payload);
         }
         assert(buf.capacity() == buf.position());

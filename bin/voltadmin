@@ -1,10 +1,10 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # This file is part of VoltDB.
 
-# Copyright (C) 2008-2020 VoltDB Inc.
+# Copyright (C) 2008-2022 Volt Active Data Inc.
 #
 # This file contains original code and/or modifications of original code.
-# Any modifications made by VoltDB Inc. are licensed under the following
+# Any modifications made by Volt Active Data Inc. are licensed under the following
 # terms and conditions:
 #
 # Permission is hereby granted, free of charge, to any person obtaining
@@ -33,20 +33,23 @@
 # from version.txt in the script's parent directory. It can be copied to other
 # names, and also to other locations if the path-building is adjusted. The
 # description should also be changed if re-used for another base command.
+
 import sys
 import os
+import traceback
 
 try:
-    # ensure version 2.6+ of python
-    if sys.version_info[0] == 2 and sys.version_info[1] < 6:
+    # ensure version 3.6+ of python
+    if sys.hexversion < 0x03060000:
         for dir in os.environ['PATH'].split(':'):
-            for name in ('python2.7', 'python2.6'):
+            for n in range(6, 12): # future-proofing but not too far
+                name = 'python3.%d' % n
                 path = os.path.join(dir, name)
                 if os.path.exists(path):
-                    print 'Re-running with %s...' % path
+                    print('Restarting with %s ...' % path)
                     os.execv(path, [path] + sys.argv)
-        sys.stderr.write("This script requires Python 2.6 or newer. Please install " +
-                         "a more recent Python release and retry.\n")
+        sys.stderr.write("Python version 3.6 or greater is required.\n" +
+                         "Please install a more recent Python release and retry.\n")
         sys.exit(-1)
 
     cmd_dir, cmd_name = os.path.split(os.path.realpath(sys.argv[0]))
@@ -67,7 +70,8 @@ try:
     sys.path.insert(0, os.path.join(base_dir, 'lib', 'python'))
     from voltcli import runner
 # Be selective about exceptions to avoid masking load-time library exceptions.
-except (IOError, OSError, ImportError), e:
+except (IOError, OSError, ImportError) as e:
+    traceback.print_stack()
     sys.stderr.write('Exception (%s): %s\n' % (e.__class__.__name__, str(e)))
     sys.exit(1)
 runner.main(cmd_name, cmd_dir, version, description, standalone = standalone, *sys.argv[1:])

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 # This file is part of VoltDB.
-# Copyright (C) 2008-2020 VoltDB Inc.
+# Copyright (C) 2008-2022 Volt Active Data Inc.
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -35,7 +35,7 @@ from optparse import OptionParser
 from os.path import basename, isfile
 from shutil import copyfile
 from time import mktime
-from voltdbclient import VoltColumn, VoltTable, FastSerializer
+from voltdbclientpy2 import VoltColumn, VoltTable, FastSerializer
 
 __quiet = True
 
@@ -71,14 +71,15 @@ FatalExceptionTypes = ['NullPointerException',
                        'unexpected internal error occurred',
                        'Please contact VoltDB at support'
                        ]
-# These are experimental; we have yet to see any of them:
+# The first 4 of these are experimental; we have yet to see any of them:
 NonfatalExceptionTypes = ['ClassCastException',
                           'SAXParseException',
                           'VoltTypeException',
                           'ERROR: IN: NodeSchema',
-                          # this is actually a PostgreSQL error message, not,
-                          # strictly speaking, an exception:
-                          'timeout: procedure call took longer than 5 seconds'
+                          # This is sometimes returned by PostgreSQL:
+                          'timeout: procedure call took longer than 5 seconds',
+                          # This is sometimes returned by HSqlDB:
+                          'unsupported internal operation'
                           ]
 # Rejected idea (happens frequently in advanced-scalar-set-subquery):
 #                        'VOLTDB ERROR: UNEXPECTED FAILURE',
@@ -345,19 +346,27 @@ def is_different(x, cntonly, within_minutes):
 
     jni = x["jni"]
     cmp = x["cmp"]
-    # JNI returns a variety of negative error result values that we
-    # can't easily match with the HSqlDB backend.  Reject only pairs
+    # JNI returns a variety of negative error result values that we can't
+    # easily match with the HSqlDB (or PostgreSQL) backend.  Reject only pairs
     # of status values where one of them wasn't an error.
     if jni["Status"] != cmp["Status"]:
         if int(jni["Status"]) > 0 or int(cmp["Status"]) > 0:
             x["highlight"] = "Status"
+            # HSqlDB now sometimes returns an error where VoltDB does not:
+            # in that case, do not fail the test.  This will be caught later
+            # as a 'cmpdb_excep' - an exception in the comparison DB - and
+            # reported as such in the 'SQL Coverage Test Summary', but without
+            # a test failure (see ENG-19845 & ENG-19702)
+            if (int(jni["Status"]) > 0 and int(cmp["Status"]) < 0 and
+                    any(nfet in str(cmp) for nfet in NonfatalExceptionTypes)):
+                return False
             # print "DEBUG is_different -- one error (0 or less)"
             return True
         # print "DEBUG is_different -- just different errors (0 or less)"
-        return False;
+        return False
     if int(jni["Status"]) <= 0:
         # print "DEBUG is_different -- same error (0 or less)"
-        return False;
+        return False
 
     # print "DEBUG is_different -- same non-error Status? : ", jni["Status"]
 
@@ -379,7 +388,7 @@ def is_different(x, cntonly, within_minutes):
     nColumns = len(jniColumns)
     if nColumns != len(cmpColumns):
         x["highlight"] = "Columns"
-        return True;
+        return True
     # print "DEBUG is_different -- got same column lengths? ", nColumns
 
     jniTuples = jniResult.tuples

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -34,9 +34,6 @@ public class VoltNullLogger extends VoltLogger {
 
         @Override
         public void log(Level level, Object message, Throwable t) {}
-
-        @Override
-        public void l7dlog(Level level, String key, Object[] params, Throwable t) {}
 
         @Override
         public long getLogLevels(VoltLogger[] loggers) {

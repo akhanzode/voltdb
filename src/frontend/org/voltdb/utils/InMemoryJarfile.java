@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -211,6 +211,10 @@ public class InMemoryJarfile extends TreeMap<String, byte[]> {
         writeToOutputStream(output);
         output.close();
         return output.toByteArray();
+    }
+
+    public void writeToStdout() throws IOException {
+        writeToOutputStream(System.out);
     }
 
     protected void writeToOutputStream(OutputStream output) throws IOException {

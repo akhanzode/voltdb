@@ -100,6 +100,7 @@ Command succeeded.
 @GC                       
 @GetPartitionKeys         	varchar
 @JStack                   	int
+@Note                     	varchar
 @Pause                    
 @Ping                     
 @Promote                  
@@ -115,7 +116,7 @@ Command succeeded.
 @SnapshotSave             	varchar
 @SnapshotSave             	varchar, varchar, bit
 @SnapshotScan             	varchar
-@SnapshotStatus           
+@Statistics               	statisticscomponent
 @Statistics               	statisticscomponent, bit
 @StopNode                 	int
 @SwapTables               	varchar, varchar
@@ -148,6 +149,7 @@ Command succeeded.
 @GC                       
 @GetPartitionKeys         	varchar
 @JStack                   	int
+@Note                     	varchar
 @Pause                    
 @Ping                     
 @Promote                  
@@ -163,7 +165,7 @@ Command succeeded.
 @SnapshotSave             	varchar
 @SnapshotSave             	varchar, varchar, bit
 @SnapshotScan             	varchar
-@SnapshotStatus           
+@Statistics               	statisticscomponent
 @Statistics               	statisticscomponent, bit
 @StopNode                 	int
 @SwapTables               	varchar, varchar
@@ -264,6 +266,7 @@ Command succeeded.
 @GC                       
 @GetPartitionKeys         	varchar
 @JStack                   	int
+@Note                     	varchar
 @Pause                    
 @Ping                     
 @Promote                  
@@ -279,7 +282,7 @@ Command succeeded.
 @SnapshotSave             	varchar
 @SnapshotSave             	varchar, varchar, bit
 @SnapshotScan             	varchar
-@SnapshotStatus           
+@Statistics               	statisticscomponent
 @Statistics               	statisticscomponent, bit
 @StopNode                 	int
 @SwapTables               	varchar, varchar
@@ -326,6 +329,7 @@ EMPLOYEE.upsert           	integer, varchar, varchar, varchar
 @GC                       
 @GetPartitionKeys         	varchar
 @JStack                   	int
+@Note                     	varchar
 @Pause                    
 @Ping                     
 @Promote                  
@@ -341,7 +345,7 @@ EMPLOYEE.upsert           	integer, varchar, varchar, varchar
 @SnapshotSave             	varchar
 @SnapshotSave             	varchar, varchar, bit
 @SnapshotScan             	varchar
-@SnapshotStatus           
+@Statistics               	statisticscomponent
 @Statistics               	statisticscomponent, bit
 @StopNode                 	int
 @SwapTables               	varchar, varchar
@@ -374,6 +378,7 @@ Command succeeded.
 @GC                       
 @GetPartitionKeys         	varchar
 @JStack                   	int
+@Note                     	varchar
 @Pause                    
 @Ping                     
 @Promote                  
@@ -389,7 +394,7 @@ Command succeeded.
 @SnapshotSave             	varchar
 @SnapshotSave             	varchar, varchar, bit
 @SnapshotScan             	varchar
-@SnapshotStatus           
+@Statistics               	statisticscomponent
 @Statistics               	statisticscomponent, bit
 @StopNode                 	int
 @SwapTables               	varchar, varchar
@@ -496,6 +501,7 @@ Command succeeded.
 @GC                       
 @GetPartitionKeys         	varchar
 @JStack                   	int
+@Note                     	varchar
 @Pause                    
 @Ping                     
 @Promote                  
@@ -511,7 +517,7 @@ Command succeeded.
 @SnapshotSave             	varchar
 @SnapshotSave             	varchar, varchar, bit
 @SnapshotScan             	varchar
-@SnapshotStatus           
+@Statistics               	statisticscomponent
 @Statistics               	statisticscomponent, bit
 @StopNode                 	int
 @SwapTables               	varchar, varchar

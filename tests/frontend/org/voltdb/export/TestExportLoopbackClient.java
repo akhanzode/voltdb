@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -35,6 +35,8 @@ import org.voltdb.regressionsuites.LocalCluster;
 import org.voltdb.regressionsuites.MultiConfigSuiteBuilder;
 import org.voltdb.regressionsuites.TestSQLTypesSuite;
 
+import com.google_voltpatches.common.collect.ImmutableMap;
+
 /**
  * End to end Export tests using the injected custom export.
  *
@@ -69,12 +71,10 @@ public class TestExportLoopbackClient extends TestExportBaseSocketExport {
         }
         System.out.println("testExportLoopbackData");
         Client client = getClient();
-        while (!((ClientImpl) client).isHashinatorInitialized()) {
-            Thread.sleep(1000);
-            System.out.println("Waiting for hashinator to be initialized...");
+        if (!client.waitForTopology(60_000)) {
+            throw new RuntimeException("Timed out waiting for topology info");
         }
         String streamName = "S_NO_NULLS";
-        m_streamNames.add(streamName);
 
         ClientResponse response;
         // Insert rows into stream that will be processed by the loopback connector
@@ -87,7 +87,7 @@ public class TestExportLoopbackClient extends TestExportBaseSocketExport {
         }
         quiesce(client);
         //We should consume all again.
-        waitForExportAllRowsDelivered(client, m_streamNames);
+        waitForExportRowsToBeDelivered(client, ImmutableMap.of(streamName, 10L));
         response = client.callProcedure("@AdHoc", "select count(*) from LOOPBACK_NO_NULLS");
         assertEquals(response.getStatus(), ClientResponse.SUCCESS);
         assertEquals(response.getResults()[0].asScalarLong(),10);
@@ -101,7 +101,7 @@ public class TestExportLoopbackClient extends TestExportBaseSocketExport {
         }
         quiesce(client);
         //We should consume all again.
-        waitForExportAllRowsDelivered(client, m_streamNames);
+        waitForExportRowsToBeDelivered(client, ImmutableMap.of(streamName, 20L));
         response = client.callProcedure("@AdHoc", "select count(*) from LOOPBACK_NO_NULLS");
         assertEquals(response.getStatus(), ClientResponse.SUCCESS);
         assertEquals(response.getResults()[0].asScalarLong(),10);
@@ -113,9 +113,8 @@ public class TestExportLoopbackClient extends TestExportBaseSocketExport {
 
         client.close();
         client = getClient();
-        while (!((ClientImpl) client).isHashinatorInitialized()) {
-            Thread.sleep(1000);
-            System.out.println("Waiting for hashinator to be initialized...");
+        if (!client.waitForTopology(60_000)) {
+            throw new RuntimeException("Timed out waiting for topology info");
         }
         //Nudge catalog to see if we are still exporting.
         response = client.callProcedure("@AdHoc", "create table trades(I1 integer)");
@@ -129,7 +128,7 @@ public class TestExportLoopbackClient extends TestExportBaseSocketExport {
         quiesce(client);
 
         //We should consume all again.
-        waitForExportAllRowsDelivered(client, m_streamNames);
+        waitForExportRowsToBeDelivered(client, ImmutableMap.of(streamName, 30L));
         response = client.callProcedure("@AdHoc", "select count(*) from LOOPBACK_NO_NULLS");
         assertEquals(response.getStatus(), ClientResponse.SUCCESS);
         assertEquals(response.getResults()[0].asScalarLong(),20);

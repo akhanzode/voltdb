@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -37,16 +37,18 @@ public class DropStream extends StatementProcessor {
         super(ddlCompiler);
     }
 
-    private static boolean isRegularTable(VoltXMLElement m_schema, String name) {
+    private void validateTable(String name) throws VoltCompilerException {
         for (VoltXMLElement element : m_schema.children) {
             if (element.name.equals("table")
-                    && (!element.attributes.containsKey("export"))
-                    && (!element.attributes.containsKey("topic"))
                     && element.attributes.get("name").equalsIgnoreCase(name)) {
-                return true;
+                if (!Boolean.parseBoolean(element.attributes.get("stream"))) {
+                    throw m_compiler.new VoltCompilerException(String.format(
+                            "Invalid DROP STREAM statement: %s is not a stream.",
+                            name));
+                }
+                break;
             }
         }
-        return false;
     }
 
     @Override
@@ -58,15 +60,9 @@ public class DropStream extends StatementProcessor {
         Matcher statementMatcher = SQLParser.matchDropStream(ddlStatement.statement);
         if (statementMatcher.matches()) {
             String streamName = checkIdentifierStart(statementMatcher.group(1), ddlStatement.statement);
-
-            if (isRegularTable(m_schema, streamName)) {
-                throw m_compiler.new VoltCompilerException(String.format(
-                        "Invalid DROP STREAM statement: table %s is not a stream.",
-                        streamName));
-            }
+            validateTable(streamName);
             m_returnAfterThis = true;
         }
         return false;
     }
-
 }

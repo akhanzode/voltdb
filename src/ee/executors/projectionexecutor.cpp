@@ -1,8 +1,8 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This file contains original code and/or modifications of original code.
- * Any modifications made by VoltDB Inc. are licensed under the following
+ * Any modifications made by Volt Active Data Inc. are licensed under the following
  * terms and conditions:
  *
  * This program is free software: you can redistribute it and/or modify
@@ -96,9 +96,10 @@ bool ProjectionExecutor::p_init(AbstractPlanNode *abstractNode,
 }
 
 bool ProjectionExecutor::p_execute(const NValueArray &params) {
-    ProjectionPlanNode* node = dynamic_cast<ProjectionPlanNode*>(m_abstractNode);
+    __attribute__((unused)) ProjectionPlanNode* node =
+        dynamic_cast<ProjectionPlanNode*>(m_abstractNode);
     vassert(node);
-    vassert(!node->isInline()); // inline projection's execute() should not be
+    vassert(! node->isInline()); // inline projection's execute() should not be
                                 // called
     vassert(m_outputTable == dynamic_cast<AbstractTempTable*>(node->getOutputTable()));
     vassert(m_outputTable);

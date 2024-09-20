@@ -1,8 +1,8 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This file contains original code and/or modifications of original code.
- * Any modifications made by VoltDB Inc. are licensed under the following
+ * Any modifications made by Volt Active Data Inc. are licensed under the following
  * terms and conditions:
  *
  * Permission is hereby granted, free of charge, to any person obtaining
@@ -87,12 +87,12 @@ public class TestFastSerializer extends TestCase {
     }
 
     public void testHugeMessageBigEndian() throws IOException {
-        testHMLE(heapOut);
-        testHMLE(directOut);
+        testHMBE(heapOut);
+        testHMBE(directOut);
     }
 
-    private void testHMLE(FastSerializer out) throws IOException {
-        out = new FastSerializer(false, false);
+    private void testHMBE(FastSerializer out) throws IOException {
+        out = new FastSerializer(true, false);
 
         // 1 MB message
         byte[] huge = new byte[1024*1024];

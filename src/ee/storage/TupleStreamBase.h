@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -89,7 +89,6 @@ public:
                                int64_t lastComittedSpHandle) = 0;
 
     virtual void extendBufferChain(size_t minLength) = 0;
-    void commonExtendBufferChain(size_t blockSize, size_t startUso);
     virtual void pushStreamBuffer(SB *block) = 0;
     void pushPendingBlocks();
     void discardBlock(SB *sb);
@@ -99,6 +98,12 @@ public:
     }
 
 protected:
+    void commonExtendBufferChain(size_t blockSize, size_t startUso);
+
+    virtual SB* allocateBlock(char* buffer, size_t length, int64_t uso) const {
+        return new SB(buffer, m_headerSpace, length, uso);
+    }
+
     /** time interval between flushing partially filled buffers */
     int64_t m_flushInterval;
 
@@ -216,9 +221,9 @@ void TupleStreamBase<SB>::pushPendingBlocks()
         if (m_committedUso >= (block->uso() + block->offset()))
         {
             //The block is handed off to the topend which is responsible for releasing the
-            //memory associated with the block data. The metadata is deleted here.
+            //memory associated with the block data.
+            block->writeOutHeader();
             pushStreamBuffer(block);
-            delete block;
             m_pendingBlocks.pop_front();
         }
         else
@@ -301,7 +306,7 @@ void TupleStreamBase<SB>::commonExtendBufferChain(size_t blockSize, size_t start
     }
 
     if (m_currBlock) {
-        if (m_currBlock->offset() > 0) {
+        if (!m_currBlock->empty()) {
             m_pendingBlocks.push_back(m_currBlock);
             m_currBlock = NULL;
         }
@@ -321,7 +326,7 @@ void TupleStreamBase<SB>::commonExtendBufferChain(size_t blockSize, size_t start
     if (!buffer) {
         throwFatalException("Failed to claim managed buffer for Export.");
     }
-    m_currBlock = new SB(buffer, m_headerSpace, blockSize, startUso);
+    m_currBlock = allocateBlock(buffer, blockSize, startUso);
     if (blockSize > m_defaultCapacity) {
         m_currBlock->setType(LARGE_STREAM_BLOCK);
     }

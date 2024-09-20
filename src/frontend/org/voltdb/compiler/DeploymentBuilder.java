@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -277,8 +277,6 @@ public class DeploymentBuilder {
      * Writes deployment.xml file to a temporary file. It is constructed from the passed parameters and the m_users
      * field.
      *
-     * @param voltRoot
-     * @param dinfo an instance {@link DeploymentInfo}
      * @return deployment path
      * @throws IOException
      * @throws JAXBException

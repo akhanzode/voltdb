@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -138,9 +138,12 @@ public class SimpleFileSnapshotDataTarget implements SnapshotDataTarget {
                     }
                     try {
                         int totalWritten = 0;
-
                         final ByteBuffer dataBuf = data.b();
-                        DefaultSnapshotDataTarget.enforceSnapshotRateLimit(dataBuf.remaining());
+
+                        //Do not enforce rate limiter if nothing to be written
+                        if (dataBuf.hasRemaining()) {
+                            DefaultSnapshotDataTarget.enforceSnapshotRateLimit(dataBuf.remaining());
+                        }
 
                         while (dataBuf.hasRemaining()) {
                             int written = m_fc.write(dataBuf);

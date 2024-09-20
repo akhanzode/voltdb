@@ -1,5 +1,5 @@
 # This file is part of VoltDB.
-# Copyright (C) 2020 VoltDB Inc.
+# Copyright (C) 2022 Volt Active Data Inc.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -25,14 +25,14 @@ from voltcli import utility
             'license',
             'VoltDB_license_file (extension .xml)',
             min_count=1, max_count=1),
-    )
+    ),
 )
 
 # get proper error message from the procedure call
 def license(runner):
     license_file = VOLT.utility.File(runner.opts.license);
     try:
-        licenseBytes = license_file.read_hex()
+        licenseBytes = license_file.read_hex().decode()
         # call_proc() aborts with an error if the update failed.
         response = runner.call_proc('@UpdateLicense', [VOLT.FastSerializer.VOLTTYPE_STRING], [licenseBytes])
         if response.status() != 1:
@@ -45,7 +45,7 @@ def license(runner):
         runner.info("The license is updated successfully.")
         # display new license information
         response = runner.call_proc('@SystemInformation', [VOLT.FastSerializer.VOLTTYPE_STRING], ['LICENSE']);
-        print response.table(0).format_table(caption = 'License Information')
+        print(response.table(0).format_table(caption = 'License Information'))
         # exception is handled in utility.File
     finally:
         license_file.close();

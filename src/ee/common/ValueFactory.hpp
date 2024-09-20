@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -127,6 +127,31 @@ public:
     static inline NValue getUninitializedTempGeographyValue(int32_t length) {
         NValue retval(ValueType::tGEOGRAPHY);
         retval.allocateValueStorage(length, NValue::getTempStringPool());
+        return retval;
+    }
+
+    // Constructs a geography point NValue from value
+    static inline NValue getGeographyPointValue(const GeographyPointValue* value) {
+        NValue retval(ValueType::tPOINT);
+        if (value == nullptr) {
+            retval.setNull();
+        } else {
+            retval.getGeographyPointValue() = *value;
+        }
+        return retval;
+    }
+
+    // Constructs a geography NValue from value using pool if provided
+    static inline NValue getGeographyValue(const Polygon* value, Pool* pool = nullptr) {
+        NValue retval(ValueType::tGEOGRAPHY);
+        if (value == nullptr) {
+            retval.setNull();
+        } else {
+            size_t len = value->serializedLength();
+            char *data = retval.allocateValueStorage(len, pool == nullptr ? NValue::getTempStringPool() : pool);
+            SimpleOutputSerializer output(data, len);
+            value->saveToBuffer(output);
+        }
         return retval;
     }
 

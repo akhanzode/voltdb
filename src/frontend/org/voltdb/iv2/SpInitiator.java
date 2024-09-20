@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -238,7 +238,7 @@ public class SpInitiator extends BaseInitiator<SpScheduler> implements Promotabl
             mpPDRG = null;
         }
 
-        m_scheduler.getQueue().offer(new SiteTasker.SiteTaskerRunnable() {
+        SiteTasker.SiteTaskerRunnable task = new SiteTasker.SiteTaskerRunnable() {
             @Override
             void run()
             {
@@ -248,7 +248,10 @@ public class SpInitiator extends BaseInitiator<SpScheduler> implements Promotabl
                 taskInfo = "Set DRGateway";
                 return this;
             }
-        }.init());
+        }.init();
+
+        Iv2Trace.logSiteTaskerQueueOffer(task);
+        m_scheduler.getQueue().offer(task);
     }
 
     @Override
@@ -320,10 +323,10 @@ public class SpInitiator extends BaseInitiator<SpScheduler> implements Promotabl
                         iv2masters.put(m_partitionId, hsidStr);
                         if (lastLeaderHSId == m_initiatorMailbox.getHSId()) {
                             tmLog.info(m_whoami + "reinstate as partition leader.");
-                            m_initiatorMailbox.setLeaderMigrationState(false);
+                            m_initiatorMailbox.setLeaderMigrationState(false, deadSPIHost);
                         } else {
                             tmLog.info(m_whoami + "becomes new leader from MigratePartitionLeader request.");
-                            m_initiatorMailbox.setLeaderMigrationState(true);
+                            m_initiatorMailbox.setLeaderMigrationState(true, deadSPIHost);
                         }
                     } else {
                         iv2masters.put(m_partitionId, m_initiatorMailbox.getHSId());

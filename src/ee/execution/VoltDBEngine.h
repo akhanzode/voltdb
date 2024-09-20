@@ -1,8 +1,8 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This file contains original code and/or modifications of original code.
- * Any modifications made by VoltDB Inc. are licensed under the following
+ * Any modifications made by Volt Active Data Inc. are licensed under the following
  * terms and conditions:
  *
  * This program is free software: you can redistribute it and/or modify
@@ -151,6 +151,9 @@ class __attribute__((visibility("default"))) VoltDBEngine {
                         std::string const& hostname,
                         int32_t drClusterId,
                         int32_t defaultDrBufferSize,
+                        bool drIgnoreConflicts,
+                        int32_t drCrcErrorIgnoreMax,
+                        bool drCrcErrorIgnoreFatal,
                         int64_t tempTableMemoryLimit,
                         bool isLowestSiteId,
                         int32_t compactionThreshold = 95);
@@ -268,13 +271,6 @@ class __attribute__((visibility("default"))) VoltDBEngine {
         // Created to transition existing unit tests to context abstraction.
         // If using this somewhere new, consider if you're being lazy.
         void updateExecutorContextUndoQuantumForTest();
-
-        // If an insert will fail due to row limit constraint and user
-        // has defined a delete action to make space, this method
-        // executes the corresponding fragment.
-        //
-        // Returns ENGINE_ERRORCODE_SUCCESS on success
-        void executePurgeFragment(PersistentTable* table);
 
         // -------------------------------------------------
         // Dependency Transfer Functions
@@ -623,13 +619,13 @@ class __attribute__((visibility("default"))) VoltDBEngine {
         int32_t fetchTopicsGroups(int32_t maxResultSize, const NValue& startGroupId);
 
         /**
-         * Store topic parition offsets for a topics group
+         * Store topic partition offsets for a topics group
          */
         int32_t commitTopicsGroupOffsets(int64_t spUniqueId, int64_t undoToken, int16_t requestVersion,
                 const NValue& groupId, SerializeInputBE& in);
 
         /**
-         * Fetch topic parition offsets for a topics group
+         * Fetch topic partition offsets for a topics group
          */
         int32_t fetchTopicsGroupOffsets(int16_t requestVersion, const NValue& groupId, SerializeInputBE& in);
 
@@ -637,6 +633,24 @@ class __attribute__((visibility("default"))) VoltDBEngine {
          * Delete expired offsets of standalone groups
          */
         int32_t deleteExpiredTopicsOffsets(int64_t undoToken, int64_t deleteOlderThan);
+
+        /**
+         * Set which tables can be the target for replication from clusterId
+         */
+        int32_t setReplicableTables(int32_t clusterId, const std::vector<std::string>* replicableTables);
+
+        /**
+         * Clear replicable tables for a cluster
+         */
+        void clearReplicableTables(int clusterId);
+
+        /**
+         * Clear all replicable tables
+         */
+        void clearAllReplicableTables();
+#ifdef VOLT_POOL_CHECKING
+        inline bool isDestroying() { return m_destroying;}
+#endif
 
     private:
         /*
@@ -692,6 +706,9 @@ class __attribute__((visibility("default"))) VoltDBEngine {
         void attachTupleStream(StreamedTable* streamedTable, const std::string& streamName,
                 std::map<std::string, ExportTupleStream*> & purgedStreams, int64_t timestamp);
 
+        void detachTupleStream(StreamedTable* streamedTable, const std::string& streamName,
+                std::map<std::string, ExportTupleStream*> & purgedStreams);
+
         // user defined aggregate functions helper functions
         /*
          * put buffer size needed, function id, udaf index, row count and a list of rows (if there is any)
@@ -715,6 +732,11 @@ class __attribute__((visibility("default"))) VoltDBEngine {
         NValue udfResultHelper(int32_t returnCode, bool partition_table, ValueType type);
 
         void createSystemTables();
+
+        /*
+         * If a table is in the replicable tables map update the pointer to point to table
+         */
+        void updateReplicableTablePointer(int64_t hash, PersistentTable* table);
 
         // -------------------------------------------------
         // Data Members
@@ -789,9 +811,9 @@ class __attribute__((visibility("default"))) VoltDBEngine {
         ExportTupleStream* m_newestExportStreamWithPendingRows = nullptr;
 
         /*
-         * Only includes non-materialized tables
+         * Map from clusterId to a map from table hash to table for which tables can be targets for replication
          */
-        std::unordered_map<int64_t, PersistentTable*> m_tablesBySignatureHash;
+        std::unordered_map<int32_t, std::unordered_map<int64_t, PersistentTable*>> m_replicableTables;
 
         /**
          * System Catalog.
@@ -935,9 +957,12 @@ class __attribute__((visibility("default"))) VoltDBEngine {
         // static variable for sharing loadTable result (and exception) across VoltDBEngines
         static VoltEEExceptionType s_loadTableException;
         static int s_drHiddenColumnSize;
+#ifdef VOLT_POOL_CHECKING
+        bool m_destroying = false;
+#endif
 };
 
-inline bool startsWith(const string& s1, const string& s2) {
+inline bool startsWith(const std::string& s1, const std::string& s2) {
     return s2.size() <= s1.size() && s1.compare(0, s2.size(), s2) == 0;
 }
 

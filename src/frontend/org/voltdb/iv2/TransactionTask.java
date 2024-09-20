@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -16,6 +16,9 @@
  */
 
 package org.voltdb.iv2;
+
+import java.util.List;
+import java.util.Map;
 
 import org.voltcore.logging.VoltLogger;
 import org.voltdb.SiteProcedureConnection;
@@ -76,6 +79,8 @@ public abstract class TransactionTask extends SiteTasker
     }
 
     protected void durabilityTraceEnd() {}
+
+    public void updateMasters(List<Long> masters, Map<Integer, Long> partitionMaster) {}
 
     @Override
     abstract public void run(SiteProcedureConnection siteConnection);

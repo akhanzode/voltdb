@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -23,14 +23,19 @@
 
 package txnIdSelfCheck;
 
+import java.io.BufferedInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.Random;
+import java.util.concurrent.atomic.AtomicBoolean;
+
 import org.voltdb.client.Client;
 import org.voltdb.client.ClientResponse;
 import org.voltdb.client.NoConnectionsException;
 import org.voltdb.client.ProcCallException;
-
-import java.io.*;
-import java.util.Random;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 
 public class UpdateClassesThread extends BenchmarkThread {
@@ -67,7 +72,9 @@ public class UpdateClassesThread extends BenchmarkThread {
                 log.info("UpdateClasses Num bytes read: " + totalBytesRead);
             } finally {
                 log.info("UpdateClasses Closing input stream.");
-                input.close();
+                if (input != null) {
+                    input.close();
+                }
             }
         } catch (FileNotFoundException ex) {
             log.error("UpdateClasses jar file not found.");
@@ -131,6 +138,7 @@ public class UpdateClassesThread extends BenchmarkThread {
                             || cr.getStatusString().contains("Transaction dropped due to change in mastership")
                             || cr.getStatusString().contains("Server is shutting down")
                             || cr.getStatusString().contains("connection lost")
+                            || cr.getStatusString().contains("Procedure call not queued: timed out waiting for host connection")
                             || cr.getStatusString().equals("Invalid catalog update.  Catalog or deployment change was planned against one version of the cluster configuration but that version was no longer live when attempting to apply the change.  This is likely the result of multiple concurrent attempts to change the cluster configuration.  Please make such changes synchronously from a single connection to the cluster.")
                             || cr.getStatusString().equals("An invocation of procedure @VerifyCatalogAndWriteJar on all hosts returned null result or time out.")
                             || cr.getStatusString().equals("An invocation of procedure @VerifyCatalogAndWriteJar on all hosts timed out.")
@@ -139,8 +147,8 @@ public class UpdateClassesThread extends BenchmarkThread {
                     else
                         m_needsBlock.set(true);
                 }
-                if (cr.getStatus() == ClientResponse.SERVER_UNAVAILABLE) {
-                    log.warn("UpdateClasses got SERVER_UNAVAILABLE on proc call. Will sleep.");
+                if (TxnId2Utils.isServerUnavailableStatus(cr.getStatus())) {
+                    log.warn("UpdateClasses got a server unavailable status on proc call. Will sleep.");
                     m_needsBlock.set(true);
                 }
             }

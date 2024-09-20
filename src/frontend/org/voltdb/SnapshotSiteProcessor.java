@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -49,9 +49,13 @@ import org.voltcore.utils.DBBPool;
 import org.voltcore.utils.DBBPool.BBContainer;
 import org.voltcore.utils.Pair;
 import org.voltdb.SnapshotCompletionMonitor.ExportSnapshotTuple;
+import org.voltdb.catalog.CatalogMap;
 import org.voltdb.catalog.Database;
 import org.voltdb.catalog.Table;
+import org.voltdb.catalog.Topic;
+import org.voltdb.export.ExportManagerInterface;
 import org.voltdb.iv2.MpInitiator;
+import org.voltdb.iv2.PriorityPolicy;
 import org.voltdb.iv2.SiteTaskerQueue;
 import org.voltdb.iv2.SnapshotTask;
 import org.voltdb.rejoin.StreamSnapshotDataTarget.StreamSnapshotTimeoutException;
@@ -181,6 +185,7 @@ public class SnapshotSiteProcessor {
 
     private long m_lastSnapshotTxnId;
     private final int m_snapshotPriority;
+    private final boolean m_usesPriorityQueue;
 
     private boolean m_isTruncation;
     private boolean m_perSiteLastSnapshotSucceeded = true;
@@ -222,6 +227,7 @@ public class SnapshotSiteProcessor {
         Database database = context.getDatabase();
         SiteProcedureConnection spc = context.getSiteProcedureConnection();
 
+        // Process export/topic stream tuples
         for (Table t : database.getTables()) {
             if (!TableType.needsExportDataSource(t.getTabletype())) {
                 continue;
@@ -242,6 +248,26 @@ public class SnapshotSiteProcessor {
                                 usoAndSequenceNumber[2]));
         }
 
+        // Process opaque topic tuples, append to export info
+        CatalogMap<Topic> topics = database.getTopics();
+        if (!topics.isEmpty()) {
+            ExportManagerInterface exportManager = VoltDB.getExportManager();
+            for (Topic topic : topics) {
+                if (!CatalogUtil.isOpaqueTopicForPartition(topic, context.getPartitionId())) {
+                    continue;
+                }
+
+                Map<Integer, ExportSnapshotTuple> sequenceNumbers = s_exportSequenceNumbers.computeIfAbsent(
+                        topic.getTypeName().toUpperCase(),
+                        k -> new HashMap<Integer, ExportSnapshotTuple>());
+
+                sequenceNumbers.put(
+                        context.getPartitionId(),
+                        exportManager.getOpaqueTopicSnapshotTuple(context.getPartitionId(), topic.getTypeName().toUpperCase()));
+            }
+        }
+
+        // Process DR tuples
         TupleStreamStateInfo drStateInfo = spc.getDRTupleStreamStateInfo();
         if (drStateInfo != null) {
             s_drTupleStreamInfo.put(context.getPartitionId(), drStateInfo);
@@ -275,8 +301,8 @@ public class SnapshotSiteProcessor {
 
     private long m_quietUntil = 0;
 
-    public SnapshotSiteProcessor(SiteTaskerQueue siteQueue, int snapshotPriority) {
-        this(siteQueue, snapshotPriority, new IdlePredicate() {
+    public SnapshotSiteProcessor(SiteTaskerQueue siteQueue) {
+        this(siteQueue, new IdlePredicate() {
             @Override
             public boolean idle(long now) {
                 throw new UnsupportedOperationException();
@@ -284,10 +310,17 @@ public class SnapshotSiteProcessor {
         });
     }
 
-    public SnapshotSiteProcessor(SiteTaskerQueue siteQueue, int snapshotPriority, IdlePredicate idlePredicate) {
+    public SnapshotSiteProcessor(SiteTaskerQueue siteQueue, IdlePredicate idlePredicate) {
         m_siteTaskerQueue = siteQueue;
-        m_snapshotPriority = snapshotPriority;
         m_idlePredicate = idlePredicate;
+        m_usesPriorityQueue = PriorityPolicy.isEnabled();
+        if (m_usesPriorityQueue) {
+            // Actual priority to use for tasks
+            m_snapshotPriority = PriorityPolicy.getSnapshotPriority();
+        } else {
+            // A delay factor to delay tasks
+            m_snapshotPriority = PriorityPolicy.getSnapshotDelayFactor();
+        }
     }
 
     public void shutdown() throws InterruptedException {
@@ -348,59 +381,68 @@ public class SnapshotSiteProcessor {
          * policy anyways. 10 would be the largest delay
          */
         if (m_snapshotPriority > 0) {
-            final long now = System.currentTimeMillis();
-            //Unless disabled, ask if the site is idle, and if it is queue the work immediately
-            if (!DISABLE_IMMEDIATE_SNAPSHOT_RESCHEDULING && m_idlePredicate.idle(now)) {
-                m_siteTaskerQueue.offer(new SnapshotTask());
-                return;
-            }
+            if (m_usesPriorityQueue) {
+                // With priority queues, interpret priority as a task priority
+                SnapshotTask task = new SnapshotTask();
+                task.setPriority(m_snapshotPriority);
+                m_siteTaskerQueue.offer(task);
+            } else {
+                // Without priority queues, interpret priority as a delay factor
+                final long now = System.currentTimeMillis();
 
-            //Cache the value locally, the dirty secret is that in edge cases multiple threads
-            //will read/write briefly, but it isn't a big deal since the scheduling can be wrong
-            //briefly. Caching it locally will make the logic here saner because it can't change
-            //as execution progresses
-            final long quietUntil = m_quietUntil;
+                //Unless disabled, ask if the site is idle, and if it is queue the work immediately
+                if (!DISABLE_IMMEDIATE_SNAPSHOT_RESCHEDULING && m_idlePredicate.idle(now)) {
+                    m_siteTaskerQueue.offer(new SnapshotTask());
+                    return;
+                }
+
+                //Cache the value locally, the dirty secret is that in edge cases multiple threads
+                //will read/write briefly, but it isn't a big deal since the scheduling can be wrong
+                //briefly. Caching it locally will make the logic here saner because it can't change
+                //as execution progresses
+                final long quietUntil = m_quietUntil;
+
+                /*
+                 * If the current time is > than quietUntil then the quiet period is over
+                 * and the snapshot work should be done immediately
+                 *
+                 * Otherwise it needs to be scheduled in the future and the next quiet period
+                 * needs to be calculated
+                 */
+                if (now > quietUntil) {
+                    m_siteTaskerQueue.offer(new SnapshotTask());
+                    //Now push the quiet period further into the future,
+                    //generally no threads will be racing to do this
+                    //since the execution site only interacts with one snapshot data target at a time
+                    //except when it is switching tables. It doesn't really matter if it is wrong
+                    //it will just result in a little extra snapshot work being done close together
+                    m_quietUntil =
+                            System.currentTimeMillis() +
+                            (5 * m_snapshotPriority) + ((long)(m_random.nextDouble() * 15));
+                } else {
+                    //Schedule it to happen after the quiet period has elapsed
+                    VoltDB.instance().schedulePriorityWork(
+                            new Runnable() {
+                                @Override
+                                public void run()
+                                {
+                                    m_siteTaskerQueue.offer(new SnapshotTask());
+                                }
+                            },
+                            quietUntil - now,
+                            0,
+                            TimeUnit.MILLISECONDS);
 
                     /*
-                     * If the current time is > than quietUntil then the quiet period is over
-                     * and the snapshot work should be done immediately
-                     *
-                     * Otherwise it needs to be scheduled in the future and the next quiet period
-                     * needs to be calculated
+                     * This is the same calculation as above except the future is not based
+                     * on the current time since the quiet period was already in the future
+                     * and we need to move further past it since we just scheduled snapshot work
+                     * at the end of the current quietUntil value
                      */
-            if (now > quietUntil) {
-                m_siteTaskerQueue.offer(new SnapshotTask());
-                //Now push the quiet period further into the future,
-                //generally no threads will be racing to do this
-                //since the execution site only interacts with one snapshot data target at a time
-                //except when it is switching tables. It doesn't really matter if it is wrong
-                //it will just result in a little extra snapshot work being done close together
-                m_quietUntil =
-                        System.currentTimeMillis() +
-                                (5 * m_snapshotPriority) + ((long)(m_random.nextDouble() * 15));
-            } else {
-                //Schedule it to happen after the quiet period has elapsed
-                VoltDB.instance().schedulePriorityWork(
-                        new Runnable() {
-                            @Override
-                            public void run()
-                            {
-                                m_siteTaskerQueue.offer(new SnapshotTask());
-                            }
-                        },
-                        quietUntil - now,
-                        0,
-                        TimeUnit.MILLISECONDS);
-
-                        /*
-                         * This is the same calculation as above except the future is not based
-                         * on the current time since the quiet period was already in the future
-                         * and we need to move further past it since we just scheduled snapshot work
-                         * at the end of the current quietUntil value
-                         */
-                m_quietUntil =
-                        quietUntil +
-                                (5 * m_snapshotPriority) + ((long)(m_random.nextDouble() * 15));
+                    m_quietUntil =
+                            quietUntil +
+                            (5 * m_snapshotPriority) + ((long)(m_random.nextDouble() * 15));
+                }
             }
         } else {
             m_siteTaskerQueue.offer(new SnapshotTask());
@@ -479,18 +521,25 @@ public class SnapshotSiteProcessor {
         m_snapshotTargets = targetsToClose;
 
         // Queue the first snapshot task
-        VoltDB.instance().schedulePriorityWork(
-                new Runnable() {
-                    @Override
-                    public void run()
-                    {
-                        m_siteTaskerQueue.offer(new SnapshotTask());
-                    }
-                },
-                (m_quietUntil + (5 * m_snapshotPriority) - now),
-                0,
-                TimeUnit.MILLISECONDS);
-        m_quietUntil += 5 * m_snapshotPriority;
+        if (m_usesPriorityQueue && (m_snapshotPriority > 0)) {
+            // With priority queues, interpret priority as a task priority
+            SnapshotTask task = new SnapshotTask();
+            task.setPriority(m_snapshotPriority);
+            m_siteTaskerQueue.offer(task);
+        } else {
+            VoltDB.instance().schedulePriorityWork(
+                    new Runnable() {
+                        @Override
+                        public void run()
+                        {
+                            m_siteTaskerQueue.offer(new SnapshotTask());
+                        }
+                    },
+                    (m_quietUntil + (5 * m_snapshotPriority) - now),
+                    0,
+                    TimeUnit.MILLISECONDS);
+            m_quietUntil += 5 * m_snapshotPriority;
+        }
     }
 
     private Map<Integer, byte[]>
@@ -707,6 +756,7 @@ public class SnapshotSiteProcessor {
                 final ExtensibleSnapshotDigestData snapshotDataForZookeeper = m_extraSnapshotData;
                 m_extraSnapshotData = null;
                 Thread.UncaughtExceptionHandler eh = new Thread.UncaughtExceptionHandler() {
+                    @Override
                     public void uncaughtException(Thread th, Throwable ex) {
                         SNAP_LOG.warn("Error running snapshot completion task", ex);
                     }
@@ -728,14 +778,18 @@ public class SnapshotSiteProcessor {
                                 try {
                                     t.join();
                                 } catch (InterruptedException e) {
+                                    snapshotSucceeded = false;
                                     return;
                                 }
                             }
-                            Exception exp = null;
+                            Throwable exp = null;
                             for (final SnapshotDataTarget t : snapshotTargets) {
                                 try {
                                     t.close();
-                                } catch (IOException | InterruptedException e) {
+                                    if (exp == null) {
+                                        exp = t.getLastWriteException();
+                                    }
+                                } catch (Throwable e) {
                                     snapshotSucceeded = false;
                                     if (exp == null) {
                                         exp = e;
@@ -743,7 +797,7 @@ public class SnapshotSiteProcessor {
                                     continue;
                                 }
                             }
-                            if (!snapshotSucceeded) {
+                            if (exp != null) {
                                 throw new RuntimeException(exp);
                             }
 
@@ -755,6 +809,9 @@ public class SnapshotSiteProcessor {
                                     SNAP_LOG.error("Error running snapshot completion task", e);
                                 }
                             }
+                        } catch (Throwable t) {
+                            snapshotSucceeded = false;
+                            throw t;
                         } finally {
                             // Caching the value here before the site removes itself from the
                             // ExecutionSitesCurrentlySnapshotting set, so
@@ -904,9 +961,8 @@ public class SnapshotSiteProcessor {
     public HashSet<Exception> completeSnapshotWork(SystemProcedureExecutionContext context)
         throws InterruptedException {
         HashSet<Exception> retval = new HashSet<Exception>();
-        //Set to 10 gigabytes/sec, basically unlimited
-        //Does nothing if rate limiting is not enabled
-        DefaultSnapshotDataTarget.setRate(1024 * 10);
+        // Force rate limit to be disabled
+        DefaultSnapshotDataTarget.enforceSnapshotRateLimit(false);
         try {
             while (m_snapshotTableTasks != null) {
                 Future<?> result = doSnapshotWork(context, true);
@@ -924,7 +980,7 @@ public class SnapshotSiteProcessor {
             }
         } finally {
             //Request default rate again
-            DefaultSnapshotDataTarget.setRate(null);
+            DefaultSnapshotDataTarget.enforceSnapshotRateLimit(true);
         }
 
         /**

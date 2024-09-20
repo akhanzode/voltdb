@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -87,7 +87,7 @@ public class ByteBufferInputStream extends InputStream {
     @Override
     public int read() throws IOException {
         if (atEOF()) return -1;
-        return m_bb.get();
+        return m_bb.get() & 0xFF;
     }
 
     public void rewind() {

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -47,6 +47,7 @@ import org.voltdb.catalog.StmtParameter;
 import org.voltdb.catalog.Table;
 import org.voltdb.compiler.VoltCompiler.ProcedureDescriptor;
 import org.voltdb.compiler.VoltCompiler.VoltCompilerException;
+import org.voltdb.compiler.deploymentfile.SystemSettingsType;
 import org.voltdb.compilereport.ProcedureAnnotation;
 import org.voltdb.expressions.AbstractExpression;
 import org.voltdb.expressions.ParameterValueExpression;
@@ -61,8 +62,10 @@ import com.google_voltpatches.common.collect.ImmutableMap;
 /**
  * Compiles stored procedures into a given catalog,
  * invoking the StatementCompiler as needed.
+ *
+ * All member functions are static.
  */
-public abstract class ProcedureCompiler {
+public class ProcedureCompiler {
 
     static void compile(VoltCompiler compiler,
                         HSQLInterface hsql,
@@ -210,10 +213,10 @@ public abstract class ProcedureCompiler {
             throw compiler.new VoltCompilerException(msg);
         }
         // check the return type of the run method
-        if ((procMethod.getReturnType() != VoltTable[].class) &&
-           (procMethod.getReturnType() != VoltTable.class) &&
-           (procMethod.getReturnType() != long.class) &&
-           (procMethod.getReturnType() != Long.class)) {
+        if (!procMethod.getReturnType().getCanonicalName().equals(VoltTable[].class.getCanonicalName()) &&
+            !procMethod.getReturnType().getCanonicalName().equals(VoltTable.class.getCanonicalName())   &&
+            !procMethod.getReturnType().getCanonicalName().equals(long.class.getCanonicalName())        &&
+            !procMethod.getReturnType().getCanonicalName().equals(Long.class.getCanonicalName())           ) {
 
             String msg = "Procedure: " + shortName + " has run(...) method that doesn't return long, Long, VoltTable or VoltTable[].";
             throw compiler.new VoltCompilerException(msg);
@@ -430,12 +433,13 @@ public abstract class ProcedureCompiler {
     public static void addPartitioningInfo(VoltCompiler compiler, Procedure procedure,
             Database db, Class<?>[] paramTypes, ProcedurePartitionData partitionData)
                     throws VoltCompilerException {
-        // parse the procedureInfo
-        procedure.setSinglepartition(partitionData.isSinglePartition());
+
         if (partitionData.isMultiPartitionProcedure()) {
+            procedure.setSinglepartition(false);
             return;
         }
 
+        procedure.setSinglepartition(partitionData.isSinglePartition());
         setCatalogProcedurePartitionInfo(compiler, db, procedure, partitionData);
         if (procedure.getPartitionparameter() == -1) {
             return;
@@ -514,10 +518,12 @@ public abstract class ProcedureCompiler {
             procedure.setAnnotation(pa);
         }
 
-        // check if partition info was set in ddl
+        // check if partition info was set in ddl.
+        // if not, it's multi-partition; other non-partitioned cases (directed
+        // and compound) have info containg a null partition table name
         ProcedurePartitionData info = procedureDescriptor.m_partitionData;
         if (info == null) {
-            info = new ProcedurePartitionData();
+            info = new ProcedurePartitionData(ProcedurePartitionData.Type.MULTI);
         }
 
         // if the procedure is non-transactional, then take this special path here
@@ -525,6 +531,7 @@ public abstract class ProcedureCompiler {
             compileNTProcedure(compiler, procClass, procedure, jarOutput);
             return;
         }
+
         // if still here, that means the procedure is transactional
         procedure.setTransactional(true);
 
@@ -536,7 +543,9 @@ public abstract class ProcedureCompiler {
 
         compileSQLStmtUpdatingProcedureInfomation(compiler, hsql, estimates, db, procedure,
                 info.isSinglePartition(), fields);
-
+        if( VoltDB.instance().getKFactor() > 0 && info.isSinglePartition() ) {
+            checkForMutableParamsWarning(compiler,shortName,procMethod);
+        }
         // set procedure parameter types
         Class<?>[] paramTypes = setParameterTypes(compiler, procedure, shortName, procMethod);
 
@@ -713,6 +722,34 @@ public abstract class ProcedureCompiler {
         }
     }
 
+    public static void checkForMutableParamsWarning(VoltCompiler compiler, String shortName, Method procMethod) {
+        Class<?>[] paramTypes = procMethod.getParameterTypes();
+        boolean hasArr = false;
+        for(Class<?> param : paramTypes){
+            if( param.isArray() ) {
+                hasArr = true;
+                break;
+            }
+        }
+        if( hasArr ) {
+            SystemSettingsType.Procedure procedureSetting = VoltDB.instance().getCatalogContext().getDeployment().getSystemsettings().getProcedure();
+            if ( procedureSetting == null || procedureSetting.isCopyparameters() ) {
+                String infoMsg = "Procedure "+ shortName + " contains a mutable array parameter." +
+                        " VoltDb can be optimized by disabling copyparameters configuration option." +
+                        " In that case, all parameters including arrays must remain immutable within the scope of Stored Procedures.";
+                compiler.addInfo(infoMsg);
+            }
+            else {
+                String warnMsg = "Procedure " + shortName +
+                        " contains a mutable array parameter but the database is configured not to copy parameters before execution." +
+                        " This can result in unpredictable behavior, crashes or data corruption if stored procedure modifies the content of the parameters." +
+                        " Set the copyparameters configuration option to true to avoid this danger if the stored procedures might modify parameter content.";
+                compiler.addWarn(warnMsg);
+            }
+        }
+    }
+
+
     static void compileDDLProcedure(VoltCompiler compiler,
                                     HSQLInterface hsql,
                                     DatabaseEstimates estimates,
@@ -754,8 +791,9 @@ public abstract class ProcedureCompiler {
 
         ProcedurePartitionData info = procedureDescriptor.m_partitionData;
         if (info == null) {
-            info = new ProcedurePartitionData();
+            info = new ProcedurePartitionData(ProcedurePartitionData.Type.MULTI);
         }
+
         String[] stmts = SQLLexer.splitStatements(stmtsStr).getCompletelyParsedStmts().toArray(new String[0]);
 
         int stmtNum = 0;

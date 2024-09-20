@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -48,6 +48,9 @@ public abstract class ProcedureInvocationExtensions {
     public static final byte BATCH_TIMEOUT = 1;  // batch timeout
     public static final byte ALL_PARTITION = 2; // whether proc is part of run-everywhere
     public static final byte PARTITION_DESTINATION = 3; // Which partition this procedure is targeting
+    public static final byte BATCH_CALL = 4; // If this is a batch call to a procedure
+    public static final byte REQUEST_PRIORITY = 5; // client-assigned priority for this request
+    public static final byte REQUEST_TIMEOUT = 6; // remaining time from client-specified request timeout
 
     private static final int INTEGER_SIZE = Integer.BYTES;
 
@@ -63,8 +66,8 @@ public abstract class ProcedureInvocationExtensions {
 
     public static int readBatchTimeout(ByteBuffer buf) {
         int timeout = readInt(buf, "Batch timeout");
-        if ((timeout < 0) && (timeout != BatchTimeoutOverrideType.NO_TIMEOUT)) {
-            throw new IllegalStateException("Invalid timeout value deserialized: " + timeout);
+        if (timeout < 0 && timeout != ProcedureInvocation.NO_TIMEOUT) {
+            throw new IllegalStateException("Invalid batch timeout value deserialized: " + timeout);
         }
         return timeout;
     }
@@ -97,6 +100,47 @@ public abstract class ProcedureInvocationExtensions {
         return partitionDestination;
     }
 
+    public static void writeBatchCallWithTypeByte(ByteBuffer buf) {
+        buf.put(BATCH_CALL);
+        writeLength(buf, 0);
+    }
+
+    public static boolean readBatchCall(ByteBuffer buf) {
+        int len = readLength(buf);
+        if (len != 0) {
+            throw new IllegalStateException("Batch call extension serialization length expected to be 0: " + len);
+        }
+        return true;
+    }
+
+    public static void writeRequestPriorityWithTypeByte(ByteBuffer buf, int prio) {
+        buf.put(REQUEST_PRIORITY);
+        writeLength(buf, 1);
+        buf.put((byte)prio);
+    }
+
+    public static int readRequestPriority(ByteBuffer buf) {
+        int len = readLength(buf);
+        if (len != 1) {
+            throw new IllegalStateException("Priority extension serialization length expected to be 1: " + len);
+        }
+        return buf.get();
+    }
+
+    public static void writeRequestTimeoutWithTypeByte(ByteBuffer buf, int tmo) {
+        buf.put(REQUEST_TIMEOUT);
+        writeLength(buf, INTEGER_SIZE);
+        buf.putInt(tmo);
+    }
+
+    public static int readRequestTimeout(ByteBuffer buf) {
+        int timeout = readInt(buf, "Request timeout");
+        if (timeout < 0 && timeout != ProcedureInvocation.NO_TIMEOUT) {
+            throw new IllegalStateException("Invalid request timeout value deserialized: " + timeout);
+        }
+        return timeout;
+    }
+
     public static void skipUnknownExtension(ByteBuffer buf) {
         int len = readLength(buf);
         buf.position(buf.position() + len); // skip ahead
@@ -126,10 +170,10 @@ public abstract class ProcedureInvocationExtensions {
         }
     }
 
-    private static int readInt(ByteBuffer buf, String extenstion) {
+    private static int readInt(ByteBuffer buf, String extension) {
         int len = readLength(buf);
         if (len != INTEGER_SIZE) {
-            throw new IllegalStateException(extenstion + " extension serialization length expected to be 4");
+            throw new IllegalStateException(extension + " extension serialization length expected to be 4");
         }
         return buf.getInt();
     }

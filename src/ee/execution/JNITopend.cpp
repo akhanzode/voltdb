@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -170,7 +170,7 @@ JNITopend::JNITopend(JNIEnv *env, jobject caller) : m_jniEnv(env), m_javaExecuti
     m_pushExportBufferMID = m_jniEnv->GetStaticMethodID(
             m_exportManagerClass,
             "pushExportBuffer",
-            "(ILjava/lang/String;JJJJJLorg/voltcore/utils/DBBPool$BBContainer;)V");
+            "(ILjava/lang/String;JJJJJJLorg/voltcore/utils/DBBPool$BBContainer;)V");
     if (m_pushExportBufferMID == NULL) {
         m_jniEnv->ExceptionDescribe();
         vassert(m_pushExportBufferMID != NULL);
@@ -196,6 +196,12 @@ JNITopend::JNITopend(JNIEnv *env, jobject caller) : m_jniEnv(env), m_javaExecuti
             "pushDRBuffer",
             "(IJJJJJILorg/voltcore/utils/DBBPool$BBContainer;)J");
 
+    m_reportDRBufferMID = m_jniEnv->GetStaticMethodID(
+            m_partitionDRGatewayClass,
+            "reportDRBuffer",
+            "(ILjava/lang/String;Ljava/nio/ByteBuffer;)V"
+    );
+
     m_pushPoisonPillMID = m_jniEnv->GetStaticMethodID(
             m_partitionDRGatewayClass,
             "pushPoisonPill",
@@ -207,10 +213,25 @@ JNITopend::JNITopend(JNIEnv *env, jobject caller) : m_jniEnv(env), m_javaExecuti
         throw std::exception();
     }
 
+
+    m_drConflictReporterClass = m_jniEnv->FindClass("org/voltdb/DRConflictReporter");
+    if (m_drConflictReporterClass == NULL) {
+        m_jniEnv->ExceptionDescribe();
+        vassert(m_drConflictReporterClass != NULL);
+        throw std::exception();
+    }
+
+    m_drConflictReporterClass = static_cast<jclass>(m_jniEnv->NewGlobalRef(m_drConflictReporterClass));
+    if (m_drConflictReporterClass == NULL) {
+        m_jniEnv->ExceptionDescribe();
+        vassert(m_drConflictReporterClass != NULL);
+        throw std::exception();
+    }
+
     m_reportDRConflictMID = m_jniEnv->GetStaticMethodID(
-            m_partitionDRGatewayClass,
+            m_drConflictReporterClass,
             "reportDRConflict",
-            "(IIJLjava/lang/String;IILjava/nio/ByteBuffer;Ljava/nio/ByteBuffer;Ljava/nio/ByteBuffer;Ljava/nio/ByteBuffer;ILjava/nio/ByteBuffer;Ljava/nio/ByteBuffer;Ljava/nio/ByteBuffer;Ljava/nio/ByteBuffer;)I");
+            "(IIJLjava/lang/String;ZIILjava/nio/ByteBuffer;Ljava/nio/ByteBuffer;Ljava/nio/ByteBuffer;Ljava/nio/ByteBuffer;ILjava/nio/ByteBuffer;Ljava/nio/ByteBuffer;Ljava/nio/ByteBuffer;Ljava/nio/ByteBuffer;)I");
     if (m_reportDRConflictMID == NULL) {
         m_jniEnv->ExceptionDescribe();
         vassert(m_reportDRConflictMID != NULL);
@@ -580,6 +601,7 @@ JNITopend::~JNITopend() {
     m_jniEnv->DeleteGlobalRef(m_javaExecutionEngine);
     m_jniEnv->DeleteGlobalRef(m_exportManagerClass);
     m_jniEnv->DeleteGlobalRef(m_partitionDRGatewayClass);
+    m_jniEnv->DeleteGlobalRef(m_drConflictReporterClass);
     m_jniEnv->DeleteGlobalRef(m_decompressionClass);
     m_jniEnv->DeleteGlobalRef(m_NDBBWClass);
 }
@@ -601,15 +623,18 @@ void JNITopend::pushExportBuffer(
                 block->getCommittedSequenceNumber(),
                 block->getRowCount(),
                 block->lastSpUniqueId(),
+                block->lastCommittedSpHandle(),
                 reinterpret_cast<jlong>(block->rawPtr()),
                 container);
         m_jniEnv->DeleteLocalRef(container);
+        delete block;
     } else {
         m_jniEnv->CallStaticVoidMethod(
                 m_exportManagerClass,
                 m_pushExportBufferMID,
                 partitionId,
                 tableNameString,
+                static_cast<int64_t>(0),
                 static_cast<int64_t>(0),
                 static_cast<int64_t>(0),
                 static_cast<int64_t>(0),
@@ -640,8 +665,31 @@ int64_t JNITopend::pushDRBuffer(int32_t partitionId, DrStreamBlock *block) {
                 block->drEventType(),
                 container);
         m_jniEnv->DeleteLocalRef(container);
+        delete block;
     }
     return retval;
+}
+
+void JNITopend::reportDRBuffer(int32_t partitionId, const char *reason, const char *buffer, size_t length) {
+
+    if (buffer != NULL) {
+        jstring jReason = m_jniEnv->NewStringUTF(reason);
+        if (jReason == NULL) {
+            m_jniEnv->ExceptionDescribe();
+            throw std::exception();
+        }
+        jobject jbuffer = m_jniEnv->NewDirectByteBuffer(const_cast<char *>(buffer), length);
+        if (jbuffer == NULL) {
+            m_jniEnv->ExceptionDescribe();
+            throw std::exception();
+        }
+        m_jniEnv->CallStaticLongMethod(
+                m_partitionDRGatewayClass,
+                m_reportDRBufferMID,
+                partitionId, jReason, jbuffer, length);
+        m_jniEnv->DeleteLocalRef(jbuffer);
+        m_jniEnv->DeleteLocalRef(jReason);
+    }
 }
 
 void JNITopend::pushPoisonPill(int32_t partitionId, std::string& reason, DrStreamBlock *block) {
@@ -656,6 +704,7 @@ void JNITopend::pushPoisonPill(int32_t partitionId, std::string& reason, DrStrea
                 jReason,
                 container);
         m_jniEnv->DeleteLocalRef(container);
+        delete block;
     }
     m_jniEnv->DeleteLocalRef(jReason);
 }
@@ -677,7 +726,8 @@ static boost::shared_array<char> serializeToDirectByteBuffer(JNIEnv *jniEngine, 
     return boost::shared_array<char>();
 }
 
-int JNITopend::reportDRConflict(int32_t partitionId, int32_t remoteClusterId, int64_t remoteTimestamp, std::string tableName, DRRecordType action,
+int JNITopend::reportDRConflict(int32_t partitionId, int32_t remoteClusterId, int64_t remoteTimestamp,
+        std::string tableName, bool isReplicatedTable, DRRecordType action,
         DRConflictType deleteConflict, Table *existingMetaTableForDelete, Table *existingTupleTableForDelete,
         Table *expectedMetaTableForDelete, Table *expectedTupleTableForDelete,
         DRConflictType insertConflict, Table *existingMetaTableForInsert, Table *existingTupleTableForInsert,
@@ -727,12 +777,13 @@ int JNITopend::reportDRConflict(int32_t partitionId, int32_t remoteClusterId, in
                                                                                    newTupleTableForInsert,
                                                                                    newTupleRowsBufferForInsert);
 
-    int32_t retval = m_jniEnv->CallStaticIntMethod(m_partitionDRGatewayClass,
+    int32_t retval = m_jniEnv->CallStaticIntMethod(m_drConflictReporterClass,
                                             m_reportDRConflictMID,
                                             partitionId,
                                             remoteClusterId,
                                             remoteTimestamp,
                                             tableNameString,
+                                            isReplicatedTable,
                                             action,
                                             deleteConflict,
                                             existingMetaRowsBufferForDelete,

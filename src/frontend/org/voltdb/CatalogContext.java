@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -26,6 +26,7 @@ import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.calcite.schema.SchemaPlus;
 import org.apache.zookeeper_voltpatches.KeeperException;
@@ -48,7 +49,7 @@ import org.voltdb.settings.NodeSettings;
 import org.voltdb.utils.CatalogUtil;
 import org.voltdb.utils.Encoder;
 import org.voltdb.utils.InMemoryJarfile;
-import org.voltdb.utils.VoltFile;
+import org.voltdb.utils.TimeUtils;
 
 import com.google_voltpatches.common.collect.ImmutableMap;
 
@@ -98,7 +99,7 @@ public class CatalogContext {
             }
 
             m_deploymentBytes = deploymentBytes;
-            m_deploymentHash = CatalogUtil.makeDeploymentHash(deploymentBytes);
+            m_deploymentHash = CatalogUtil.makeHash(deploymentBytes);
             m_deploymentHashForConfig = CatalogUtil.makeDeploymentHashForConfig(deploymentBytes);
         }
 
@@ -246,6 +247,10 @@ public class CatalogContext {
         return m_dbSettings.getCluster();
     }
 
+    public CatalogMap<Table> getTables() {
+        return tables;
+    }
+
     public NodeSettings getNodeSettings() {
         return m_dbSettings.getNodeSetting();
     }
@@ -341,8 +346,8 @@ public class CatalogContext {
      * @throws IOException
      */
     public Runnable writeCatalogJarToFile(String path, String name, CatalogJarWriteMode mode) throws IOException {
-        File catalogFile = new VoltFile(path, name);
-        File catalogTmpFile = new VoltFile(path, name + ".tmp");
+        File catalogFile = new File(path, name);
+        File catalogTmpFile = new File(path, name + ".tmp");
 
         if (mode == CatalogJarWriteMode.CATALOG_UPDATE) {
             // This means a @UpdateCore case, the asynchronous writing of
@@ -469,19 +474,10 @@ public class CatalogContext {
             logLines.put("snapshot-schedule1", "No schedule set for automated snapshots.");
         }
         else {
-            final String frequencyUnitString = ssched.getFrequencyunit().toLowerCase();
-            final char frequencyUnit = frequencyUnitString.charAt(0);
+            TimeUnit unit = TimeUtils.convertTimeUnit(ssched.getFrequencyunit());
             String msg = "[unknown frequency]";
-            switch (frequencyUnit) {
-            case 's':
-                msg = String.valueOf(ssched.getFrequencyvalue()) + " seconds";
-                break;
-            case 'm':
-                msg = String.valueOf(ssched.getFrequencyvalue()) + " minutes";
-                break;
-            case 'h':
-                msg = String.valueOf(ssched.getFrequencyvalue()) + " hours";
-                break;
+            if (unit != null) {
+                msg = String.format("%s %s", ssched.getFrequencyvalue(), unit.name().toLowerCase());
             }
             logLines.put("snapshot-schedule1", "Automatic snapshots enabled, saved to " + VoltDB.instance().getSnapshotPath() +
                          " and named with prefix '" + ssched.getPrefix() + "'.");
@@ -542,6 +538,20 @@ public class CatalogContext {
             }
         }
         return m_memoizedDeployment;
+    }
+
+    /**
+     * Safe wrapper around the above. Various unit tests set up an
+     * empty m_deploymentBytes, which getDeployment cannot deal with.
+     * This variant does a precheck; it should be used only if the
+     * caller is prepared to handle a null return.
+     */
+    public DeploymentType getDeploymentSafely() {
+        byte[] b = m_catalogInfo.m_deploymentBytes;
+        if (b == null || b.length == 0) {
+            return null;
+        }
+        return getDeployment();
     }
 
     /**

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -79,6 +79,15 @@ public class LowImpactDeleteNT extends VoltNTSystemProcedure {
                 return null;
             }
         }
+    }
+
+    public static interface ResultTable {
+        public static final String ROWS_DELETED = "ROWS_DELETED";
+        public static final String ROWS_LEFT = "ROWS_LEFT";
+        public static final String DELETED_LAST_ROUND = "DELETED_LAST_ROUND";
+        public static final String LAST_DELETE_TIMESTAMP = "LAST_DELETE_TIMESTAMP";
+        public static final String STATUS = "STATUS";
+        public static final String MESSAGE = "MESSAGE";
     }
 
     Table getValidatedTable(CatalogContext ctx, String tableName) {
@@ -212,12 +221,12 @@ public class LowImpactDeleteNT extends VoltNTSystemProcedure {
             long maxFrequency,
             long interval)
     {
-        VoltTable returnTable = new VoltTable(new ColumnInfo("ROWS_DELETED", VoltType.BIGINT),
-                                new ColumnInfo("ROWS_LEFT", VoltType.BIGINT),
-                                new ColumnInfo("DELETED_LAST_ROUND", VoltType.BIGINT),
-                                new ColumnInfo("LAST_DELETE_TIMESTAMP", VoltType.BIGINT),
-                                new ColumnInfo("STATUS", VoltType.BIGINT),
-                                new ColumnInfo("MESSAGE", VoltType.STRING));
+        VoltTable returnTable = new VoltTable(new ColumnInfo(ResultTable.ROWS_DELETED, VoltType.BIGINT),
+                                new ColumnInfo(ResultTable.ROWS_LEFT, VoltType.BIGINT),
+                                new ColumnInfo(ResultTable.DELETED_LAST_ROUND, VoltType.BIGINT),
+                                new ColumnInfo(ResultTable.LAST_DELETE_TIMESTAMP, VoltType.BIGINT),
+                                new ColumnInfo(ResultTable.STATUS, VoltType.BIGINT),
+                                new ColumnInfo(ResultTable.MESSAGE, VoltType.STRING));
 
         // collect all the validated info and metadata needed
         // these throw helpful errors if they run into problems

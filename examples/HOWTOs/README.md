@@ -13,6 +13,7 @@ Development:
  * [Export Stream data to a Procedure](StreamToProcedure.md)
  * [Configure Kafka Export Connector and Kafka Importer](kafka/KafkaExample.md)
  * [Start and Maintain an XDCR Cluster](xdcr_tutorial.md)
+ * [Use the Client2 API for asynchrononous applications](AsyncWithClient2.md)
 
 Administration:
 ---------------
@@ -29,4 +30,4 @@ Administration:
  * [Configure Logging](ConfigureLogging.md)
  * [Configure Kafka Importer and Exporter for Kerberos](kafka_kerberos/README.md)
 --------------------------------------------------------------------------------------
-If there's something you'd like to see here, please let us know at support@voltdb.com.
+If there's something you'd like to see here, please let us know at support@voltactivedata.com.

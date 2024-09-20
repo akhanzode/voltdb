@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -36,6 +36,7 @@ import org.voltdb.client.ClientResponse;
 import org.voltdb.client.NullCallback;
 import org.voltdb.client.ProcCallException;
 import org.voltdb.compiler.VoltProjectBuilder;
+import org.voltdb.types.TimestampType;
 import org.voltdb.utils.MiscUtils;
 import org.voltdb_testprocs.regressionsuites.malicious.GoSleep;
 
@@ -123,43 +124,24 @@ public class TestSystemProcedureSuite extends RegressionSuite {
                         " %s_WITH_EXTERNAL_ASSUME_UNIQUE_ID " +
                         " ON %s_WITH_EXTERNAL_ASSUME_UNIQUE (ID);\n",
             },
-
             { "_WITH_EXTERNAL_NONUNIQUE", // 13
                 "",
                 " CREATE INDEX %s_WITH_EXTERNAL_NONUNIQUE ON %s_WITH_EXTERNAL_NONUNIQUE (ID);\n",
             },
-
             { "_WITH_ANONYMOUS_ALTPK", // 14
                 ", PRIMARY KEY (NONID)\n",
                 "",
             },
-
-            { "_WITH_NAMED_LIMIT_ROWS_100", // 15
-                ", CONSTRAINT %s_NAMED LIMIT PARTITION ROWS 100\n",
-                "",
-            },
-            { "_WITH_ANONYMOUS_LIMIT_ROWS_100", // 16
-                ", LIMIT PARTITION ROWS 100\n",
-                "",
-            },
-            { "_WITH_NAMED_LIMIT_ROWS_1000", // 17
-                ", CONSTRAINT %s_NAMED LIMIT PARTITION ROWS 1000\n",
-                "",
-            },
-            { "_WITH_ANONYMOUS_LIMIT_ROWS_1000", // 18
-                ", LIMIT PARTITION ROWS 1000\n",
-                "",
-            },
-            { "_WITH_PARTIAL_INDEX", // 19
+            { "_WITH_PARTIAL_INDEX", // 15
                 "",
                 " CREATE INDEX %s_WITH_PARTIAL_INDEX ON %s_WITH_PARTIAL_INDEX (ID) WHERE ID > 0;\n",
             },
-            { "_WITH_ALT_PARTITIONING", // 1
+            { "_WITH_ALT_PARTITIONING", // 16
                 "",
                 " PARTITION TABLE %s_WITH_ALT_PARTITIONING ON COLUMN NONID;",
             },
-            { "_WITH_MANY_FEATURES", // 20
-              ", PRIMARY KEY (ID), UNIQUE (NONID, NAME), LIMIT PARTITION ROWS 1000",
+            { "_WITH_MANY_FEATURES", // 17
+              ", PRIMARY KEY (ID), UNIQUE (NONID, NAME),",
               " CREATE INDEX %s_WITH_MANY_FEATURES ON %s_WITH_MANY_FEATURES (NONID / 2); "
               + "CREATE INDEX %s_PARTIAL_WITH_MANY_FEATURES ON %s_WITH_MANY_FEATURES (NONID / 3) WHERE NONID > 1000;",
             }
@@ -327,10 +309,11 @@ public class TestSystemProcedureSuite extends RegressionSuite {
             schema.append("CREATE TABLE ").append(tableName)
             .append(" (\n" +
                     "  NAME VARCHAR(32 BYTES) NOT NULL,\n" +
+                    "  TS TIMESTAMP DEFAULT NOW() NOT NULL," +
                     "  PRICE FLOAT," +
                     "  NONID INTEGER NOT NULL," +
-                    "  ID INTEGER NOT NULL ").append(internalExtras)
-            .append(") USING TTL 10 SECONDS ON COLUMN ID;\n")
+                    "  ID INTEGER NOT NULL").append(internalExtras)
+            .append(") USING TTL 10 SECONDS ON COLUMN TS;\n")
             .append(externalExtras);
         }
         //*enable to debug*/ System.out.println(schema.toString());
@@ -787,9 +770,16 @@ public class TestSystemProcedureSuite extends RegressionSuite {
         }
     }
 
-    private static final Object[][] THE_SWAP_CONTENTS = {{"1", 1.0, 1, 1}};
+    private static final Object[][] THE_SWAP_CONTENTS =
+        {
+            {"1", new TimestampType(), 1.0, 1, 1}
+        };
     private static final int THE_SWAP_COUNT = 1;
-    private static final Object[][] OTHER_SWAP_CONTENTS = {{"2", null, 2, 2}, {"3", 3.0, 3, 3}};
+    private static final Object[][] OTHER_SWAP_CONTENTS =
+        {
+            {"2", new TimestampType(), null, 2, 2},
+            {"3", new TimestampType(), 3.0, 3, 3}
+        };
     private static final int OTHER_SWAP_COUNT = 2;
 
     private void populateSwappyTables(Client client, String thisTable, String thatTable) throws Exception {
@@ -829,9 +819,7 @@ public class TestSystemProcedureSuite extends RegressionSuite {
                         (ii == 6 && jj == 7) || (ii == 7 && jj == 6) ||
                         (ii == 9 && jj == 10) || (ii == 10 && jj == 9) ||
                         (ii == 9 && jj == 11) || (ii == 11 && jj == 9) ||
-                        (ii == 10 && jj == 11) || (ii == 11 && jj == 10) ||
-                        (ii == 15 && jj == 16) || (ii == 16 && jj == 15) ||
-                        (ii == 17 && jj == 18) || (ii == 18 && jj == 17)) {
+                        (ii == 10 && jj == 11) || (ii == 11 && jj == 10)) {
 
                     VoltTable[] results;
 

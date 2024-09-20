@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -156,9 +156,16 @@ void AbstractDRTupleStream::openTransactionCommon(int64_t spHandle, int64_t uniq
 
 void AbstractDRTupleStream::commitTransactionCommon()
 {
+    vassert(m_committedTxnId <= m_openTxnId);
     m_committedTxnId = m_openTxnId;
     m_committedUniqueId = m_openUniqueId;
+    vassert(m_committedSequenceNumber <= m_openSequenceNumber);
     m_committedSequenceNumber = m_openSequenceNumber;
 
     m_opened = false;
+}
+
+void AbstractDRTupleStream::reportDRBuffer(const char *reason, const char *buffer, size_t size)
+{
+    ExecutorContext::getPhysicalTopend()->reportDRBuffer(m_partitionId, reason, buffer, size);
 }

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -140,7 +140,7 @@ public class HTTPBenchmark {
         @Option(desc = "Filename to write raw summary statistics to.")
         String statsfile = "";
 
-        @Option(desc = "disable client affinity.")
+        @Option(desc = "disable client affinity (as of V11, this has no effect).")
         boolean noclientaffinity = false;
 
         @Option(desc = "user id.")
@@ -208,7 +208,6 @@ public class HTTPBenchmark {
 
         ClientConfig clientConfig = new ClientConfig(config.username, config.password);
         clientConfig.setReconnectOnConnectionLoss(true);
-        clientConfig.setClientAffinity(!config.noclientaffinity);
         if (config.kerberos) {
             clientConfig.enableKerberosAuthentication("VoltDBClient");
         }

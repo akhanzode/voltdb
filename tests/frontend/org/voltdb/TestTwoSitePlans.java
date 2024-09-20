@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -73,7 +73,7 @@ public class TestTwoSitePlans extends TestCase {
     @SuppressWarnings("deprecation")
     @Override
     public void setUp() throws IOException, InterruptedException, ExecutionException {
-        VoltDB.instance().readBuildInfo("Test");
+        VoltDB.instance().readBuildInfo();
 
         // compile a catalog
         String testDir = BuildDirectoryUtils.getBuildDirectoryPath();
@@ -126,6 +126,9 @@ public class TestTwoSitePlans extends TestCase {
                                 "",
                                 0,
                                 64*1024,
+                                false,
+                                -1,
+                                false,
                                 100,
                                 new HashinatorConfig(configBytes, 0, 0), true));
             }
@@ -146,6 +149,9 @@ public class TestTwoSitePlans extends TestCase {
                                 "",
                                 0,
                                 64*1024,
+                                false,
+                                -1,
+                                false,
                                 100,
                                 new HashinatorConfig(configBytes, 0, 0), false));
             }

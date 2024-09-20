@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -361,6 +361,8 @@ public class RejoinProducer extends JoinProducerBase {
                 Map<String, Map<Integer, ExportSnapshotTuple>> exportSequenceNumbers = null;
                 Map<Integer, Long> drSequenceNumbers = null;
                 Map<Integer, Map<Integer, Map<Integer, DRSiteDrIdTracker>>> allConsumerSiteTrackers = null;
+                Map<Byte, byte[]> drCatalogCommands = null;
+                Map<Byte, String[]> replicableTables = null;
                 long clusterCreateTime = -1;
                 try {
                     event = m_snapshotCompletionMonitor.get();
@@ -371,6 +373,8 @@ public class RejoinProducer extends JoinProducerBase {
                     drSequenceNumbers = event.drSequenceNumbers;
                     allConsumerSiteTrackers = event.drMixedClusterSizeConsumerState;
                     clusterCreateTime = event.clusterCreateTime;
+                    drCatalogCommands = event.drCatalogCommands;
+                    replicableTables = event.replicableTables;
 
                     // Tells EE which DR version going to use
                     if (event.drVersion != 0) {
@@ -399,6 +403,8 @@ public class RejoinProducer extends JoinProducerBase {
                         exportSequenceNumbers,
                         drSequenceNumbers,
                         allConsumerSiteTrackers,
+                        drCatalogCommands,
+                        replicableTables,
                         true /* requireExistingSequenceNumbers */,
                         clusterCreateTime);
             }

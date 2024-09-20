@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -61,7 +61,6 @@ import org.voltdb.catalog.Database;
 import org.voltdb.catalog.Function;
 import org.voltdb.catalog.FunctionParameter;
 import org.voltdb.catalog.Index;
-import org.voltdb.catalog.Statement;
 import org.voltdb.catalog.Table;
 import org.voltdb.catalog.TimeToLive;
 import org.voltdb.common.Constants;
@@ -88,6 +87,8 @@ import org.voltdb.compiler.statements.ReplicateTable;
 import org.voltdb.compiler.statements.SetGlobalParam;
 import org.voltdb.compiler.statements.VoltDBStatementProcessor;
 import org.voltdb.compilereport.TableAnnotation;
+import org.voltdb.e3.topics.TopicProperties;
+import org.voltdb.exportclient.ExportRowSchema;
 import org.voltdb.expressions.AbstractExpression;
 import org.voltdb.expressions.AbstractExpression.UnsafeOperatorsForDDL;
 import org.voltdb.expressions.ExpressionUtil;
@@ -100,7 +101,6 @@ import org.voltdb.parser.SQLParser;
 import org.voltdb.planner.AbstractParsedStmt;
 import org.voltdb.planner.ParsedSelectStmt;
 import org.voltdb.plannerv2.utils.DropTableUtils;
-import org.voltdb.serdes.EncodeFormat;
 import org.voltdb.sysprocs.AdHocNTBase;
 import org.voltdb.types.ConstraintType;
 import org.voltdb.types.ExpressionType;
@@ -130,7 +130,7 @@ public class DDLCompiler {
     private final MaterializedViewProcessor m_mvProcessor;
     private static final AbstractExpression NOT_MIGRATING =
             new OperatorExpression(ExpressionType.OPERATOR_NOT,
-                    new FunctionExpression("migrating", null,   // MIGRATING() function
+                    new FunctionExpression("migrating", null, null,   // MIGRATING() function
                             FunctionForVoltDB.FunctionDescriptor.FUNC_VOLT_MIGRATING),
                     null);
 
@@ -159,14 +159,8 @@ public class DDLCompiler {
 
     private final HashMap<Table, String> m_matViewMap = new HashMap<>();
 
-    /** A cache of the XML used to do validation on LIMIT DELETE statements
-     * Preserved here to avoid having to re-parse for planning */
-    private final Map<Statement, VoltXMLElement> m_limitDeleteStmtToXml = new HashMap<>();
-
     // Resolve classes using a custom loader. Needed for catalog version upgrade.
     private final ClassLoader m_classLoader;
-
-    private final Set<String> tableLimitConstraintCounter = new HashSet<>();
 
     // Meta columns for DR conflicts table
     public static String DR_ROW_TYPE_COLUMN_NAME = "ROW_TYPE";
@@ -246,7 +240,7 @@ public class DDLCompiler {
                                 .addNextProcessor(new CreateTask(this))
                                 .addNextProcessor(new DropTask(this))
                                 .addNextProcessor(new AlterTask(this))
-                                // CatchAllVoltDBStatement need to be the last processor in the chain.
+                                // CatchAllVoltDBStatement needs to be the last processor in the chain.
                                 .addNextProcessor(new CatchAllVoltDBStatement(this, m_voltStatementProcessor));
     }
 
@@ -340,6 +334,8 @@ public class DDLCompiler {
         protected static final String DR = "DR";
         protected static final String TASK = "TASK";
         protected static final String AGGREGATE = "AGGREGATE";
+        protected static final String TOPIC = "TOPIC";
+        protected static final String OPAQUE = "OPAQUE";
     }
 
     public void loadSchemaWithFiltering(Reader reader, final Database db, final DdlProceduresToLoad whichProcs, SQLParser.FileInfo fileInfo)
@@ -545,23 +541,24 @@ public class DDLCompiler {
         loadSchema(reader, db, previousDBIfAny, whichProcs, false);
     }
 
-    private void applyDiff(VoltXMLDiff stmtDiff) throws VoltCompilerException
+    private void applyDiff(VoltXMLDiff stmtDiff, final Database db) throws VoltCompilerException
     {
         // record which tables changed
         for (Map.Entry<String, VoltXMLDiff> entry : stmtDiff.getChangedNodes().entrySet()) {
             String tableName = entry.getKey();
             assert(tableName.startsWith("table"));
             tableName = tableName.substring("table".length());
-            if (!validatePersistentExport(entry.getValue())) {
-                throw m_compiler.new VoltCompilerException(String.format("The export target on table %s cann't be altered", tableName));
-            }
-
+            validatePersistentExport(tableName, entry.getValue());
             m_compiler.markTableAsDirty(tableName);
         }
         for (VoltXMLElement tableXML : stmtDiff.getRemovedNodes()) {
             String tableName = tableXML.attributes.get("name");
             assert(tableName != null);
             m_compiler.markTableAsDirty(tableName);
+            Table table = db.getTables().get(tableName);
+            if (table != null && StringUtils.isNotBlank(table.getTopicname())) {
+                throw m_compiler.new VoltCompilerException(String.format("The table %s is used by topic, cannot be dropped", tableName));
+            }
         }
         for (VoltXMLElement tableXML : stmtDiff.getAddedNodes()) {
             String tableName = tableXML.attributes.get("name");
@@ -613,22 +610,31 @@ public class DDLCompiler {
         }
     }
 
-    private boolean validatePersistentExport(VoltXMLDiff stmtdiff) {
-        String addedTarget = null;
-        for (VoltXMLElement persistentXML : stmtdiff.getAddedNodes()) {
-            if (PersistentExport.PERSISTENT_EXPORT.equals(persistentXML.name)) {
-                addedTarget = persistentXML.attributes.get("target");
-                break;
+    private void validatePersistentExport(String tableName, VoltXMLDiff stmtdiff) throws VoltCompilerException {
+        VoltXMLElement added = findPersistentExport(stmtdiff.getAddedNodes());
+        VoltXMLElement removed = findPersistentExport(stmtdiff.getRemovedNodes());
+        if (added == null || removed == null) {
+            return; // accepted
+        }
+
+        boolean addedTopic = Boolean.parseBoolean(added.attributes.get("isTopic"));
+        boolean removedTopic = Boolean.parseBoolean(removed.attributes.get("isTopic"));
+        String addedName =  added.attributes.get("target");
+        String removedName = removed.attributes.get("target");
+        if (addedTopic ^ removedTopic || !addedName.equalsIgnoreCase(removedName)) {
+            String type = removedTopic ? "topic" : "target";
+            throw m_compiler.new VoltCompilerException(String.format("The export %s on table %s cannot be altered",
+                                                                     type, tableName));
+        }
+    }
+
+    private VoltXMLElement findPersistentExport(List<VoltXMLElement> nodes) {
+        for (VoltXMLElement node : nodes) {
+            if (PersistentExport.PERSISTENT_EXPORT.equals(node.name)) {
+                return node;
             }
         }
-        if (addedTarget != null) {
-            for (VoltXMLElement persistentXML : stmtdiff.getRemovedNodes()) {
-                if (PersistentExport.PERSISTENT_EXPORT.equals(persistentXML.name)) {
-                    return (addedTarget.equalsIgnoreCase(persistentXML.attributes.get("target")));
-                }
-            }
-        }
-        return true;
+        return null;
     }
 
     /**
@@ -678,14 +684,12 @@ public class DDLCompiler {
             // check the table portion
             String tableName = checkIdentifierStart(statementMatcher.group(1), statement);
             String targetName = null;
+            String topicName = null;
+            String keyColumnNames = null;
+            String valueColumnNames = null;
             String columnName = null;
-            boolean isTopic = false;
-            String topicProfileName = null;
-            String topicFormatName = null;
-            String topicKeyColumnNames = null;
-            String topicAllowedRoleNames = null;
 
-            // Parse the EXPORT, PARTITION, and AS TOPIC clauses.
+            // Parse the EXPORT and PARTITION captures.
             if ((statementMatcher.groupCount() > 1) &&
                 (statementMatcher.group(2) != null) &&
                 (!statementMatcher.group(2).isEmpty())) {
@@ -697,15 +701,23 @@ public class DDLCompiler {
 
                     if (matcher.group(SQLParser.CAPTURE_EXPORT_TARGET) != null) {
                         // Add target info if it's an Export clause. Only one is allowed
-                        if (targetName != null) {
+                        if (targetName != null || topicName != null) {
                             throw m_compiler.new VoltCompilerException(
                                 "Only one Export clause is allowed for CREATE STREAM.");
                         }
-                        else if (isTopic) {
-                            throw m_compiler.new VoltCompilerException(
-                                    "An EXPORT clause is not allowed with an AS TOPIC clause.");
-                        }
                         targetName = matcher.group(SQLParser.CAPTURE_EXPORT_TARGET);
+                    }
+                    else if (matcher.group(SQLParser.CAPTURE_EXPORT_TOPIC) != null) {
+                        // Add target info if it's an Export clause. Only one is allowed
+                        if (targetName != null || topicName != null) {
+                            throw m_compiler.new VoltCompilerException(
+                                "Only one Export clause is allowed for CREATE STREAM.");
+                        }
+                        topicName = matcher.group(SQLParser.CAPTURE_EXPORT_TOPIC);
+
+                        // Add optional clauses
+                        keyColumnNames = matcher.group(SQLParser.CAPTURE_TOPIC_KEY_COLUMNS);
+                        valueColumnNames = matcher.group(SQLParser.CAPTURE_TOPIC_VALUE_COLUMNS);
                     }
                     else if (matcher.group(SQLParser.CAPTURE_STREAM_PARTITION_COLUMN) != null) {
                         // Add partition info if it's a PARTITION clause. Only one is allowed.
@@ -715,24 +727,10 @@ public class DDLCompiler {
                         }
                         columnName = matcher.group(SQLParser.CAPTURE_STREAM_PARTITION_COLUMN);
                     }
-                    else {
-                        // Note: AS TOPIC subclauses are optional but ordered without repetition
-                        if (targetName != null) {
-                            throw m_compiler.new VoltCompilerException(
-                                    "An AS TOPIC clause is not allowed with an EXPORT clause.");
-                        }
-                        if (isTopic) {
-                            throw m_compiler.new VoltCompilerException(
-                                    "Only one AS TOPIC clause is allowed or CREATE STREAM.");
-                        }
-                        isTopic = true;
-                        topicProfileName = matcher.group(SQLParser.CAPTURE_TOPIC_PROFILE);
-                        topicFormatName = matcher.group(SQLParser.CAPTURE_TOPIC_FORMAT);
-                        topicKeyColumnNames = matcher.group(SQLParser.CAPTURE_TOPIC_KEY_COLUMNS);
-                        topicAllowedRoleNames = matcher.group(SQLParser.CAPTURE_TOPIC_ALLOWED_ROLES);
-                    }
                 }
             }
+
+            // Update table
             VoltXMLElement tableXML = m_schema.findChild("table", tableName.toUpperCase());
             if (tableXML != null) {
                 tableXML.attributes.put("stream", "true");
@@ -740,6 +738,7 @@ public class DDLCompiler {
                 throw m_compiler.new VoltCompilerException(String.format(
                         "Invalid STREAM statement: table %s does not exist", tableName));
             }
+
             // process partition if specified
             if (columnName != null) {
                 tableXML.attributes.put("partitioncolumn", columnName.toUpperCase());
@@ -749,75 +748,175 @@ public class DDLCompiler {
                 m_compiler.markTableAsDirty(tableName);
             }
 
-            // process export
+            // process export to target
             targetName = (targetName != null) ? checkIdentifierStart(
                     targetName, statement) : Constants.CONNECTORLESS_STREAM_TARGET_NAME;
 
             if (tableXML.attributes.containsKey("drTable") && "ENABLE".equals(tableXML.attributes.get("drTable"))) {
                 throw m_compiler.new VoltCompilerException(String.format(
                         "Invalid CREATE STREAM statement: table %s is a DR table.", tableName));
-            } else if (!isTopic) {
+            } else {
                 tableXML.attributes.put("export", targetName);
             }
 
-            // process topic - note that the list attributes are copied raw (i.e. with inner spaces)
-            if (isTopic) {
-                tableXML.attributes.put("topic", "true");
-                if (topicProfileName != null) {
-                    tableXML.attributes.put(SQLParser.CAPTURE_TOPIC_PROFILE, topicProfileName.trim().toUpperCase());
-                }
-                if (topicFormatName != null) {
-                    tableXML.attributes.put(SQLParser.CAPTURE_TOPIC_FORMAT, topicFormatName.trim().toUpperCase());
-                }
-                if (topicKeyColumnNames != null) {
-                    tableXML.attributes.put(SQLParser.CAPTURE_TOPIC_KEY_COLUMNS, topicKeyColumnNames.trim().toUpperCase());
-                }
-                if (topicAllowedRoleNames != null) {
-                    tableXML.attributes.put(SQLParser.CAPTURE_TOPIC_ALLOWED_ROLES, topicAllowedRoleNames.trim().toUpperCase());
-                }
+            // process export to topic - note it erases the connector information
+            if (topicName != null) {
+                tableXML.attributes.put("topicName", topicName);
+                tableXML.attributes.remove("export");
 
+                if (keyColumnNames != null) {
+                    tableXML.attributes.put("topicKeyColumnNames", keyColumnNames);
+                }
+                if (valueColumnNames != null) {
+                    tableXML.attributes.put("topicValueColumnNames", valueColumnNames);
+                }
             }
         } else {
             throw m_compiler.new VoltCompilerException(String.format("Invalid CREATE STREAM statement: \"%s\", "
                     + "expected syntax: CREATE STREAM <table> [PARTITION ON COLUMN <column-name>] [EXPORT TO TARGET <target>] (column datatype, ...); "
-                    + "or CREATE STREAM <table> PARTITION ON COLUMN <column-name> AS TOPIC [PROFILE <profile>] [FORMAT <format>] [KEYS <keys>] [ALLOW <roles>] (column datatype, ...);",
+                    + "or CREATE STREAM <table> PARTITION ON COLUMN <column-name> (column datatype, ...);",
                     statement.substring(0, statement.length() - 1)));
         }
     }
 
     /**
-     * Process a VoltDB-specific create table ... migrate to target ... DDL statement.
+     * Process a VoltDB-specific 'create table ... migrate/export to target/topic ...' DDL statement.
      * @param stmt
      * @throws VoltCompilerException
      */
     private void processCreateTableStatement(DDLStatement stmt) throws VoltCompilerException {
         final String statement = stmt.statement;
-        Matcher statementMatcher = SQLParser.matchCreateTableMigrateTo(statement);
-        if (statementMatcher.matches()) {
-            // if we have migrate to target clause
-            if ((statementMatcher.groupCount() > 1) &&
-                    (statementMatcher.group(2) != null) &&
-                    (!statementMatcher.group(2).isEmpty())) {
-                String tableName = checkIdentifierStart(statementMatcher.group(1), statement);
-                String targetName = checkIdentifierStart(statementMatcher.group(2), statement);
-
-                VoltXMLElement tableXML = m_schema.findChild("table", tableName.toUpperCase());
-                if (tableXML == null) {
-                    throw m_compiler.new VoltCompilerException(String.format(
-                            "Invalid DDL statement: table %s does not exist", tableName));
-                }
-
-                tableXML.attributes.put("migrateExport", targetName);
-            }
+        // If a plain 'create table' without migrate or export clause
+        Matcher matcher = SQLParser.matchCreateTablePlain(statement);
+        if (matcher.matches()) {
+            // Nothing needed here
             return;
         }
-        // if we have export to target clause
-        statementMatcher = SQLParser.matchCreateTableExportTo(statement);
-        if (!statementMatcher.matches()) {
-            throw m_compiler.new VoltCompilerException(String.format("Invalid CREATE TABLE statement: \"%s\", "
-                            + "expected syntax: CREATE TABLE <table> [MIGRATE/EXPORT TO TARGET <target>] (column datatype, ...); ",
-                    statement.substring(0, statement.length() - 1)));
+        // If we have 'migrate to target' clause
+        matcher = SQLParser.matchCreateTableMigrateToTarget(statement);
+        if (matcher.matches()) {
+            VoltXMLElement tableXML = matchedTableXML(matcher, statement);
+            String targetName = checkIdentifierStart(matcher.group(2), statement);
+            tableXML.attributes.put("migrateExport", targetName);
+            return;
         }
+        // If we have 'migrate to topic' clause
+        matcher = SQLParser.matchCreateTableMigrateToTopic(statement);
+        if (matcher.matches()) {
+            VoltXMLElement tableXML = matchedTableXML(matcher, statement);
+            String topicName = checkIdentifierStart(matcher.group(2), statement);
+            tableXML.attributes.put("migrateExport", topicName);
+            tableXML.attributes.put("topicName", topicName);
+            saveKeysAndValues(matcher, tableXML);
+            return;
+        }
+        // If we have 'export to target' clause
+        matcher = SQLParser.matchCreateTableExportToTarget(statement);
+        if (matcher.matches()) {
+            VoltXMLElement tableXML = matchedTableXML(matcher, statement);
+            String targetName = checkIdentifierStart(matcher.group(2), statement);
+            // Nothing stored here - syntax check only
+            // Triggers are available through the PersistentExport node
+            return;
+        }
+        // If we have 'export to topic' clause
+        matcher = SQLParser.matchCreateTableExportToTopic(statement);
+        if (matcher.matches()) {
+            VoltXMLElement tableXML = matchedTableXML(matcher, statement);
+            String topicName = checkIdentifierStart(matcher.group(2), statement);
+            tableXML.attributes.put("topicName", topicName);
+            saveKeysAndValues(matcher, tableXML);
+            // Triggers are available through the PersistentExport node
+            return;
+        }
+        // No matching variant: try and refine the error message (a little hacky but it seems
+        // better than spitting out a message with the entire syntax)
+        String syntax = "CREATE TABLE name";
+        List<String> words = Arrays.asList(statement.toUpperCase().split("\\s+"));
+        boolean migrate = words.contains("MIGRATE");
+        boolean export = words.contains("EXPORT");
+        boolean target = words.contains("TARGET");
+        boolean topic = words.contains("TOPIC");
+        if (migrate ^ export && target ^ topic) { // if intent is clearly one type
+            syntax += (export ? " EXPORT TO" : " MIGRATE TO") +
+                      (topic ? " TOPIC name" : " TARGET name") +
+                      (export ? " [ON trigger,...]" : "") +
+                      (topic ? " [WITH KEY (key,...) VALUE (value,...)]" : "");
+        } else { // abbreviated complete syntax
+            syntax += " [EXPORT|MIGRATE TO TARGET|TOPIC name] [options]";
+        }
+        syntax += " (column datatype, ...);";
+        throw m_compiler.new VoltCompilerException(String.format("Invalid CREATE TABLE statement: \"%s\" expected syntax: %s",
+                                                                  statement.substring(0, statement.length() - 1), syntax));
+    }
+
+    private VoltXMLElement matchedTableXML(Matcher matcher, String statement) throws VoltCompilerException {
+        String tableName = checkIdentifierStart(matcher.group(1), statement);
+        VoltXMLElement tableXML = m_schema.findChild("table", tableName.toUpperCase());
+        if (tableXML == null) {
+            throw m_compiler.new VoltCompilerException(String.format("Invalid DDL statement: table %s does not exist",
+                                                                     tableName));
+        }
+        return tableXML;
+    }
+
+    private void saveKeysAndValues(Matcher matcher, VoltXMLElement tableXML) {
+        String keys = matcher.group(SQLParser.CAPTURE_TOPIC_KEY_COLUMNS);
+        String values= matcher.group(SQLParser.CAPTURE_TOPIC_VALUE_COLUMNS);
+        if (keys != null) {
+            tableXML.attributes.put("topicKeyColumnNames", keys);
+        }
+        if (values != null) {
+            tableXML.attributes.put("topicValueColumnNames", values);
+        }
+    }
+
+    /**
+     * Process a VoltDB-specific 'create view ... migrate to target/topic ...' DDL statement.
+     * @param stmt
+     * @throws VoltCompilerException
+     */
+    private void processCreateViewStatement(DDLStatement stmt) throws VoltCompilerException {
+        final String statement = stmt.statement;
+        // If we have 'migrate to target' clause
+        Matcher matcher = SQLParser.matchCreateViewMigrateToTarget(statement);
+        if (matcher.matches()) {
+            VoltXMLElement tableXML = matchedTableXML(matcher, statement);
+            String targetName = checkIdentifierStart(matcher.group(2), statement);
+            tableXML.attributes.put("migrateExport", targetName);
+            return;
+        }
+        // If we have 'migrate to topic' clause
+        matcher = SQLParser.matchCreateViewMigrateToTopic(statement);
+        if (matcher.matches()) {
+            VoltXMLElement tableXML = matchedTableXML(matcher, statement);
+            String topicName = checkIdentifierStart(matcher.group(2), statement);
+            tableXML.attributes.put("migrateExport", topicName);
+            tableXML.attributes.put("topicName", topicName);
+            saveKeysAndValues(matcher, tableXML);
+            return;
+        }
+        // No matching MIGRATE variant. Do nothing more here if not MIGRATE,
+        // else try and come up with a useful error message.
+        List<String> words = Arrays.asList(statement.toUpperCase().split("\\s+"));
+        if (!words.contains("MIGRATE")) {
+            return;
+        }
+        String syntax = "CREATE VIEW name";
+        boolean target = words.contains("TARGET");
+        boolean topic = words.contains("TOPIC");
+        if (target ^ topic) { // if intent is clearly one type
+            if (target) {
+                syntax += " MIGRATE TO TARGET name";
+            } else {
+                syntax += " MIGRATE TO TOPIC name [WITH KEY (key,...) VALUE (value,...)]";
+            }
+        } else { // abbreviated complete syntax
+            syntax += " [MIGRATE TO TARGET|TOPIC name]";
+        }
+        syntax += " (column datatype, ...) ...";
+        throw m_compiler.new VoltCompilerException(String.format("Invalid CREATE VIEW statement: \"%s\" expected syntax: %s",
+                                                                  statement.substring(0, statement.length() - 1), syntax));
     }
 
     private void checkValidPartitionTableIndex(Index index, Column partitionCol, String tableName)
@@ -941,16 +1040,34 @@ public class DDLCompiler {
                     }
                 }
             }
+            else if (!StringUtils.isBlank(table.getTopicname()) && TableType.isStream(table.getTabletype())) {
+                // Reject out of hand non-partitioned streams exporting to topics,
+                // even if the topic isn't declared yet in the deployment
+                throw m_compiler.new VoltCompilerException(String.format(
+                        "Invalid topic %s: stream %s must be partitioned", table.getTopicname(), table.getTypeName()));
+            }
         }
     }
 
     private void handleTTL(Database db) throws VoltCompilerException {
         for (Table table : db.getTables()) {
             TimeToLive ttl = table.getTimetolive().get(TimeToLiveVoltDB.TTL_NAME);
-            if (ttl != null && ttl.getTtlcolumn().getNullable()) {
-                throw m_compiler.new VoltCompilerException(
-                        "Column '" + table.getTypeName() + "." + ttl.getTtlcolumn().getName() +
-                                "' cannot be nullable for TTL.");
+            if (ttl != null) {
+                Column ttlColumn = ttl.getTtlcolumn();
+
+                // Accept nullable TTL columns in views
+                if (ttlColumn.getNullable() && !m_matViewMap.containsKey(table)) {
+                    throw m_compiler.new VoltCompilerException(
+                            "Column '" + table.getTypeName() + "." + ttlColumn.getName() +
+                                    "' cannot be nullable for TTL.");
+                }
+
+                VoltType ttlColumnType = VoltType.get((byte) ttlColumn.getType());
+                if (ttlColumnType != VoltType.TIMESTAMP) {
+                    throw m_compiler.new VoltCompilerException(
+                            "TTL column '" + table.getTypeName() + "." + ttlColumn.getName() +
+                                    "' must be of type " + VoltType.TIMESTAMP.getName());
+                }
             }
         }
     }
@@ -1060,19 +1177,24 @@ public class DDLCompiler {
                 String drTable = e.attributes.get("drTable");
                 String migrateTarget = e.attributes.get("migrateExport");
                 export = StringUtil.isEmpty(export) ? migrateTarget : export;
+                boolean isTopic = !StringUtils.isBlank(e.attributes.get("topicName"));
                 final boolean isStream = (e.attributes.get("stream") != null);
                 if (partitionCol != null) {
                     m_tracker.addPartition(tableName, partitionCol);
                 } else {
                     m_tracker.removePartition(tableName);
                 }
-                if (!StringUtil.isEmpty(export)) {
+                if (!StringUtil.isEmpty(export) && !isTopic) {
                     m_tracker.addExportedTable(tableName, export, isStream);
                 } else {
                     m_tracker.removeExportedTable(tableName, isStream);
                 }
                 if (drTable != null) {
                     m_tracker.addDRedTable(tableName, drTable);
+                }
+
+                if (isTopic) {
+                    continue;
                 }
 
                 for (VoltXMLElement subNode : e.children) {
@@ -1393,11 +1515,11 @@ public class DDLCompiler {
             // how CREATE TABLE statement is processed by Calcite.
             return;
         }
-        // create a table node in the catalog
+
+        // create a table node in the catalog, persistent until we find otherwise
         final Table table = db.getTables().add(name);
-        // set max value before return for view table
-        table.setTuplelimit(Integer.MAX_VALUE);
         table.setTabletype(TableType.PERSISTENT.get());
+
         // add the original DDL to the table (or null if it's not there)
         TableAnnotation annotation = new TableAnnotation();
         table.setAnnotation(annotation);
@@ -1414,18 +1536,13 @@ public class DDLCompiler {
         String streamTarget = node.attributes.get("export");
         final String streamPartitionColumn = node.attributes.get("partitioncolumn");
 
-        // is this a topic?
-        final boolean isTopic = Boolean.parseBoolean(node.attributes.get("topic"));
-
-        // remove assertion if persistent tables can be topics
-        assert !isTopic || (isTopic && isStream) : " a topic must be a stream";
         /*
          * FIXME: the check below is disabled because it breaks auto-generated EE tests
          * See ENG-18737
          *
          * if (!VoltDB.instance().getConfig().m_isEnterprise) {
          *   throw m_compiler.new VoltCompilerException(
-         *          String.format("STREAM %s cannot be declared AS TOPIC in community edition", name));
+         *          String.format("STREAM %s cannot be declared TOPIC in community edition", name));
          * }
          */
 
@@ -1436,13 +1553,7 @@ public class DDLCompiler {
         // any ASSUMEUNIQUE index to be UNIQUE index on replicated table. Therefore, we
         // set it according to current DDL state, then recheck table.m_isreplicated in handlePartitions().
         table.setIsreplicated(!node.attributes.containsKey("partitioncolumn"));
-        if (isStream) {
-            if(isTopic || (streamTarget != null && !Constants.CONNECTORLESS_STREAM_TARGET_NAME.equals(streamTarget))) {
-                table.setTabletype(TableType.STREAM.get());
-            } else {
-                table.setTabletype(TableType.CONNECTOR_LESS_STREAM.get());
-            }
-        }
+
         // map of index replacements for later constraint fixup
         final Map<String, String> indexReplacementMap = new TreeMap<>();
 
@@ -1452,6 +1563,11 @@ public class DDLCompiler {
         for (VoltXMLElement subNode : node.children) {
 
             if (subNode.name.equals(PersistentExport.PERSISTENT_EXPORT)) {
+                // indicates EXPORT TO TARGET|TOPIC
+                boolean isTopic = Boolean.parseBoolean(subNode.attributes.get("isTopic"));
+                if (isTopic && node.attributes.get("topicName") == null) {
+                    throw m_compiler.new VoltCompilerException("XML error, EXPORT TO TOPIC but no topic name");
+                }
                 streamTarget = subNode.attributes.get("target");
                 List<String> items= Stream.of(subNode.attributes.get("triggers").split(","))
                         .map(String::trim)
@@ -1459,6 +1575,7 @@ public class DDLCompiler {
                 int tblType = TableType.getPersistentExportTrigger(items);
                 table.setTabletype(tblType);
             }
+
             if (subNode.name.equals("columns")) {
                 int colIndex = 0;
                 for (VoltXMLElement columnNode : subNode.children) {
@@ -1518,40 +1635,23 @@ public class DDLCompiler {
             }
         }
 
+        // If table is a stream, initialize stream type
+        // If stream is a topic, it is created as a CONNECTOR_LESS_STREAM and will be changed to STREAM,
+        // if the topic is found to exist (see CatalogUtil.setTopics).
+        if (isStream) {
+            if(streamTarget != null && !Constants.CONNECTORLESS_STREAM_TARGET_NAME.equals(streamTarget)) {
+                table.setTabletype(TableType.STREAM.get());
+            } else {
+                table.setTabletype(TableType.CONNECTOR_LESS_STREAM.get());
+            }
+        }
+
         final String migratingIndexName =
                 StreamSupport.stream(((Iterable<Index>) () -> table.getIndexes().iterator()).spliterator(), false)
                         .filter(Index::getMigrating)
                         .map(Index::getTypeName)
                         .findAny()
                         .orElse(null);
-
-        final String migrationTarget = node.attributes.get("migrateExport");
-        if (!StringUtil.isEmpty(migrationTarget)) {
-            table.setMigrationtarget(migrationTarget);
-            table.setTabletype(TableType.PERSISTENT_MIGRATE.get());
-        } else if (migratingIndexName != null) {
-            throw m_compiler.new VoltCompilerException(
-                    String.format("Cannot create migrating index \"%s\" on non-migrating table \"%s\"",
-                            migratingIndexName, name));
-        }
-
-        if (ttlNode != null) {
-            TimeToLive ttl =   table.getTimetolive().add(TimeToLiveVoltDB.TTL_NAME);
-            String column = ttlNode.attributes.get("column");
-            int ttlValue = Integer.parseInt(ttlNode.attributes.get("value"));
-            ttl.setTtlunit(ttlNode.attributes.get("unit"));
-            ttl.setTtlvalue(ttlValue);
-            ttlValue = Integer.parseInt(ttlNode.attributes.get("batchSize"));
-            ttl.setBatchsize(ttlValue);
-            ttlValue = Integer.parseInt(ttlNode.attributes.get("maxFrequency"));
-            ttl.setMaxfrequency(ttlValue);
-            for (Column col : table.getColumns()) {
-                if (column.equalsIgnoreCase(col.getName())) {
-                    ttl.setTtlcolumn(col);
-                    break;
-                }
-            }
-        }
 
         // Warn user if DR table don't have any unique index.
         if (isXDCR &&
@@ -1577,6 +1677,7 @@ public class DDLCompiler {
          * Validate that each variable-length column is below the max value length,
          * and that the maximum size for the row is below the max row length.
          */
+        boolean hasTimestamp = false;
         int maxRowSize = 0;
         for (Column c : columnMap.values()) {
             VoltType t = VoltType.get((byte)c.getType());
@@ -1603,6 +1704,7 @@ public class DDLCompiler {
             } else {
                 maxRowSize += t.getLengthInBytesForFixedTypes();
             }
+            hasTimestamp |= t == VoltType.TIMESTAMP;
         }
 
         if (maxRowSize > MAX_ROW_SIZE) {
@@ -1610,9 +1712,62 @@ public class DDLCompiler {
                     " but the maximum supported row size is " + MAX_ROW_SIZE);
         }
 
-        // Add the topic-related information
-        if (isTopic) {
-            addTopicToCatalogTable(table, node, columnMap, db, m_compiler);
+        // MIGRATE TO TARGET|TOPIC
+        final String migrationTarget = node.attributes.get("migrateExport");
+        if (!StringUtil.isEmpty(migrationTarget)) {
+            table.setMigrationtarget(migrationTarget);
+            table.setTabletype(TableType.PERSISTENT_MIGRATE.get());
+        } else if (migratingIndexName != null) {
+            throw m_compiler.new VoltCompilerException(
+                    String.format("Cannot create migrating index \"%s\" on non-migrating table \"%s\"",
+                            migratingIndexName, name));
+        }
+
+        // WITH KEY/VALUE
+        String topicName = node.attributes.get("topicName");
+        if (!StringUtils.isBlank(topicName)) {
+            table.setTopicname(topicName);
+
+            // Set the optional clauses
+            Map<String, String> columnProperties = new HashMap<>();
+            String keyColumns = node.attributes.get("topicKeyColumnNames");
+            if (!StringUtils.isBlank(keyColumns)) {
+                table.setTopickeycolumnnames(keyColumns);
+                columnProperties.put(TopicProperties.Key.CONSUMER_KEY.name(), keyColumns);
+            }
+            String valueColumns = node.attributes.get("topicValueColumnNames");
+            if (!StringUtils.isBlank(valueColumns)) {
+                table.setTopicvaluecolumnnames(valueColumns);
+                columnProperties.put(TopicProperties.Key.CONSUMER_VALUE.name(), valueColumns);
+            }
+
+            // Validate the topic columns by creating a TopicProperties instance parsing the column lists
+            if (!columnProperties.isEmpty()) {
+                TopicProperties topicProperties = new TopicProperties(columnProperties);
+                validateTopicColumns(topicName, table.getTypeName(), isStream,
+                        columnMap, topicProperties.get(TopicProperties.Key.CONSUMER_KEY));
+                validateTopicColumns(topicName, table.getTypeName(), isStream,
+                        columnMap, topicProperties.get(TopicProperties.Key.CONSUMER_VALUE));
+            }
+        }
+
+        // USING TTL
+        if (ttlNode != null) {
+            TimeToLive ttl = table.getTimetolive().add(TimeToLiveVoltDB.TTL_NAME);
+            String column = ttlNode.attributes.get("column");
+            int ttlValue = Integer.parseInt(ttlNode.attributes.get("value"));
+            ttl.setTtlunit(ttlNode.attributes.get("unit"));
+            ttl.setTtlvalue(ttlValue);
+            ttlValue = Integer.parseInt(ttlNode.attributes.get("batchSize"));
+            ttl.setBatchsize(ttlValue);
+            ttlValue = Integer.parseInt(ttlNode.attributes.get("maxFrequency"));
+            ttl.setMaxfrequency(ttlValue);
+            for (Column col : table.getColumns()) {
+                if (column.equalsIgnoreCase(col.getName())) {
+                    ttl.setTtlcolumn(col);
+                    break;
+                }
+            }
         }
 
         // Temporarily assign the view Query to the annotation so we can use when we build
@@ -1622,85 +1777,48 @@ public class DDLCompiler {
         } else {
             // Get the final DDL for the table rebuilt from the catalog object
             // Don't need a real StringBuilder or export state to get the CREATE for a table
-            annotation.ddl = CatalogSchemaTools.toSchema(new StringBuilder(), table, query, isStream, streamPartitionColumn, streamTarget);
+            annotation.ddl = CatalogSchemaTools.toSchema(new StringBuilder(), table, query, isStream, streamPartitionColumn,
+                    streamTarget, topicName);
         }
     }
 
-    private static void addTopicToCatalogTable (Table table,
-                            VoltXMLElement node,
-                            Map<String, Column> columnMap,
-                            Database db,
-                            VoltCompiler compiler) throws VoltCompilerException {
-        assert node.name.equals("table");
+    /**
+     * Validate that the topic columns correspond to a existing columns in the {@link Table}
+     * <p>
+     * Note: Moved here from {@link TopicsValidator} to catch errors on CREATE STREAM
+     * even if no topics are defined in deployment.
+     *
+     * @param topicName         name of topic
+     * @param tableName         name of table
+     * @param isStream          {@code true} if table is stream
+     * @param tableColumns      map of columns defined in {@link Table}
+     * @param selectedColumns   list of selected column names in topic
+     * @throws VoltCompilerException
+     */
+    private void validateTopicColumns(String topicName, String tableName, boolean isStream,
+            Map<String, Column> tableColumns, List<String> selectedColumns) throws VoltCompilerException {
+        if (selectedColumns != null && !selectedColumns.isEmpty()) {
+            // If there is only * in the list, go for all columns.
+            if (TopicProperties.ALL_COLUMNS.equals(selectedColumns)) {
+                return;
+            }
 
-        table.setIstopic(true);
-        String topicProfileName = node.attributes.get(SQLParser.CAPTURE_TOPIC_PROFILE);
-        if (topicProfileName != null) {
-            table.setTopicprofile(topicProfileName);
-        }
-        String topicFormatName = node.attributes.get(SQLParser.CAPTURE_TOPIC_FORMAT);
-        EncodeFormat format = EncodeFormat.CSV;
-        if (topicFormatName != null) {
-            try {
-                // Parse the format in an unchecked fashion and handle exceptions
-                format = EncodeFormat.valueOf(topicFormatName);
+            for (String columnName : selectedColumns) {
+                if (tableColumns.get(columnName) == null) {
+                    if (ExportRowSchema.isMetadataColumn(columnName)) {
+                        // Accept metadata column names. TopicsValidator will complement
+                        // the checks once topic and table/stream are connected
+                        continue;
+                    }
+                    String tableType = isStream ? "stream" : "table";
+                     throw m_compiler.new VoltCompilerException(String.format(
+                            "Invalid topic %s: column %s specified in WITH clause is not defined in %s %s",
+                            topicName, columnName, tableType, tableName));
+                 }
             }
-            catch (Exception ex) {
-                throw compiler.new VoltCompilerException(
-                        String.format("%s is not a valid topic format in STREAM %s. Acceptable values are: %s",
-                                topicFormatName, table.getTypeName(), EncodeFormat.valueSet()));
-            }
-        }
-        table.setTopicformat(format.name());
-        String topicKeyColumnNames = node.attributes.get(SQLParser.CAPTURE_TOPIC_KEY_COLUMNS);
-        if (topicKeyColumnNames != null) {
-            List<String> definedColumns = new ArrayList<>();
-            for (String col : CatalogUtil.splitOnCommas(topicKeyColumnNames)) {
-                if (StringUtils.isBlank(col)) {
-                    throw compiler.new VoltCompilerException(String
-                            .format("Blank column listed in the KEYS attribute of STREAM %s", table.getTypeName()));
-                }
-                if (definedColumns.contains(col)) {
-                    // Do not tolerate any ambiguous key topic definition
-                    throw compiler.new VoltCompilerException(
-                            String.format("Column %s is defined more than once in the KEYS attribute of STREAM %s",
-                                    col, table.getTypeName()));
-                }
-                if (!columnMap.keySet().contains(col)) {
-                    throw compiler.new VoltCompilerException(
-                            String.format("Unknown column %s defined in the KEYS attribute of STREAM %s",
-                                    col, table.getTypeName()));
-                }
-                definedColumns.add(col);
-            }
-            topicKeyColumnNames = StringUtils.join(definedColumns, ',');
-            table.setTopickeycolumnnames(topicKeyColumnNames);
-        }
-        String topicAllowedRoleNames = node.attributes.get(SQLParser.CAPTURE_TOPIC_ALLOWED_ROLES);
-        if (topicAllowedRoleNames != null) {
-            Set<String> definedRoles = new HashSet<>();
-            for (String role : CatalogUtil.splitOnCommas(topicAllowedRoleNames)) {
-                if (StringUtils.isBlank(role)) {
-                    throw compiler.new VoltCompilerException(String
-                            .format("Blank role listed in the ALLOW attribute of STREAM %s", table.getTypeName()));
-                }
-                if (definedRoles.contains(role)) {
-                    // Tolerate duplicates
-                    compiler.addWarn(String.format(
-                                "Role %s is defined more than once in the ALLOW attribute of STREAM %s",
-                                role, table.getTypeName()));
-                }
-                if (db.getGroups().get(role) == null) {
-                    throw compiler.new VoltCompilerException(
-                            String.format("Unknown role %s listed in the ALLOW attribute of STREAM %s", role,
-                                    table.getTypeName()));
-                }
-                definedRoles.add(role);
-            }
-            topicAllowedRoleNames = StringUtils.join(definedRoles, ',');
-            table.setTopicallowedrolenames(topicAllowedRoleNames);
         }
     }
+
 
     private static void addColumnToCatalog(Table table,
                             VoltXMLElement node,
@@ -2171,55 +2289,6 @@ public class DDLCompiler {
         return stringer.toString();
     }
 
-    /** Makes sure that the DELETE statement on a LIMIT PARTITION ROWS EXECUTE (DELETE ...)
-     * - Contains no parse errors
-     * - Is actually a DELETE statement
-     * - Targets the table being constrained
-     * Throws VoltCompilerException if any of these does not hold
-     * @param catStmt     The catalog statement whose sql text field is the DELETE to be validated
-     **/
-    private void validateTupleLimitDeleteStmt(Statement catStmt) throws VoltCompilerException {
-        String tableName = catStmt.getParent().getTypeName();
-        String msgPrefix = "Error: Table " + tableName + " has invalid DELETE statement for LIMIT PARTITION ROWS constraint: ";
-        VoltXMLElement deleteXml = null;
-        try {
-            // We parse the statement here and cache the XML below if the statement passes
-            // validation.
-            deleteXml = m_hsql.getXMLCompiledStatement(catStmt.getSqltext());
-            // We do not support calling user-defined functions in tuple limit delete statement.
-            // This restriction can be lifted in the future.
-            List<VoltXMLElement> exprs = deleteXml.findChildrenRecursively("function");
-            for (VoltXMLElement expr : exprs) {
-                int functionId = Integer.parseInt(expr.attributes.get("function_id"));
-                if (FunctionForVoltDB.isUserDefinedFunctionId(functionId)) {
-                    String functionName = expr.attributes.get("name");
-                    throw m_compiler.new VoltCompilerException(
-                            msgPrefix
-                            + "user defined function calls are not supported: \""
-                            + functionName
-                            + "\""
-                    );
-                }
-            }
-        } catch (HSQLInterface.HSQLParseException e) {
-            throw m_compiler.new VoltCompilerException(msgPrefix + "parse error: " + e.getMessage());
-        }
-
-        if (! deleteXml.name.equals("delete")) {
-            // Could in theory allow TRUNCATE TABLE here too.
-            throw m_compiler.new VoltCompilerException(msgPrefix + "not a DELETE statement");
-        } else if (! deleteXml.attributes.get("table").equals(tableName)) {
-            throw m_compiler.new VoltCompilerException(msgPrefix + "target of DELETE must be " + tableName);
-        }
-
-        m_limitDeleteStmtToXml.put(catStmt, deleteXml);
-    }
-
-    /** Accessor */
-    Map<Statement, VoltXMLElement> getLimitDeleteStmtToXmlEntries() {
-        return m_limitDeleteStmtToXml;
-    }
-
     /**
      * Add a constraint on a given table to the catalog
      * @param table                The table on which the constraint will be enforced
@@ -2239,24 +2308,6 @@ public class DDLCompiler {
         String tableName = table.getTypeName();
 
         switch (type) {
-            case LIMIT:
-                int tupleLimit = Integer.parseInt(node.attributes.get("rowslimit"));
-                if (tupleLimit < 0) {
-                    throw m_compiler.new VoltCompilerException("Invalid constraint limit number '" + tupleLimit + "'");
-                } else if (tableLimitConstraintCounter.contains(tableName)) {
-                    throw m_compiler.new VoltCompilerException("Too many table limit constraints for table " + tableName);
-                } else {
-                    tableLimitConstraintCounter.add(tableName);
-                }
-
-                table.setTuplelimit(tupleLimit);
-                String deleteStmt = node.attributes.get("rowslimitdeletestmt");
-                if (deleteStmt != null) {
-                    Statement catStmt = table.getTuplelimitdeletestmt().add("limit_delete");
-                    catStmt.setSqltext(deleteStmt);
-                    validateTupleLimitDeleteStmt(catStmt);
-                }
-                return;
             case CHECK:
                 m_compiler.addWarn("VoltDB does not enforce check constraints. " +
                         "Constraint on table " + tableName + " will be ignored.");
@@ -2379,7 +2430,7 @@ public class DDLCompiler {
                 VoltXMLDiff thisStmtDiff = m_hsql.runDDLCommandAndDiff(ddlStmtInfo, stmt.statement);
                 // null diff means no change (usually drop if exists for non-existent thing)
                 if (thisStmtDiff != null) {
-                    applyDiff(thisStmtDiff);
+                    applyDiff(thisStmtDiff, db);
                 }
                 // special treatment for stream syntax
                 if (ddlStmtInfo.creatStream) {
@@ -2391,6 +2442,13 @@ public class DDLCompiler {
                 if (createTable) {
                     processCreateTableStatement(stmt);
                 }
+
+                boolean createView = ddlStmtInfo.verb.equals(HSQLDDLInfo.Verb.CREATE) &&
+                        ddlStmtInfo.noun.equals(HSQLDDLInfo.Noun.VIEW);
+                if (createView) {
+                    processCreateViewStatement(stmt);
+                }
+
             } catch (HSQLParseException e) {
                 String msg = "DDL Error: \"" + e.getMessage() + "\" in statement starting on lineno: " + stmt.lineNo;
                 throw m_compiler.new VoltCompilerException(msg, stmt.lineNo);

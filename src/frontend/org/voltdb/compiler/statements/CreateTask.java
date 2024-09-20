@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2019 VoltDB Inc.
+ * Copyright (C) 2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -46,6 +46,8 @@ public class CreateTask extends StatementProcessor {
     public CreateTask(DDLCompiler ddlCompiler) {
         super(ddlCompiler);
     }
+
+    public static final String DEFAULT_ACTION_GENERATOR = SingleProcGenerator.class.getName();
 
     @Override
     protected boolean processStatement(DDLStatement ddlStatement, Database db, DdlProceduresToLoad whichProcs)
@@ -109,7 +111,7 @@ public class CreateTask extends StatementProcessor {
             int index = 0;
 
             if (generatorClass == null) {
-                task.setActiongeneratorclass(SingleProcGenerator.class.getName());
+                task.setActiongeneratorclass(DEFAULT_ACTION_GENERATOR);
                 addParameter(actionGeneratorParams, index++, matcher.group("procedure"));
             } else {
                 task.setActiongeneratorclass(generatorClass);

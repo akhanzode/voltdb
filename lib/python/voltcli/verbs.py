@@ -1,5 +1,5 @@
 # This file is part of VoltDB.
-# Copyright (C) 2008-2020 VoltDB Inc.
+# Copyright (C) 2008-2022 Volt Active Data Inc.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -17,7 +17,8 @@
 __author__ = 'scooper'
 
 import sys
-from voltdbclient import *
+
+import voltdbclient
 from voltcli import cli
 from voltcli import environment
 from voltcli import utility
@@ -36,6 +37,7 @@ class BaseVerb(object):
         self.dirty_opts = False
         self.dirty_args = False
         self.command_arguments = utility.flatten_to_list(kwargs.get('command_arguments', None))
+        self.log4j_default = utility.flatten_to_list(kwargs.get('log4j_default', None))
         utility.debug(str(self))
 
     def execute(self, runner):
@@ -341,7 +343,7 @@ class VerbSpace(object):
         self.VOLT        = VOLT
         self.scan_dirs   = scan_dirs
         self.verbs       = verbs
-        self.verb_names  = self.verbs.keys()
+        self.verb_names  = list(self.verbs.keys())
         self.verb_names.sort()
 
 #===============================================================================
@@ -356,7 +358,6 @@ class JavaBundle(object):
 
     def initialize(self, verb):
         verb.add_options(
-           cli.StringOption('-l', '--license', 'license', 'specify the location of the license file'),
            cli.StringOption(None, '--client', 'clientport', 'specify the client port as [ipaddress:]port-number'),
            cli.StringOption(None, '--internal', 'internalport', 'specify the internal port as [ipaddress:]port-number used to communicate between cluster nodes'),
            cli.StringOption(None, '--zookeeper', 'zkport', 'specify the zookeeper port as [ipaddress:]port-number'),
@@ -364,9 +365,11 @@ class JavaBundle(object):
            cli.StringOption(None, '--replication', 'replicationport', 'specify the replication port as [ipaddress:]port-number (1st of 3 sequential ports)'),
            cli.StringOption(None, '--admin', 'adminport', 'specify the admin port as [ipaddress:]port-number'),
            cli.StringOption(None, '--http', 'httpport', 'specify the http port as [ipaddress:]port-number'),
+           cli.StringOption(None, '--status', 'statusport', None), # hidden: 'specify the port used for status monitoring via http, as [ipaddress:]port-number'
            cli.StringOption(None, '--internalinterface', 'internalinterface', 'specify the network interface to use for internal communication, such as the internal and zookeeper ports'),
            cli.StringOption(None, '--externalinterface', 'externalinterface', 'specify the network interface to use for external ports, such as the admin and client ports'),
            cli.StringOption(None, '--publicinterface', 'publicinterface', 'For hosted or cloud environments with non-public interfaces, this argument specifies a publicly-accessible alias for reaching the server. Particularly useful for remote access to the VoltDB Management Center.'),
+           cli.StringOption(None, '--topicspublic', 'topicspublic', 'Specifies the interface (ipaddress[:port-number]) advertised to subscribers as the Topics interface, used in hosted environments where internal interfaces are not reachable'),
            cli.StringOption(None, '--topicsport', 'topicsport', 'specify the topics port as [ipaddress:]port-number'))
 
 
@@ -389,13 +392,9 @@ class ServerBundle(JavaBundle):
 #===============================================================================
     """
     Bundle class to run org.voltdb.VoltDB process.
-    Supports needing catalog and live keyword option for rejoin.
-    All other options are supported as common options.
+    As of V11.0, only used by 'voltdb start' command.
     """
     def __init__(self, subcommand,
-                 needs_catalog=True,
-                 supports_live=False,
-                 default_host=True,
                  safemode_available=False,
                  supports_daemon=False,
                  daemon_name=None,
@@ -403,14 +402,9 @@ class ServerBundle(JavaBundle):
                  daemon_output=None,
                  supports_multiple_daemons=False,
                  check_environment_config=False,
-                 force_voltdb_create=False,
-                 supports_paused=False,
-                 is_legacy_verb=True):
+                 supports_paused=False):
         JavaBundle.__init__(self, 'org.voltdb.VoltDB')
         self.subcommand = subcommand
-        self.needs_catalog = needs_catalog
-        self.supports_live = supports_live
-        self.default_host = default_host
         self.safemode_available = safemode_available
         self.supports_daemon = supports_daemon
         self.daemon_name = daemon_name
@@ -418,11 +412,7 @@ class ServerBundle(JavaBundle):
         self.daemon_output = daemon_output
         self.supports_multiple_daemons = supports_multiple_daemons
         self.check_environment_config = check_environment_config
-        self.force_voltdb_create = force_voltdb_create
         self.supports_paused = supports_paused
-        # this flag indicates whether or not the command is a
-        # legacy command: create, recover, rejoin, join
-        self.is_legacy_verb= is_legacy_verb
 
     def initialize(self, verb):
         JavaBundle.initialize(self, verb)
@@ -431,29 +421,11 @@ class ServerBundle(JavaBundle):
                              '''requirements to skip when start voltdb:
                  thp - Checking for Transparent Huge Pages (THP) has been disabled.  Use of THP can cause VoltDB to run out of memory. Do not disable this check on production systems.''',
                              default = None))
-        if self.is_legacy_verb:
-            verb.add_options(
-                cli.StringOption('-d', '--deployment', 'deployment',
-                                 'specify the location of the deployment file',
-                                 default = None))
         verb.add_options(
             cli.StringOption('-g', '--placement-group', 'placementgroup',
                              'placement group',
                              default = '0'))
-        if self.is_legacy_verb and self.default_host:
-            verb.add_options(cli.StringOption('-H', '--host', 'host',
-                'HOST[:PORT] (default HOST=localhost, PORT=3021)',
-                default='localhost:3021'))
-        elif self.is_legacy_verb:
-            verb.add_options(cli.StringOption('-H', '--host', 'host',
-                'HOST[:PORT] host must be specified (default HOST=localhost, PORT=3021)'))
-        if self.supports_live:
-           verb.add_options(cli.BooleanOption('-b', '--blocking', 'block', 'perform a blocking rejoin'))
-        if self.needs_catalog:
-            verb.add_arguments(cli.PathArgument('catalog',
-                               'the application catalog jar file path',
-                               min_count=0, max_count=1))
-        # --safemode only used by recover server action.
+        # --safemode only used by recover server action (on start)
         if self.safemode_available:
             verb.add_options(cli.BooleanOption(None, '--safemode', 'safemode', None))
         if self.supports_daemon:
@@ -471,65 +443,35 @@ class ServerBundle(JavaBundle):
                 cli.BooleanOption('-p', '--pause', 'paused',
                                   'Start Database in paused mode.'))
 
-        if self.force_voltdb_create:
-            verb.add_options(
-                cli.BooleanOption('-f', '--force', 'force',
-                                  'Start a new, empty database even if the VoltDB managed directories contain files from a previous session that may be overwritten.'))
-
     def go(self, verb, runner):
         if self.check_environment_config:
             incompatible_options = checkconfig.test_hard_requirements()
-            for k,v in  incompatible_options.items():
+            for k,v in  list(incompatible_options.items()):
                 state = v[0]
                 if state == 'PASS' :
                     pass
                 elif state == "WARN":
                     utility.warning(v[1])
                 elif state == 'FAIL' :
-                    if k in checkconfig.skippableRequirements.keys() and runner.opts.skip_requirements and checkconfig.skippableRequirements[k] in runner.opts.skip_requirements:
+                    if k in list(checkconfig.skippableRequirements.keys()) and runner.opts.skip_requirements and checkconfig.skippableRequirements[k] in runner.opts.skip_requirements:
                         utility.warning(v[1])
                     else:
                         utility.abort(v[1])
                 else:
                     utility.error(v[1])
-        final_args = None
-        if self.subcommand in ('create', 'recover', 'probe'):
-            if runner.opts.replica:
-                final_args = [self.subcommand, 'replica']
-        if self.supports_live:
-            if runner.opts.block:
-                final_args = [self.subcommand]
-            else:
-                final_args = ['live', self.subcommand]
-        elif final_args == None:
-            final_args = [self.subcommand]
-        if self.safemode_available:
-            if runner.opts.safemode:
-                final_args.extend(['safemode'])
-
-        if self.needs_catalog:
-            catalog = runner.opts.catalog
-            if not catalog:
-                catalog = runner.config.get('volt.catalog')
-            if not catalog is None:
-                final_args.extend(['catalog', catalog])
-
-        if self.is_legacy_verb and runner.opts.deployment:
-            final_args.extend(['deployment', runner.opts.deployment])
+        final_args = [self.subcommand]
+        if self.safemode_available and runner.opts.safemode:
+            final_args.extend(['safemode'])
         if runner.opts.placementgroup:
             final_args.extend(['placementgroup', runner.opts.placementgroup])
-        if self.is_legacy_verb and runner.opts.host:
-            final_args.extend(['host', runner.opts.host])
-        elif not self.subcommand in ('initialize', 'probe'):
-            utility.abort('host is required.')
         if runner.opts.clientport:
             final_args.extend(['port', runner.opts.clientport])
         if runner.opts.adminport:
             final_args.extend(['adminport', runner.opts.adminport])
         if runner.opts.httpport:
             final_args.extend(['httpport', runner.opts.httpport])
-        if runner.opts.license:
-            final_args.extend(['license', runner.opts.license])
+        if runner.opts.statusport:
+            final_args.extend(['statusport', runner.opts.statusport])
         if runner.opts.internalinterface:
             final_args.extend(['internalinterface', runner.opts.internalinterface])
         if runner.opts.internalport:
@@ -546,12 +488,10 @@ class ServerBundle(JavaBundle):
             final_args.extend(['drpublic', runner.opts.drpublic])
         if runner.opts.topicsport:
             final_args.extend(('topicsHostPort', runner.opts.topicsport))
-        if self.subcommand in ('create', 'initialize'):
-            if runner.opts.force:
-                final_args.extend(['force'])
-        if self.subcommand in ('create', 'probe', 'recover'):
-            if runner.opts.paused:
-                final_args.extend(['paused'])
+        if runner.opts.topicspublic:
+            final_args.extend(('topicspublic', runner.opts.topicspublic))
+        if self.supports_paused and runner.opts.paused:
+            final_args.extend(['paused'])
         if runner.args:
             final_args.extend(runner.args)
         kwargs = {}

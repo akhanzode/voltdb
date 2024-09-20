@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -22,12 +22,15 @@ import static com.google_voltpatches.common.base.Preconditions.checkArgument;
 import java.io.File;
 import java.io.IOException;
 import java.io.StringReader;
+import java.lang.reflect.Field;
 import java.util.Enumeration;
 import java.util.MissingResourceException;
 import java.util.ResourceBundle;
 
 import org.apache.log4j.Appender;
+import org.apache.log4j.DailyMaxRollingFileAppender;
 import org.apache.log4j.DailyRollingFileAppender;
+import org.apache.log4j.FileAppender;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
 import org.apache.log4j.xml.DOMConfigurator;
@@ -98,16 +101,6 @@ public class VoltLog4jLogger implements CoreVoltLogger {
     @Override
     public boolean isEnabledFor(Level level) {
         return m_logger.isEnabledFor(getPriorityForLevel(level));
-    }
-
-    @Override
-    public void l7dlog(Level level, String key, Object[] params, Throwable t) {
-        if (params == null) {
-            m_logger.l7dlog(getPriorityForLevel(level), key, t);
-        }
-        else {
-            m_logger.l7dlog(getPriorityForLevel(level), key, params, t);
-        }
     }
 
     @Override
@@ -184,13 +177,8 @@ public class VoltLog4jLogger implements CoreVoltLogger {
 
         // Make the LogManager shutdown hook the last thing to be done,
         // so that we'll get logging from any other shutdown behavior.
-        ShutdownHooks.registerFinalShutdownAction(
-                new Runnable() {
-                    @Override
-                    public void run() {
-                        LogManager.shutdown();
-                    }
-                });
+        ShutdownHooks.registerFinalShutdownAction(LogManager::shutdown);
+
         if (System.getProperty("log4j.configuration", "").toLowerCase().contains("/voltdb/tests/")) {
             return;
         }
@@ -203,23 +191,51 @@ public class VoltLog4jLogger implements CoreVoltLogger {
         File napFH = new File(logDH, "volt.log");
 
         Logger rootLogger = LogManager.getRootLogger();
-        DailyRollingFileAppender oap = null;
 
+        // This code handles both types of FileAppenders if someone is using old log4j it will still
+        // route path to voltdbroot/log/volt.log you cant have both appenders as having them is useless.
         @SuppressWarnings("unchecked")
         Enumeration<Appender> appen = rootLogger.getAllAppenders();
+        boolean dailyMax = false;
+        FileAppender fileAppendr = null;
+        // Default pattern for both.
+        String fileAppendrDatePattern = "'.'yyyy-MM-dd";
+        // Default we use change this if default changes.
+        int maxBackupIndex = 30;
         while (appen.hasMoreElements()) {
             Appender appndr = appen.nextElement();
-            if (!(appndr instanceof DailyRollingFileAppender)) continue;
-            oap = (DailyRollingFileAppender)appndr;
-            File logFH = new File(oap.getFile());
-            if (!logFH.isAbsolute()) break;
-            oap = null;
+            if (appndr instanceof DailyMaxRollingFileAppender) {
+                dailyMax = true;
+                DailyMaxRollingFileAppender oap = (DailyMaxRollingFileAppender) appndr;
+                if (oap.getFile() != null) {
+                    File logFH = new File(oap.getFile());
+                    if (!logFH.isAbsolute()) {
+                        fileAppendrDatePattern = oap.getDatePattern();
+                        fileAppendr = oap;
+                        maxBackupIndex = oap.getMaxBackupIndex();
+                        break;
+                    }
+                }
+            }
+            // For older log4j
+            if (appndr instanceof DailyRollingFileAppender) {
+                DailyRollingFileAppender oap = (DailyRollingFileAppender) appndr;
+                if (oap.getFile() != null) {
+                    File logFH = new File(oap.getFile());
+                    if (!logFH.isAbsolute()) {
+                        fileAppendrDatePattern = oap.getDatePattern();
+                        fileAppendr = oap;
+                        break;
+                    }
+                }
+            }
         }
-        if (oap == null) {
+        // We found a fileAppender that does not use absolute path or none
+        if (fileAppendr == null) {
             return;
         }
 
-        DailyRollingFileAppender nap = null;
+        FileAppender nap;
         try {
             if (!logDH.exists() && !logDH.mkdirs()) {
                 throw new IllegalArgumentException("failed to create directory " + logDH);
@@ -227,20 +243,31 @@ public class VoltLog4jLogger implements CoreVoltLogger {
             if (!logDH.isDirectory() || !logDH.canRead() || !logDH.canWrite() || !logDH.canExecute()) {
                 throw new IllegalArgumentException("Cannot access " + logDH);
             }
-            nap = new DailyRollingFileAppender(oap.getLayout(), napFH.getPath(), oap.getDatePattern());
+            if (dailyMax) {
+                DailyMaxRollingFileAppender dfa = new DailyMaxRollingFileAppender(fileAppendr.getLayout(), napFH.getPath(), fileAppendrDatePattern);
+                dfa.setMaxBackupIndex(maxBackupIndex);
+                nap = dfa;
+            } else {
+                nap = new DailyRollingFileAppender(fileAppendr.getLayout(), napFH.getPath(), fileAppendrDatePattern);
+            }
+            nap.setName(fileAppendr.getName());
+
+            rootLogger.removeAppender(fileAppendr.getName());
+            rootLogger.addAppender(nap);
         } catch (IOException e) {
-            throw new IllegalArgumentException("Failed to instantiate a DailyRollingFileAppender for file " + napFH, e);
+            throw new IllegalArgumentException("Failed to instantiate a FileAppender for file " + napFH, e);
         }
-        nap.setName(oap.getName());
 
-        rootLogger.removeAppender(oap.getName());
-        rootLogger.addAppender(nap);
-
-        File oldFH = new File(oap.getFile());
-        if (oldFH.exists() && oldFH.isFile() && oldFH.length() == 0L && oldFH.delete()) {
-            File oldDH = oldFH.getParentFile();
-            if (oldDH.list().length == 0) {
-                oldDH.delete();
+        if (fileAppendr.getFile() != null) {
+            File oldFH = new File(fileAppendr.getFile());
+            if (oldFH.exists() && oldFH.isFile() && oldFH.length() == 0L && oldFH.delete()) {
+                File oldDH = oldFH.getParentFile();
+                if (oldDH != null) {
+                    String[] files = oldDH.list();
+                    if (files != null && files.length == 0) {
+                        oldDH.delete();
+                    }
+                }
             }
         }
 
@@ -248,11 +275,62 @@ public class VoltLog4jLogger implements CoreVoltLogger {
         Enumeration<Logger> e = LogManager.getCurrentLoggers();
         while (e.hasMoreElements()) {
             Logger lgr = e.nextElement();
-            Appender apndr = lgr.getAppender(oap.getName());
+            Appender apndr = lgr.getAppender(fileAppendr.getName());
             if (apndr != null) {
-                lgr.removeAppender(oap.getName());
+                lgr.removeAppender(fileAppendr.getName());
                 lgr.addAppender(nap);
             }
         }
+    }
+
+    /**
+     * For a log4j rolling file appender, get an estimate of the next
+     * rollover time. We do this by looking at the implementation's
+     * internals.
+     *
+     * This code was originally in RealVoltDB. I moved it here when
+     * making it work with the DailyMaxRollingFileAppender as well as
+     * with the DailyRollingFileAppender. I did not write this code.
+     * It's not my fault.
+     *
+     * There are two really bad things about this: (1) the whole thing
+     * about diddling around in the internals, and (2) it's an estimate
+     * of when to check for rollover, and we treat it as when rollover
+     * will occur.
+     *
+     * @return time (msec past epoch) of next check for rollover,
+     * or -1 if anything goes wrong.
+     */
+    public static long getNextCheckTime() {
+
+        // Find first (only) file appender of whatever kind
+        FileAppender dailyAppender = null;
+        Enumeration<?> appenders = Logger.getRootLogger().getAllAppenders();
+        while (appenders.hasMoreElements()) {
+            Appender appender = (Appender) appenders.nextElement();
+            if (appender instanceof DailyMaxRollingFileAppender) {
+                dailyAppender = (FileAppender)appender;
+                break;
+            }
+            if (appender instanceof DailyRollingFileAppender) {
+                dailyAppender = (FileAppender)appender;
+                break;
+            }
+        }
+        if (dailyAppender == null) {
+            return -1;
+        }
+
+        // Grant ourselves access to the private field and then read its value
+        long nextCheck;
+        try {
+            Field field = dailyAppender.getClass().getDeclaredField("nextCheck");
+            field.setAccessible(true);
+            nextCheck = field.getLong(dailyAppender);
+        }
+        catch (NoSuchFieldException | IllegalAccessException ex) {
+            nextCheck = -1;
+        }
+        return nextCheck;
     }
 }

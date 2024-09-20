@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -63,8 +63,7 @@ void TableStreamerContext::updatePredicates(const std::vector<std::string> &pred
     std::ostringstream errmsg;
     m_predicates.clear();
     if (!m_predicates.parseStrings(predicateStrings, errmsg, m_predicateDeleteFlags)) {
-        const char* details = errmsg.str().c_str();
-        throwFatalException("TableStreamerContext() failed to parse predicate strings: %s", details);
+        throwFatalException("TableStreamerContext() failed to parse predicate strings: %s", errmsg.str().c_str());
     }
 }
 

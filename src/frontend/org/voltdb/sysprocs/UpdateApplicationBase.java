@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -43,6 +43,11 @@ import org.voltdb.VoltZK;
 import org.voltdb.catalog.Catalog;
 import org.voltdb.catalog.CatalogDiffEngine;
 import org.voltdb.catalog.CatalogException;
+import org.voltdb.catalog.CatalogMap;
+import org.voltdb.catalog.Database;
+import org.voltdb.catalog.Function;
+import org.voltdb.catalog.Procedure;
+import org.voltdb.catalog.Task;
 import org.voltdb.client.ClientResponse;
 import org.voltdb.common.Constants;
 import org.voltdb.compiler.CatalogChangeResult;
@@ -55,7 +60,6 @@ import org.voltdb.compiler.deploymentfile.DrRoleType;
 import org.voltdb.exceptions.PlanningErrorException;
 import org.voltdb.iv2.MpInitiator;
 import org.voltdb.iv2.UniqueIdGenerator;
-import org.voltdb.task.TaskManager;
 import org.voltdb.utils.CatalogUtil;
 import org.voltdb.utils.CatalogUtil.SegmentedCatalog;
 import org.voltdb.utils.CompressionService;
@@ -147,6 +151,9 @@ public abstract class UpdateApplicationBase extends VoltNTSystemProcedure {
                     } catch (ClassNotFoundException e) {
                         retval.errorMsg = "Classes not found in @UpdateClasses jar: " + e.getMessage();
                         return retval;
+                    } catch (IllegalArgumentException e) {
+                        retval.errorMsg = "Invalid modification of classes: " + e.getMessage();
+                        return retval;
                     }
                     // Real deploymentString should be the current deployment, just set it to null
                     // here and let it get filled in correctly later.
@@ -160,10 +167,17 @@ public abstract class UpdateApplicationBase extends VoltNTSystemProcedure {
                     try {
                         newCatalogJar = addDDLToCatalog(context.catalog, oldJar, adhocDDLStmts, sqlNodes,
                             drRole == DrRoleType.XDCR, user);
-                    } catch (IOException | VoltCompilerException | PlanningErrorException e) {
-                        retval.errorMsg = e.getMessage();
+                    } catch (IOException | VoltCompilerException | PlanningErrorException ex) {
+                        retval.errorMsg = ex.getMessage();
+                        return retval;
+                    } catch (CatalogException ex) {
+                        compilerLog.warn("Catalog error when applying DDL statements: " + ex.getMessage());
+                        retval.errorMsg = ex.getMessage();
                         return retval;
                     } catch (Exception ex) {
+                        compilerLog.error("Unexpected " + ex.getClass().getName() +
+                                          " occurred applying DDL statements: " + ex.getMessage(),
+                                          ex);
                         retval.errorMsg = "Unexpected condition occurred applying DDL statements: " + ex.getMessage();
                         return retval;
                     }
@@ -230,22 +244,27 @@ public abstract class UpdateApplicationBase extends VoltNTSystemProcedure {
             } else if (context.getDeployment().getCluster().getSitesperhost() != dt.getCluster().getSitesperhost()) {
             // Since sitesPerHost is no longer part of catalog, check it here before diff engine
                 retval.errorMsg = "Unable to update deployment configuration: sites per host cannot be changed";
+                retval.dynamicChangeNotSupported = true;
                 return retval;
             } else if (isPromotion && drRole == DrRoleType.REPLICA) {
                 assert dt.getDr().getRole() == DrRoleType.REPLICA;
                 dt.getDr().setRole(DrRoleType.MASTER);
             }
 
-            if (!VoltDB.instance().validateDeploymentUpdates(dt, context.getDeployment(), retval)) {
+            // Validate deployment
+            if (!VoltDB.instance().validateDeployment(newCatalog, dt, context.getDeployment(), retval)) {
                 return retval;
             }
+
+            // Compile deployment into catalog
             final String result = CatalogUtil.compileDeployment(newCatalog, dt, false);
             if (result != null) {
                 retval.errorMsg = "Unable to update deployment configuration: " + result;
                 return retval;
             }
 
-            if (!validateNewCatalog(newCatalog, newCatalogJar, retval)) {
+            // Validate full configuration
+            if (!VoltDB.instance().validateConfiguration(newCatalog, dt, newCatalogJar, context.catalog, retval)) {
                 return retval;
             }
 
@@ -259,7 +278,7 @@ public abstract class UpdateApplicationBase extends VoltNTSystemProcedure {
             retval.deploymentBytes = newDeploymentString.getBytes(Constants.UTF8ENCODING);
 
             // make deployment hash from string
-            retval.deploymentHash = CatalogUtil.makeDeploymentHash(retval.deploymentBytes);
+            retval.deploymentHash = CatalogUtil.makeHash(retval.deploymentBytes);
 
             // store the version of the catalog the diffs were created against.
             // verified when / if the update procedure runs in order to verify
@@ -274,6 +293,7 @@ public abstract class UpdateApplicationBase extends VoltNTSystemProcedure {
             // compute the diff in StringBuilder
             CatalogDiffEngine diff = new CatalogDiffEngine(context.catalog, newCatalog);
             if (!diff.supported()) {
+                retval.dynamicChangeNotSupported = true;
                 retval.errorMsg = "The requested catalog change(s) are not supported:\n" + diff.errors();
                 return retval;
             }
@@ -297,24 +317,9 @@ public abstract class UpdateApplicationBase extends VoltNTSystemProcedure {
         } catch (Throwable e) {
             retval.errorMsg = "Unexpected error in catalog update from " + invocationName + ": " + e.getClass() + ", " +
                     e.getMessage();
+            compilerLog.error(retval.errorMsg, e);
         }
         return retval;
-    }
-
-    /**
-     * Validate that the catalog in its entirety is valid. If it is not valid an appropriate error message will be set
-     * on {@code result}
-     *
-     * @return {@code true} if the catalog is valid
-     */
-    private static boolean validateNewCatalog(Catalog catalog, InMemoryJarfile catalogJar, CatalogChangeResult result) {
-        String taskErrors = TaskManager.validateTasks(CatalogUtil.getDatabase(catalog), catalogJar.getLoader());
-        if (taskErrors != null) {
-            result.errorMsg = taskErrors;
-            return false;
-        }
-
-        return true;
     }
 
     /**
@@ -340,8 +345,22 @@ public abstract class UpdateApplicationBase extends VoltNTSystemProcedure {
         return jarfile;
     }
 
+
     /**
-     * @return NUll if no classes changed, otherwise return the update jar file.
+     * @return classname or top parent classname if a subclass
+     *
+     */
+    private static String classnameForMatching(String classname) {
+        int ix = classname.indexOf("$");
+        if (ix >=0) {
+            classname = classname.substring(0,ix);
+        }
+        return classname;
+    }
+
+
+    /**
+     * @return null if no classes changed, otherwise return the update jar file.
      *
      * @throws ClassNotFoundException
      * @throws VoltCompilerException
@@ -349,9 +368,9 @@ public abstract class UpdateApplicationBase extends VoltNTSystemProcedure {
      */
     private static InMemoryJarfile modifyCatalogClasses(Catalog catalog, InMemoryJarfile jarfile, String deletePatterns,
             InMemoryJarfile newJarfile, boolean isXDCR, HSQLInterface hsql)
-            throws IOException, ClassNotFoundException, VoltCompilerException {
-        // modify the old jar in place based on the @UpdateClasses inputs, and then
-        // recompile it if necessary
+        throws IOException, ClassNotFoundException, VoltCompilerException, IllegalArgumentException {
+
+        // find any classes in jar that match deletePatterns
         boolean deletedClasses = false, foundClasses = false;
         if (deletePatterns != null) {
             String[] patterns = deletePatterns.split(",");
@@ -369,8 +388,53 @@ public abstract class UpdateApplicationBase extends VoltNTSystemProcedure {
                 }
             }
 
-            for (String classname : matcher.getMatchedClassList()) {
-                jarfile.removeClassFromJar(classname);
+            for (String classToRemove : matcher.getMatchedClassList()) {
+
+                Database db = catalog.getClusters().get("cluster").getDatabases().get("database");
+
+                // Check for procedures that use the class
+                CatalogMap<Procedure> procedures = db.getProcedures();
+                for (Procedure proc : procedures) {
+                    if (proc.getHasjava()) {
+                        String procedureClass = classnameForMatching(proc.getClassname());
+                        if (classToRemove.equals(procedureClass)) {
+                            throw new IllegalArgumentException(String.format("Class %s cannot be removed, it is being used by procedure %s", classToRemove, procedureClass));
+                        }
+                    }
+                }
+
+                // Check for tasks that use the class
+                CatalogMap<Task> tasks = db.getTasks();
+                for (Task task : tasks) {
+
+                    String actionGenerator = classnameForMatching(task.getActiongeneratorclass());
+                    if (classToRemove.equals(actionGenerator)) {
+                        throw new IllegalArgumentException(String.format("Class %s cannot be removed, it is the action generator for task %s", classToRemove, task.getName()));
+                    }
+
+                    String actionScheduler = classnameForMatching(task.getSchedulerclass());
+                    if (classToRemove.equals(actionScheduler)) {
+                        throw new IllegalArgumentException(String.format("Class %s cannot be removed, it is the action scheduler for task %s", classToRemove, task.getName()));
+                    }
+
+                    String intervalGenerator = classnameForMatching(task.getScheduleclass());
+                    if (classToRemove.equals(intervalGenerator)) {
+                        throw new IllegalArgumentException(String.format("Class %s cannot be removed, it is the interval generator for task %s", classToRemove, task.getName()));
+                    }
+                }
+
+                // Check for functions that use the class
+                CatalogMap<Function> functions = db.getFunctions();
+                for (Function function : functions) {
+                    String className = classnameForMatching(function.getClassname());
+                    if (classToRemove.equals(className)) {
+                        throw new IllegalArgumentException(String.format("Class %s cannot be removed, it is used by function %s", classToRemove, function.getFunctionname()));
+                    }
+                }
+
+                // Remove the class
+                compilerLog.info("Removing Class: " + classToRemove);
+                jarfile.removeClassFromJar(classToRemove);
             }
         }
         if (newJarfile != null) {
@@ -510,7 +574,9 @@ public abstract class UpdateApplicationBase extends VoltNTSystemProcedure {
 
         if (ccr.errorMsg != null) {
             VoltZK.removeActionBlocker(zk, VoltZK.catalogUpdateInProgress, hostLog);
-            return makeQuickResponse(ClientResponse.GRACEFUL_FAILURE, ccr.errorMsg);
+            byte respCode = (ccr.dynamicChangeNotSupported ? ClientResponse.UNSUPPORTED_DYNAMIC_CHANGE
+                                                           : ClientResponse.GRACEFUL_FAILURE);
+            return makeQuickResponse(respCode, ccr.errorMsg);
         } else if (ccr.upgradedFromVersion != null) {
         // Log something useful about catalog upgrades when they occur.
             compilerLog.info(String.format("catalog was automatically upgraded from version %s.",

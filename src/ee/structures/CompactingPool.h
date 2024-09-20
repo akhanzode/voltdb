@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -52,6 +52,7 @@ namespace voltdb {
 
 #ifdef VOLT_POOL_CHECKING
     ~CompactingPool();
+    inline void shutdown() {m_shutdown = true;}
 
     private:
     void setPtr(void* data);
@@ -125,6 +126,7 @@ namespace voltdb {
         using AllocTraceMap_t = std::unordered_set<void*>;
 #endif
         AllocTraceMap_t m_allocations;
+        bool m_shutdown = false;
 #endif
 
     /// The layout of a relocatable allocation,

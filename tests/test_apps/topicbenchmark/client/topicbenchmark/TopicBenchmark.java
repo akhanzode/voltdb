@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -59,8 +59,7 @@ import org.voltdb.client.ProcedureCallback;
  */
 public class TopicBenchmark {
 
-    static VoltLogger log = new VoltLogger("ExportBenchmark");
-    // static VoltLogger log = new VoltLogger("TopicBenchmark");
+    static VoltLogger log = new VoltLogger("TopicBenchmark");
     // handy, rather than typing this out several times
     static final String HORIZONTAL_RULE =
             "----------" + "----------" + "----------" + "----------" +
@@ -187,9 +186,7 @@ public class TopicBenchmark {
     public TopicBenchmark(TopicBenchConfig config) {
         this.config = config;
         ClientConfig clientConfig = new ClientConfig();
-        clientConfig.setReconnectOnConnectionLoss(true);
         clientConfig.setTopologyChangeAware(true);
-        clientConfig.setClientAffinity(true);
         client = ClientFactory.createClient(clientConfig);
 
         fullStatsContext = client.createStatsContext();

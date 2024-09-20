@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -78,13 +78,16 @@ public class DummyCommandLog implements CommandLog {
     }
 
     @Override
-    public void populateCommandLogStats(Map<String, Integer> columnNameToIndex,
-            Object[] rowValues) {
-        rowValues[columnNameToIndex.get(CommandLogStats.StatName.OUTSTANDING_BYTES.name())] = 0;
-        rowValues[columnNameToIndex.get(CommandLogStats.StatName.OUTSTANDING_TXNS.name())] = 0;
-        rowValues[columnNameToIndex.get(CommandLogStats.StatName.IN_USE_SEGMENT_COUNT.name())] = 0;
-        rowValues[columnNameToIndex.get(CommandLogStats.StatName.SEGMENT_COUNT.name())] = 0;
-        rowValues[columnNameToIndex.get(CommandLogStats.StatName.FSYNC_INTERVAL.name())] = 0;
+    public void populateCommandLogStats(int offset, Object[] rowValues) {
+        rowValues[offset + CommandLogStats.CommandLogCols.OUTSTANDING_BYTES.ordinal()] = 0;
+        rowValues[offset + CommandLogStats.CommandLogCols.OUTSTANDING_TXNS.ordinal()] = 0;
+        rowValues[offset + CommandLogStats.CommandLogCols.IN_USE_SEGMENT_COUNT.ordinal()] = 0;
+        rowValues[offset + CommandLogStats.CommandLogCols.SEGMENT_COUNT.ordinal()] = 0;
+        rowValues[offset + CommandLogStats.CommandLogCols.FSYNC_INTERVAL.ordinal()] = 0;
+    }
+
+    @Override
+    public void getCommandLogOutstanding(long[] out) {
     }
 
     @Override

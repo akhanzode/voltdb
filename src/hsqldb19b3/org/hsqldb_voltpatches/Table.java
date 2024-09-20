@@ -1,4 +1,5 @@
 /* Copyright (c) 1995-2000, The Hypersonic SQL Group.
+ * Copyright (c) 2010-2022, Volt Active Data Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -2736,7 +2737,7 @@ public class Table extends TableBase implements SchemaObject {
             ttl.attributes.put("name", TimeToLiveVoltDB.TTL_NAME);
             ttl.attributes.put("value", Integer.toString(timeToLive.ttlValue));
             ttl.attributes.put("unit",  timeToLive.ttlUnit);
-            ttl.attributes.put("column", timeToLive.ttlColumn.getNameString());
+            ttl.attributes.put("column", timeToLive.ttlColumnName.name);
             ttl.attributes.put("maxFrequency", Integer.toString(timeToLive.maxFrequency));
             ttl.attributes.put("batchSize", Integer.toString(timeToLive.batchSize));
             table.children.add(ttl);
@@ -2747,6 +2748,7 @@ public class Table extends TableBase implements SchemaObject {
             VoltXMLElement pe = new VoltXMLElement(PersistentExport.PERSISTENT_EXPORT);
             pe.attributes.put("target", persistentExport.target);
             pe.attributes.put("triggers", String.join(",", persistentExport.triggers));
+            pe.attributes.put("isTopic", Boolean.toString(persistentExport.isTopic));
             table.children.add(pe);
         }
         return table;
@@ -2761,20 +2763,6 @@ public class Table extends TableBase implements SchemaObject {
         addIndex(newExprIndex);
         return newExprIndex;
     } /* createAndAddExprIndexStructure */
-
-    // A VoltDB extension to support LIMIT PARTITION ROWS
-    Constraint getLimitConstraint() {
-        Constraint result = null;
-        for (Constraint constraint : getConstraints()) {
-            if (constraint.getConstraintType() == Constraint.LIMIT) {
-                // We're assuming only one LIMIT constraint at the moment
-                result = constraint;
-                break;
-            }
-        }
-        return result;
-    }
-    // End of VoltDB extension
 
     // A VoltDB extension to support TTL
     public void addTTL(int ttlValue, String ttlUnit, String ttlColumn, int batchSize,
@@ -2797,8 +2785,8 @@ public class Table extends TableBase implements SchemaObject {
         timeToLive = null;
     }
 
-    public void addPersistentExport(String target, List<String> triggers) {
-        persistentExport = new PersistentExport(target, triggers);
+    public void addPersistentExport(String target, List<String> triggers, boolean isTopic) {
+        persistentExport = new PersistentExport(target, triggers, isTopic);
     }
 
     public PersistentExport getPersistentExport() {

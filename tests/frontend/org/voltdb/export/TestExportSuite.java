@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -27,7 +27,6 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -36,12 +35,15 @@ import org.voltdb.VoltDB.Configuration;
 import org.voltdb.client.Client;
 import org.voltdb.client.ClientResponse;
 import org.voltdb.client.ProcCallException;
+import org.voltdb.client.UpdateApplicationCatalog;
 import org.voltdb.compiler.VoltProjectBuilder;
 import org.voltdb.regressionsuites.LocalCluster;
 import org.voltdb.regressionsuites.MultiConfigSuiteBuilder;
 import org.voltdb.regressionsuites.TestSQLTypesSuite;
 import org.voltdb.utils.MiscUtils;
 import org.voltdb.utils.SnapshotVerifier;
+
+import com.google_voltpatches.common.collect.ImmutableMap;
 
 /**
  * End to end Export tests using the injected custom export.
@@ -79,7 +81,6 @@ public class TestExportSuite extends TestExportBaseSocketExport {
     //
     public void testExportAndDroppedTable() throws Exception {
         System.out.println("testExportAndDroppedTable");
-        m_streamNames.addAll(Arrays.asList("S_ALLOW_NULLS", "S_NO_NULLS"));
         Client client = getClient();
         for (int i = 0; i < 10; i++) {
             final Object[] rowdata = TestSQLTypesSuite.m_midValues;
@@ -87,39 +88,36 @@ public class TestExportSuite extends TestExportBaseSocketExport {
             final Object[] params = convertValsToParams("S_NO_NULLS", i, rowdata);
             client.callProcedure("ExportInsertNoNulls", params);
         }
-        waitForExportAllRowsDelivered(client, m_streamNames);
+        waitForExportRowsToBeDelivered(client, ImmutableMap.of("S_NO_NULLS", 10L));
 
         // now drop the no-nulls table
         final String newCatalogURL = Configuration.getPathToCatalogForTest("export-ddl-sans-nonulls.jar");
         final String deploymentURL = Configuration.getPathToCatalogForTest("export-ddl-sans-nonulls.xml");
-        final ClientResponse callProcedure = client.updateApplicationCatalog(new File(newCatalogURL),
-                new File(deploymentURL));
+        final ClientResponse callProcedure =
+            UpdateApplicationCatalog.update(client, new File(newCatalogURL), new File(deploymentURL));
         assertTrue(callProcedure.getStatus() == ClientResponse.SUCCESS);
-        m_streamNames.remove("S_ALLOW_NULLS");
 
         client = getClient();
 
         // must still be able to verify the export data.
-        quiesceAndVerifyTarget(client, m_streamNames, m_verifier);
+        m_verifier.waitForTuplesAndVerify(client);
     }
 
     // Test that a table w/o Export enabled does not produce Export content
     public void testThatTablesOptIn() throws Exception {
         System.out.println("testThatTablesOptIn");
-        m_streamNames.addAll(Arrays.asList("S_ALLOW_NULLS", "S_NO_NULLS"));
         final Client client = getClient();
 
         final Object[] rowdata = TestSQLTypesSuite.m_midValues;
         // populate the row data
-        long icnt = m_verifier.getExportedDataCount();
         for (int i = 0; i < 10; i++) {
             // do NOT add row to TupleVerfier as none should be produced
             client.callProcedure("TableInsertLoopback", convertValsToLoaderRow(i, rowdata));
         }
-        //Make sure that we have not recieved any new data.
-        waitForExportAllRowsDelivered(client, m_streamNames);
-        assertEquals(icnt, ExportTestClient.getExportedDataCount());
-        quiesceAndVerifyTarget(client, m_streamNames, m_verifier);
+        // Make sure that we have not received any new data.
+        quiesce(client);
+        assertEquals(0, ExportTestClient.getExportedDataCount());
+        m_verifier.verifyRows();
     }
 
     // Verify that planner rejects updates to append-only tables
@@ -182,7 +180,6 @@ public class TestExportSuite extends TestExportBaseSocketExport {
     public void testExportMultiTable() throws Exception
     {
         System.out.println("testExportMultiTable");
-        m_streamNames.addAll(Arrays.asList("S_ALLOW_NULLS", "S_NO_NULLS"));
         final Client client = getClient();
         long icnt = m_verifier.getExportedDataCount();
         for (int i=0; i < 10; i++) {
@@ -202,7 +199,7 @@ public class TestExportSuite extends TestExportBaseSocketExport {
         }
         // Make sure some are exported and seen by me
         assertTrue((m_verifier.getExportedDataCount() - icnt > 0));
-        quiesceAndVerifyTarget(client, m_streamNames, m_verifier, DEFAULT_DELAY_MS, true);
+        m_verifier.waitForTuplesAndVerify(client);
     }
 
     //
@@ -210,7 +207,6 @@ public class TestExportSuite extends TestExportBaseSocketExport {
     //
     public void testExportPlusSnapshot() throws Exception {
         System.out.println("testExportPlusSnapshot");
-        m_streamNames.addAll(Arrays.asList("S_ALLOW_NULLS", "S_NO_NULLS"));
         final Client client = getClient();
         for (int i=0; i < 10; i++) {
             // add data to a first (persistent) table
@@ -227,34 +223,35 @@ public class TestExportSuite extends TestExportBaseSocketExport {
             params = convertValsToParams("S_NO_NULLS", i, rowdata);
             client.callProcedure("ExportInsertNoNulls", params);
         }
-
-        String snapshotDir = "/tmp/" + System.getProperty("user.name");
-
+        String snapshotDir = "testExportPlusSnapshot";
         // this blocks until the snapshot is complete
         client.callProcedure("@SnapshotSave", snapshotDir, "testExportPlusSnapshot", (byte) 1).getResults();
 
-        // verify. copied from TestSaveRestoreSysprocSuite
-        final ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        final PrintStream ps = new PrintStream(baos);
-        final PrintStream original = System.out;
-        new java.io.File(snapshotDir).mkdir();
-        try {
-            System.setOut(ps);
-            final String args[] = new String[] {
-                    "testExportPlusSnapshot",
-                    "--dir",
-                    snapshotDir
-            };
-            SnapshotVerifier.main(args);
-            ps.flush();
-            final String reportString = baos.toString("UTF-8");
-            assertTrue(reportString, reportString.contains("Snapshot valid\n"));
-        } finally {
-            System.setOut(original);
+        LocalCluster ccluster = (LocalCluster)m_config;
+        for (int i = 0; i < ccluster.getNodeCount(); i++) {
+            String sdir = ccluster.getServerSpecificScratchDir(String.valueOf(i)) + File.separator + snapshotDir;
+            // verify. copied from TestSaveRestoreSysprocSuite
+            final ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            final PrintStream ps = new PrintStream(baos);
+            final PrintStream original = System.out;
+            try {
+                System.setOut(ps);
+                final String args[] = new String[]{
+                        "testExportPlusSnapshot",
+                        "--dir",
+                        sdir
+                };
+                SnapshotVerifier.main(args);
+                ps.flush();
+                final String reportString = baos.toString("UTF-8");
+                assertTrue(reportString, reportString.contains("Snapshot valid\n"));
+            } finally {
+                System.setOut(original);
+            }
         }
 
         // verify the el data
-        quiesceAndVerifyTarget(client, m_streamNames, m_verifier);
+        m_verifier.waitForTuplesAndVerify(client);
     }
 
     public void testSwapTables() throws Exception {
@@ -277,7 +274,7 @@ public class TestExportSuite extends TestExportBaseSocketExport {
         additionalEnv.put(ExportDataProcessor.EXPORT_TO_TYPE, "org.voltdb.exportclient.SocketExporter");
 
         final MultiConfigSuiteBuilder builder =
-            new MultiConfigSuiteBuilder(TestExportSuite.class);
+                new MultiConfigSuiteBuilder(TestExportSuite.class, "testExportPlusSnapshot"::equals);
 
         project = new VoltProjectBuilder();
         project.setSecurityEnabled(true, true);
@@ -301,6 +298,7 @@ public class TestExportSuite extends TestExportBaseSocketExport {
         config = new LocalCluster("export-ddl-cluster-rep.jar", 2, 3, k_factor,
                 BackendTarget.NATIVE_EE_JNI, LocalCluster.FailureState.ALL_RUNNING, true, additionalEnv);
         config.setHasLocalServer(false);
+        config.setEnableVoltSnapshotPrefix(true);
         config.setMaxHeap(1024);
         boolean compile = config.compile(project);
         MiscUtils.copyFile(project.getPathToDeployment(),
@@ -315,6 +313,7 @@ public class TestExportSuite extends TestExportBaseSocketExport {
         config = new LocalCluster("export-ddl-sans-nonulls.jar", 2, 3, k_factor,
                 BackendTarget.NATIVE_EE_JNI, LocalCluster.FailureState.ALL_RUNNING, true, additionalEnv);
         config.setHasLocalServer(false);
+        config.setEnableVoltSnapshotPrefix(true);
         config.setMaxHeap(1024);
         project = new VoltProjectBuilder();
         project.addRoles(GROUPS);

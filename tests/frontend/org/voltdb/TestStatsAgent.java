@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -22,23 +22,26 @@
  */
 package org.voltdb;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.LinkedBlockingQueue;
 
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
-
-import org.voltcore.network.*;
+import org.voltcore.network.Connection;
+import org.voltcore.network.MockConnection;
+import org.voltcore.network.MockWriteStream;
+import org.voltcore.network.WriteStream;
 import org.voltdb.client.ClientResponse;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
 public class TestStatsAgent {
 
@@ -81,43 +84,47 @@ public class TestStatsAgent {
         VoltDB.replaceVoltDBInstanceForTest(null);
     }
 
-    private void createAndRegisterStats() throws Exception {
-        List<VoltTable.ColumnInfo> partitionColumns = Arrays.asList(new VoltTable.ColumnInfo[] {
-                new VoltTable.ColumnInfo( "p1", VoltType.INTEGER),
-                new VoltTable.ColumnInfo( "p2", VoltType.STRING)
-        });
+    private void createAndRegisterStats() {
+        List<VoltTable.ColumnInfo> partitionColumns = Arrays.asList(
+                new VoltTable.ColumnInfo("p1", VoltType.INTEGER),
+                new VoltTable.ColumnInfo("p2", VoltType.STRING)
+        );
+
         MockStatsSource.columns = partitionColumns;
-        MockStatsSource partitionSource = new MockStatsSource(new Object[][] {
-                { 42, "42" },
-                { 43, "43" }
+        MockStatsSource partitionSource = new MockStatsSource(new Object[][]{
+                {42, "42"},
+                {43, "43"}
         });
+
         m_mvoltdb.getStatsAgent().registerStatsSource(StatsSelector.DRPRODUCERPARTITION, 0, partitionSource);
 
-        List<VoltTable.ColumnInfo> nodeColumns = Arrays.asList(new VoltTable.ColumnInfo[] {
-                new VoltTable.ColumnInfo( "c1", VoltType.STRING),
-                new VoltTable.ColumnInfo( "c2", VoltType.INTEGER)
-        });
+        List<VoltTable.ColumnInfo> nodeColumns = Arrays.asList(
+                new VoltTable.ColumnInfo("c1", VoltType.STRING),
+                new VoltTable.ColumnInfo("c2", VoltType.INTEGER)
+        );
+
         MockStatsSource.columns = nodeColumns;
-        MockStatsSource nodeSource = new MockStatsSource(new Object[][] {
-                { "43", 43 },
-                { "42", 43 }
+        MockStatsSource nodeSource = new MockStatsSource(new Object[][]{
+                {"43", 43},
+                {"42", 43}
         });
         m_mvoltdb.getStatsAgent().registerStatsSource(StatsSelector.DRPRODUCERNODE, 0, nodeSource);
 
-        List<VoltTable.ColumnInfo> snapshotStatusColumns = Arrays.asList(new VoltTable.ColumnInfo[] {
-            new VoltTable.ColumnInfo("c1", VoltType.STRING),
-            new VoltTable.ColumnInfo("c2", VoltType.STRING)
-        });
+        m_mvoltdb.getStatsAgent().registerStatsSource(StatsSelector.DRPRODUCERCLUSTER, 0, nodeSource);
+
+        List<VoltTable.ColumnInfo> snapshotStatusColumns = Arrays.asList(
+                new VoltTable.ColumnInfo("c1", VoltType.STRING),
+                new VoltTable.ColumnInfo("c2", VoltType.STRING)
+        );
         MockStatsSource.columns = snapshotStatusColumns;
-        MockStatsSource snapshotSource = new MockStatsSource(new Object[][] {
-            {"RYANLOVES", "THEYANKEES"},
-            {"NOREALLY", "ASKHIM"}
+        MockStatsSource snapshotSource = new MockStatsSource(new Object[][]{
+                {"RYANLOVES", "THEYANKEES"},
+                {"NOREALLY", "ASKHIM"}
         });
         m_mvoltdb.getStatsAgent().registerStatsSource(StatsSelector.SNAPSHOTSTATUS, 0, snapshotSource);
     }
 
-    private ParameterSet subselect(String subselector, int interval)
-    {
+    private ParameterSet subselect(String subselector, int interval) {
         Object[] blah = new Object[2];
         blah[0] = subselector;
         blah[1] = interval;
@@ -128,11 +135,11 @@ public class TestStatsAgent {
     public void testInvalidStatisticsSubselector() throws Exception {
         createAndRegisterStats();
         m_mvoltdb.getStatsAgent().performOpsAction(m_mockConnection, 32,
-                OpsSelector.STATISTICS, subselect("CRAZY", 0));
+                                                   OpsSelector.STATISTICS, subselect("CRAZY", 0));
         ClientResponseImpl response = responses.take();
         assertEquals(ClientResponse.GRACEFUL_FAILURE, response.getStatus());
         assertEquals("First argument to @Statistics must be a valid STRING selector, instead was CRAZY",
-                response.getStatusString());
+                     response.getStatusString());
         System.out.println(response.toJSONString());
     }
 
@@ -146,14 +153,14 @@ public class TestStatsAgent {
         VoltTable results[] = response.getResults();
         System.out.println(results[0]);
         System.out.println(results[1]);
-        verifyResults(response);
+        verifyResults(response, 3);
     }
 
     @Test
     public void testCollectSnapshotStatusStats() throws Exception {
         createAndRegisterStats();
-        m_mvoltdb.getStatsAgent().performOpsAction( m_mockConnection, 32, OpsSelector.STATISTICS,
-                subselect("SNAPSHOTSTATUS", 0));
+        m_mvoltdb.getStatsAgent().performOpsAction(m_mockConnection, 32, OpsSelector.STATISTICS,
+                                                   subselect("SNAPSHOTSTATUS", 0));
         ClientResponseImpl response = responses.take();
 
         assertEquals(ClientResponse.SUCCESS, response.getStatus());
@@ -164,11 +171,9 @@ public class TestStatsAgent {
             String c2 = results[0].getString("c2");
             if (c1.equalsIgnoreCase("RYANLOVES")) {
                 assertEquals("THEYANKEES", c2);
-            }
-            else if (c1.equalsIgnoreCase("NOREALLY")) {
+            } else if (c1.equalsIgnoreCase("NOREALLY")) {
                 assertEquals("ASKHIM", c2);
-            }
-            else {
+            } else {
                 fail("Unexpected row in results: c1: " + c1 + ", c2: " + c2);
             }
         }
@@ -178,7 +183,7 @@ public class TestStatsAgent {
     public void testCollectUnavailableStats() throws Exception {
         for (StatsSelector selector : StatsSelector.values()) {
             m_mvoltdb.getStatsAgent().performOpsAction(m_mockConnection, 32, OpsSelector.STATISTICS,
-                    subselect(selector.name(), 0));
+                                                       subselect(selector.name(), 0));
             ClientResponseImpl response = responses.take();
             assertEquals(ClientResponse.GRACEFUL_FAILURE, response.getStatus());
             VoltTable results[] = response.getResults();
@@ -203,7 +208,7 @@ public class TestStatsAgent {
         assertEquals(0, results.length);
         System.out.println(response.getStatusString());
         assertEquals("OPS request hit sixty second timeout before all responses were received",
-                response.getStatusString());
+                     response.getStatusString());
     }
 
     @Test
@@ -215,7 +220,8 @@ public class TestStatsAgent {
          * Generate a bunch of requests, should get backpressure on some of them
          */
         for (int ii = 0; ii < 30; ii++) {
-            m_mvoltdb.getStatsAgent().performOpsAction(m_mockConnection, 32, OpsSelector.STATISTICS, subselect("DR", 0));
+            m_mvoltdb.getStatsAgent()
+                     .performOpsAction(m_mockConnection, 32, OpsSelector.STATISTICS, subselect("DR", 0));
         }
 
         boolean hadBackpressure = false;
@@ -225,7 +231,7 @@ public class TestStatsAgent {
             if (response.getStatus() == ClientResponse.GRACEFUL_FAILURE) {
                 assertTrue(
                         "Too many pending stat requests".equals(
-                        response.getStatusString()));
+                                response.getStatusString()));
                 hadBackpressure = true;
             }
         }
@@ -236,12 +242,12 @@ public class TestStatsAgent {
          */
         m_mvoltdb.getStatsAgent().performOpsAction(m_mockConnection, 32, OpsSelector.STATISTICS, subselect("DR", 0));
         ClientResponseImpl response = responses.take();
-        verifyResults(response);
+        verifyResults(response, 3);
     }
 
-    private void verifyResults(ClientResponseImpl response) {
+    private void verifyResults(ClientResponseImpl response, int expectedTables) {
         VoltTable results[] = response.getResults();
-        assertEquals(2, results.length);
+        assertEquals(expectedTables, results.length);
 
         Set<Integer> pValues = new HashSet<Integer>();
         pValues.add(45);
@@ -250,18 +256,18 @@ public class TestStatsAgent {
         pValues.add(42);
 
         while (results[0].advanceRow()) {
-            assertTrue(pValues.contains((int)results[0].getLong(0)));
+            assertTrue(pValues.contains((int) results[0].getLong(0)));
             assertTrue(pValues.contains(Integer.valueOf(results[0].getString(1))));
         }
 
-       Set<Integer> c1Values = pValues;
-       Set<Integer> c2Values = new HashSet<Integer>();
-       c2Values.add(43);
-       c2Values.add(44);
+        Set<Integer> c1Values = pValues;
+        Set<Integer> c2Values = new HashSet<Integer>();
+        c2Values.add(43);
+        c2Values.add(44);
 
-       while (results[1].advanceRow()) {
-           assertTrue(c1Values.contains(Integer.valueOf(results[1].getString(0))));
-           assertTrue(c2Values.contains((int)results[1].getLong(1)));
-       }
+        while (results[1].advanceRow()) {
+            assertTrue(c1Values.contains(Integer.valueOf(results[1].getString(0))));
+            assertTrue(c2Values.contains((int) results[1].getLong(1)));
+        }
     }
 }

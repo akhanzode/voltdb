@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -29,7 +29,6 @@ import java.util.Map;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.voltcore.logging.Level;
 import org.voltcore.logging.VoltLogger;
 import org.voltcore.messaging.TransactionInfoBaseMessage;
 import org.voltcore.utils.CoreUtils;
@@ -46,7 +45,6 @@ import org.voltdb.DependencyPair;
 import org.voltdb.ExtensibleSnapshotDigestData;
 import org.voltdb.HsqlBackend;
 import org.voltdb.IndexStats;
-import org.voltdb.TopicsSystemTableConnection;
 import org.voltdb.LoadedProcedureSet;
 import org.voltdb.MemoryStats;
 import org.voltdb.NonVoltDBBackend;
@@ -72,6 +70,7 @@ import org.voltdb.TableStats;
 import org.voltdb.TableStreamType;
 import org.voltdb.TheHashinator;
 import org.voltdb.TheHashinator.HashinatorConfig;
+import org.voltdb.TopicsSystemTableConnection;
 import org.voltdb.TupleStreamStateInfo;
 import org.voltdb.VoltDB;
 import org.voltdb.VoltProcedure.VoltAbortException;
@@ -87,6 +86,7 @@ import org.voltdb.catalog.Database;
 import org.voltdb.catalog.Deployment;
 import org.voltdb.catalog.Procedure;
 import org.voltdb.catalog.Table;
+import org.voltdb.catalog.Topic;
 import org.voltdb.dtxn.SiteTracker;
 import org.voltdb.dtxn.TransactionState;
 import org.voltdb.dtxn.UndoAction;
@@ -113,7 +113,6 @@ import org.voltdb.sysprocs.saverestore.HiddenColumnFilter;
 import org.voltdb.sysprocs.saverestore.SystemTable;
 import org.voltdb.types.TimestampType;
 import org.voltdb.utils.CompressionService;
-import org.voltdb.utils.LogKeys;
 import org.voltdb.utils.MinimumRatioMaintainer;
 
 import com.google_voltpatches.common.base.Charsets;
@@ -135,8 +134,6 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
 
     // HSId of this site's initiator.
     final long m_siteId;
-
-    final int m_snapshotPriority;
 
     // Partition count is important on SPIs, MPI doesn't use it.
     int m_numberOfPartitions;
@@ -457,11 +454,13 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
                 long txnId, long uniqueId, long spHandle,
                 boolean isReplay,
                 boolean requireCatalogDiffCmdsApplyToEE,
-                boolean requiresNewExportGeneration)
+                boolean requiresNewExportGeneration,
+                Map<Byte, String[]> replicableTables)
         {
             return Site.this.updateCatalog(diffCmds, context, requiresSnapshotIsolation,
                     false, txnId, uniqueId, spHandle, isReplay,
-                    requireCatalogDiffCmdsApplyToEE, requiresNewExportGeneration);
+                    requireCatalogDiffCmdsApplyToEE, requiresNewExportGeneration,
+                    replicableTables);
         }
 
         @Override
@@ -576,26 +575,34 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
         }
 
         @Override
-        public void recoverWithDrAppliedTrackers(Map<Integer, Map<Integer, DRSiteDrIdTracker>> trackers)
+        public void recoverDrState(int clusterId, Map<Integer, Map<Integer, DRSiteDrIdTracker>> trackers,
+                Map<Byte, String[]> replicableTables)
         {
-            m_maxSeenDrLogsBySrcPartition = trackers;
+            if (trackers != null) {
+                m_maxSeenDrLogsBySrcPartition = trackers;
+            }
+            if (replicableTables != null) {
+                Site.this.setReplicableTables(clusterId, replicableTables);
+            }
         }
 
         @Override
-        public void resetDrAppliedTracker() {
+        public void resetAllDrAppliedTracker() {
             m_maxSeenDrLogsBySrcPartition.clear();
+            m_ee.clearAllReplicableTables();
             if (drLog.isDebugEnabled()) {
-                drLog.debug("Cleared DR Applied tracker");
+                drLog.debug("Cleared DR Applied trackers and cleared replicable tables");
             }
             m_lastLocalSpUniqueId = -1L;
             m_lastLocalMpUniqueId = -1L;
         }
 
         @Override
-        public void resetDrAppliedTracker(byte clusterId) {
-            m_maxSeenDrLogsBySrcPartition.remove((int) clusterId);
+        public void resetDrAppliedTracker(int clusterId) {
+            m_maxSeenDrLogsBySrcPartition.remove(clusterId);
+            setReplicableTables(clusterId, null, true);
             if (drLog.isDebugEnabled()) {
-                drLog.debug("Reset DR Applied tracker for " + clusterId);
+                drLog.debug("Reset DR Applied trackers and replicable tables for " + clusterId);
             }
             if (m_maxSeenDrLogsBySrcPartition.isEmpty()) {
                 m_lastLocalSpUniqueId = -1L;
@@ -695,7 +702,6 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
             int partitionId,
             int numPartitions,
             StartAction startAction,
-            int snapshotPriority,
             InitiatorMailbox initiatorMailbox,
             StatsAgent agent,
             MemoryStats memStats,
@@ -710,7 +716,6 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
         m_pendingSiteTasks = pendingSiteTasks;
         m_backend = backend;
         m_runningState = startAction.doesJoin() ? RunningState.REJOINING : RunningState.RUNNING;
-        m_snapshotPriority = snapshotPriority;
         // need this later when running in the final thread.
         m_startupConfig = new StartupConfig(serializedCatalog, context.m_genId);
         m_lastCommittedSpHandle = TxnEgo.makeZero(partitionId).getTxnId();
@@ -737,7 +742,7 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
             m_tableStats = null;
             m_indexStats = null;
             m_memStats = null;
-            m_tickProducer = null;
+            m_tickProducer = new MPTickProducer(pendingSiteTasks, siteId);
         }
     }
 
@@ -785,7 +790,6 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
         m_ee.loadFunctions(m_context);
 
         m_snapshotter = new SnapshotSiteProcessor(m_pendingSiteTasks,
-        m_snapshotPriority,
         new SnapshotSiteProcessor.IdlePredicate() {
             @Override
             public boolean idle(long now) {
@@ -802,6 +806,11 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
         ExecutionEngine eeTemp = null;
         Deployment deploy = m_context.cluster.getDeployment().get("deployment");
         final int defaultDrBufferSize = Integer.getInteger("DR_DEFAULT_BUFFER_SIZE", 512 * 1024); // 512KB
+        final boolean drIgnoreConflicts = Boolean.getBoolean("DR_IGNORE_CONFLICTS");
+        final int drCrcErrorIgnoreMax = Integer.getInteger("DR_IGNORE_CRC_ERROR_MAX", -1);
+        final boolean drCrcErrorIgnoreFatal = Boolean.valueOf(System.getProperty("DR_IGNORE_CRC_ERROR_FATAL", "true"));
+        drLog.info("DR CRC check configuration: Ignore Max=" +
+                drCrcErrorIgnoreMax + " CrcErrorFatal=" + drCrcErrorIgnoreFatal);
         int tempTableMaxSize = deploy.getSystemsettings().get("systemsettings").getTemptablemaxsize();
         if (System.getProperty("TEMP_TABLE_MAX_SIZE") != null) {
             // Allow a system property to override the deployment setting
@@ -822,6 +831,9 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
                         hostname,
                         m_context.cluster.getDrclusterid(),
                         defaultDrBufferSize,
+                        drIgnoreConflicts,
+                        drCrcErrorIgnoreMax,
+                        drCrcErrorIgnoreFatal,
                         tempTableMaxSize,
                         hashinatorConfig,
                         m_isLowestSiteId);
@@ -838,6 +850,9 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
                         hostname,
                         m_context.cluster.getDrclusterid(),
                         defaultDrBufferSize,
+                        drIgnoreConflicts,
+                        drCrcErrorIgnoreMax,
+                        drCrcErrorIgnoreFatal,
                         tempTableMaxSize,
                         hashinatorConfig,
                         m_isLowestSiteId);
@@ -855,6 +870,9 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
                             hostname,
                             m_context.cluster.getDrclusterid(),
                             defaultDrBufferSize,
+                            drIgnoreConflicts,
+                            drCrcErrorIgnoreMax,
+                            drCrcErrorIgnoreFatal,
                             tempTableMaxSize,
                             m_backend,
                             VoltDB.instance().getConfig().m_ipcPort,
@@ -873,8 +891,8 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
         }
         // just print error info an bail if we run into an error here
         catch (final Exception ex) {
-            hostLog.l7dlog( Level.FATAL, LogKeys.host_ExecutionSite_FailedConstruction.name(),
-                            new Object[] { m_siteId, m_siteIndex }, ex);
+            hostLog.fatalFmt(ex, "Failed to construct execution siteId %s siteIndex %s",
+                             m_siteId, m_siteIndex);
             VoltDB.crashLocalVoltDB(ex.getMessage(), true, ex);
         }
         return eeTemp;
@@ -882,7 +900,7 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
 
 
     @Override
-    public void run()
+    final public void run()
     {
         if (m_partitionId == MpInitiator.MP_INIT_PID) {
             Thread.currentThread().setName("MP Site - " + CoreUtils.hsIdToString(m_siteId));
@@ -906,6 +924,7 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
                         m_currentTxnId = ((TransactionTask)task).getTxnId();
                         m_lastTxnTime = EstTime.currentTimeMillis();
                     }
+                    Iv2Trace.logSiteTaskerQueueTake(task, false, false);
                     task.run(getSiteProcedureConnection());
                 } else if (m_runningState.isReplaying()) {
                     // Rejoin operation poll and try to do some catchup work. Tasks
@@ -927,6 +946,7 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
                         // Otherwise, keep the task in the scheduler and let the next loop take and handle it
                         if (!m_runningState.isRunning()) {
                             m_pendingSiteTasks.poll();
+                            Iv2Trace.logSiteTaskerQueueTake(task, true, false);
                             task.runForRejoin(getSiteProcedureConnection(), m_rejoinTaskLog);
                         }
                     } else {
@@ -938,7 +958,10 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
                     }
                 } else if (m_runningState.isRejoining()){
                     SiteTasker task = m_pendingSiteTasks.take();
+                    Iv2Trace.logSiteTaskerQueueTake(task, false, true);
                     task.runForRejoin(getSiteProcedureConnection(), m_rejoinTaskLog);
+                } else if (m_runningState.isDecommissioning()) {
+                    Thread.currentThread().join();
                 }
             }
         }
@@ -990,7 +1013,7 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
             mrm.didUnrestricted();
             if (tibm instanceof Iv2InitiateTaskMessage) {
                 Iv2InitiateTaskMessage m = (Iv2InitiateTaskMessage)tibm;
-                SpProcedureTask t = new SpProcedureTask(
+                SpProcedureTask t = SpProcedureTask.create(
                         m_initiatorMailbox, m.getStoredProcedureName(),
                         null, m);
                 if(allowInitiateTask(m)) {
@@ -1423,10 +1446,9 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
             long stringMem = 0;
 
             // update table stats
-            final VoltTable[] s1 =
-                m_ee.getStats(StatsSelector.TABLE, tableIds, false, time);
-            if ((s1 != null) && (s1.length > 0)) {
-                VoltTable stats = s1[0];
+            final VoltTable[] eeStatistics = m_ee.getStats(StatsSelector.TABLE, tableIds, false, time);
+            if ((eeStatistics != null) && (eeStatistics.length > 0)) {
+                VoltTable stats = eeStatistics[0];
                 assert(stats != null);
 
                 // rollup the table memory stats for this site
@@ -1552,6 +1574,8 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
             Map<String, Map<Integer, ExportSnapshotTuple>> exportSequenceNumbers,
             Map<Integer, Long> drSequenceNumbers,
             Map<Integer, Map<Integer, Map<Integer, DRSiteDrIdTracker>>> allConsumerSiteTrackers,
+            Map<Byte, byte[]> drCatalogCommands,
+            Map<Byte, String[]> replicableTables,
             boolean requireExistingSequenceNumbers,
             long clusterCreateTime) {
         // transition from kStateRejoining to live rejoin replay.
@@ -1568,14 +1592,25 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
             VoltDB.instance().setClusterCreateTime(clusterCreateTime);
         }
 
+        hostLog.info("Truncating export and topic data sources");
         for (Map.Entry<String, Map<Integer, ExportSnapshotTuple>> tableEntry : exportSequenceNumbers.entrySet()) {
-            final Table catalogTable = m_context.tables.get(tableEntry.getKey());
-            if (catalogTable == null) {
+            Table catalogTable = m_context.tables.get(tableEntry.getKey());
+            Topic opaqueTopic = m_context.database.getTopics().get(tableEntry.getKey());
+            if (opaqueTopic != null && !opaqueTopic.getIsopaque()) {
+                // Non-opaque topics must be a regular stream
+                opaqueTopic = null;
+            }
+            if (catalogTable == null && opaqueTopic == null) {
                 VoltDB.crashLocalVoltDB(
                         "Unable to find catalog entry for table named " + tableEntry.getKey(),
                         true,
                         null);
             }
+            if (opaqueTopic != null && opaqueTopic.getIssingle() && m_partitionId > 0) {
+                // Skip nonzero partitions for single-partition opaque topics
+                continue;
+            }
+            String tableName = catalogTable != null ? catalogTable.getTypeName() : opaqueTopic.getTypeName();
             ExportSnapshotTuple sequenceNumbers = tableEntry.getValue().get(m_partitionId);
 
             if (sequenceNumbers == null) {
@@ -1589,14 +1624,18 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
                 }
             }
 
-            setExportStreamPositions(sequenceNumbers, m_partitionId, catalogTable.getTypeName());
+            if (catalogTable != null) {
+                // Don't do this for opaque topics
+                setExportStreamPositions(sequenceNumbers, m_partitionId, tableName);
+            }
             // assign the stats to the other partition's value
-            VoltDB.getExportManager().updateInitialExportStateToSeqNo(m_partitionId, catalogTable.getTypeName(),
+            VoltDB.getExportManager().updateInitialExportStateToSeqNo(m_partitionId, tableName,
                     StreamStartAction.REJOIN, tableEntry.getValue());
         }
         if (m_sysprocContext.isLowestSiteId()) {
             VoltDB.getExportManager().updateDanglingExportStates(StreamStartAction.REJOIN, exportSequenceNumbers);
         }
+        hostLog.info("Finished truncating export and topic data sources");
 
         if (drSequenceNumbers != null) {
             Long partitionDRSequenceNumber = drSequenceNumbers.get(m_partitionId);
@@ -1617,6 +1656,13 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
                 m_maxSeenDrLogsBySrcPartition = thisConsumerSiteTrackers;
             }
         }
+
+        if (m_isLowestSiteId) {
+            VoltDB.instance().getDrCatalogCommands().setAll(drCatalogCommands);
+        }
+
+        setReplicableTables(-1, replicableTables);
+
         m_runningState = RunningState.REPLAYING;
         m_replayCompletionAction = replayComplete;
         if (hostLog.isDebugEnabled()) {
@@ -1710,7 +1756,8 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
                                  long spHandle,
                                  boolean isReplay,
                                  boolean requireCatalogDiffCmdsApplyToEE,
-                                 boolean requiresNewExportGeneration)
+                                 boolean requiresNewExportGeneration,
+                                 Map<Byte, String[]> replicableTables)
     {
         CatalogContext oldContext = m_context;
         m_context = context;
@@ -1719,7 +1766,9 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
         m_loadedProcedures.loadProcedures(m_context, isReplay);
         m_ee.loadFunctions(m_context);
 
+        Cluster newCluster = m_context.catalog.getClusters().get("cluster");
         if (isMPI) {
+            m_tickProducer.changeTickInterval(newCluster.getGlobalflushinterval());
             // the rest of the work applies to sites with real EEs
             return true;
         }
@@ -1730,9 +1779,7 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
             return true;
         }
 
-        Cluster newCluster = m_context.catalog.getClusters().get("cluster");
         CatalogMap<Table> tables = newCluster.getDatabases().get("database").getTables();
-
         boolean DRCatalogChange = false;
         for (Table t : tables) {
             if (t.getIsdred()) {
@@ -1771,11 +1818,7 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
             }
         }
 
-        //Necessary to quiesce before updating the catalog
-        //so export data for the old generation is pushed to Java.
-        //No need to quiesce as there is no rolling of generation OLD datasources will be polled and pushed until there is no more data.
-        //m_ee.quiesce(m_lastCommittedSpHandle);
-        m_ee.updateCatalog(m_context.m_genId, requiresNewExportGeneration, diffCmds);
+        m_ee.updateCatalog(m_context.m_genId, requiresNewExportGeneration, diffCmds, replicableTables);
 
         m_tickProducer.changeTickInterval(newCluster.getGlobalflushinterval());
 
@@ -1879,11 +1922,13 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
 
     @Override
     public void setupProcedure(String procedureName) {
+        if (m_tickProducer != null) m_tickProducer.setupProcedure(procedureName);
         m_ee.setupProcedure(procedureName);
     }
 
     @Override
     public void completeProcedure() {
+        if (m_tickProducer != null) m_tickProducer.completeProcedure();
         m_ee.completeProcedure();
     }
 
@@ -2058,5 +2103,28 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
     @Override
     public void deleteExpiredOffsets(TimestampType deleteOlderThan) {
         m_ee.deleteExpiredTopicsOffsets(getNextUndoToken(), deleteOlderThan);
+    }
+
+    @Override
+    public void setReplicableTables(int clusterId, String[] tables, boolean clear) {
+        if (clear) {
+            m_ee.clearReplicableTables(clusterId);
+        }
+        m_ee.setReplicableTables(clusterId, tables);
+    }
+
+    /**
+     * When we are recovering or rejoining we want to set all cluster tables in EE
+     * @param clusterId clsuterId or -1 if all cluster's recovered information needs to be updated.
+     * @param replicableTables replicable tables list
+     */
+    void setReplicableTables(int clusterId, Map<Byte, String[]> replicableTables) {
+        if (clusterId == -1) {
+            for (byte cid : replicableTables.keySet()) {
+                setReplicableTables(cid, replicableTables.get(cid), true);
+            }
+        } else {
+            setReplicableTables(clusterId, replicableTables.get(clusterId), false);
+        }
     }
 }

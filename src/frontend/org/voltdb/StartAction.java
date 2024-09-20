@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -17,77 +17,65 @@
 
 package org.voltdb;
 
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.EnumSet;
-import java.util.Map;
-import java.util.regex.Pattern;
-
-import com.google_voltpatches.common.collect.ImmutableMap;
 
 public enum StartAction {
 
-    CREATE("create", false, null),
-    RECOVER("recover", false, "Command Log Recovery"),
-    SAFE_RECOVER("recover safemode", true, "Command Log Recovery"),
-    REJOIN("rejoin", false, "K-Safety / Node Rejoin"),
-    LIVE_REJOIN("live rejoin", false, "K-Safety / Node Rejoin"),
-    JOIN("add", true, "Elastic Cluster Sizing"),
-    INITIALIZE("initialize", false, "Layout and prime voltdbroot"),
-    PROBE("probe", false, "Determine start action"),
-    GET("get", false, "Get Configuration");
+    // Actions that can be produced by the mesh prober, but
+    // which are no longer permitted as VoltDB command options.
+    CREATE("create"),
+    RECOVER("recover"),
+    SAFE_RECOVER("recover safemode"),
+    REJOIN("rejoin"),
+    LIVE_REJOIN("live rejoin"),
+    JOIN("add"),
 
-    final static Pattern spaces = Pattern.compile("\\s+");
+    // Actions that can be given as command options to VoltDB.
+    // See also commandOptionSet below
+    INITIALIZE("initialize"),
+    PROBE("probe"),
+    GET("get");
 
-    final static Map<String, StartAction> verbMoniker;
+    final static EnumSet<StartAction> commandOptionSet =
+            EnumSet.of(INITIALIZE, PROBE, GET);
+
+    final static EnumSet<StartAction> enterpriseOnlySet =
+            EnumSet.of(JOIN, SAFE_RECOVER);
 
     final static EnumSet<StartAction> recoverSet =
-            EnumSet.of(RECOVER,SAFE_RECOVER);
+            EnumSet.of(RECOVER, SAFE_RECOVER);
 
     final static EnumSet<StartAction> rejoinSet =
-            EnumSet.of(REJOIN,LIVE_REJOIN);
+            EnumSet.of(REJOIN, LIVE_REJOIN);
 
     final static EnumSet<StartAction> joinSet =
-            EnumSet.of(REJOIN,LIVE_REJOIN,JOIN);
+            EnumSet.of(REJOIN, LIVE_REJOIN, JOIN);
 
     final static EnumSet<StartAction> requireEmptyDirsSet =
             EnumSet.of(CREATE);
 
-    final static EnumSet<StartAction> legacySet =
-            EnumSet.complementOf(EnumSet.of(INITIALIZE,PROBE,GET));
-
     final String m_verb;
-    final boolean m_enterpriseOnly;
-    final String m_featureNameForErrorString;
 
-    static {
-        ImmutableMap.Builder<String, StartAction> mb = ImmutableMap.builder();
-        for (StartAction action: StartAction.values()) {
-            mb.put(action.m_verb, action);
-        }
-        verbMoniker = mb.build();
-    }
-
-    StartAction(String verb, boolean enterpriseOnly, String featureNameForErrorString) {
+    StartAction(String verb) {
         m_verb = verb;
-        m_enterpriseOnly = enterpriseOnly;
-        m_featureNameForErrorString = featureNameForErrorString;
     }
 
-    public static StartAction monickerFor(String verb) {
-        if (verb == null) return null;
-        verb = spaces.matcher(verb.trim().toLowerCase()).replaceAll(" ");
-        return verbMoniker.get(verb);
+    public Collection<String> verbs() {
+        return Arrays.asList(m_verb.split("\\s+"));
     }
 
-    public String verb() {
-        return m_verb;
+    public boolean isAllowedCommandOption() {
+        return commandOptionSet.contains(this);
+    }
+
+    public boolean isLegacy() { // inverse of isAllowedCommandOption
+        return !commandOptionSet.contains(this);
     }
 
     public boolean isEnterpriseOnly() {
-        return m_enterpriseOnly;
-    }
-
-    public String featureNameForErrorString() {
-        return m_featureNameForErrorString;
+        return enterpriseOnlySet.contains(this); // TODO: will eventually be unnecessary
     }
 
     public boolean doesRecover() {
@@ -100,10 +88,6 @@ public enum StartAction {
 
     public boolean doesJoin() {
         return joinSet.contains(this);
-    }
-
-    public boolean isLegacy() {
-        return legacySet.contains(this);
     }
 
     public boolean doesRequireEmptyDirectories() {

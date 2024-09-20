@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -46,7 +46,6 @@ import org.voltdb.client.ClientConfig;
 import org.voltdb.client.TestClientFeatures;
 import org.voltdb.compiler.VoltProjectBuilder;
 import org.voltdb.utils.MiscUtils;
-import org.voltdb.utils.VoltFile;
 
 public class TestJDBCAutoReconnectOnLoss {
 
@@ -61,8 +60,6 @@ public class TestJDBCAutoReconnectOnLoss {
 
     @Before
     public void setUp() throws Exception {
-
-        VoltFile.initNewSubrootForThisProcess();
 
         String ddl =
             "CREATE TABLE TT(A1 INTEGER NOT NULL, A2_ID INTEGER, PRIMARY KEY(A1));" +
@@ -95,7 +92,6 @@ public class TestJDBCAutoReconnectOnLoss {
     @After
     public void tearDown() throws Exception {
         stopServer();
-        VoltFile.resetSubrootForThisProcess();
     }
 
     private void stopServer() throws SQLException {

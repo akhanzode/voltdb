@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -87,7 +87,8 @@ public interface SystemProcedureExecutionContext {
 
     public boolean updateCatalog(String catalogDiffCommands, CatalogContext context,
             boolean requiresSnapshotIsolation, long txnId, long uniqueId, long spHandle, boolean isReplay,
-            boolean requireCatalogDiffCmdsApplyToEE, boolean requiresNewExportGeneration);
+            boolean requireCatalogDiffCmdsApplyToEE, boolean requiresNewExportGeneration,
+            Map<Byte, String[]> replicableTables);
 
     public boolean updateSettings(CatalogContext context);
 
@@ -111,11 +112,12 @@ public interface SystemProcedureExecutionContext {
     public void appendApplyBinaryLogTxns(int producerClusterId, int producerPartitionId,
                                          long localUniqueId, DRConsumerDrIdTracker tracker);
 
-    public void recoverWithDrAppliedTrackers(Map<Integer, Map<Integer, DRSiteDrIdTracker>> trackers);
+    public void recoverDrState(int clusterId, Map<Integer, Map<Integer, DRSiteDrIdTracker>> trackers,
+            Map<Byte, String[]> replicableTables);
 
-    public void resetDrAppliedTracker();
+    public void resetAllDrAppliedTracker();
 
-    public void resetDrAppliedTracker(byte clusterId);
+    public void resetDrAppliedTracker(int clusterId);
 
     public boolean hasRealDrAppliedTracker(byte clusterId);
 

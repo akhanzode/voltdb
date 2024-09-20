@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -1253,6 +1253,7 @@ public abstract class AbstractParsedStmt {
         assert(idArg > 0);
         String result_type_parameter_index = exprNode.attributes.get("result_type_parameter_index");
         String implied_argument = exprNode.attributes.get("implied_argument");
+        String optional_argument = exprNode.attributes.get("optional_argument");
 
         ArrayList<AbstractExpression> args = new ArrayList<>();
         for (VoltXMLElement argNode : exprNode.children) {
@@ -1264,7 +1265,7 @@ public abstract class AbstractParsedStmt {
         }
 
         FunctionExpression expr = new FunctionExpression();
-        expr.setAttributes(name, implied_argument, idArg);
+        expr.setAttributes(name, implied_argument, optional_argument, idArg);
         expr.setArgs(args);
         if (value_type != null) {
             expr.setValueType(value_type);

@@ -1,8 +1,8 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This file contains original code and/or modifications of original code.
- * Any modifications made by VoltDB Inc. are licensed under the following
+ * Any modifications made by Volt Active Data Inc. are licensed under the following
  * terms and conditions:
  *
  * This program is free software: you can redistribute it and/or modify
@@ -108,21 +108,8 @@ class InsertExecutor : public AbstractExecutor {
     bool m_hasStreamView = false;
     bool m_isUpsert = false;
     bool m_sourceIsPartitioned = false;
-    bool m_hasPurgeFragment = false;
 
  private:
-
-    /** If the table is at or over its tuple limit, this method
-     * executes the purge fragment for the table.  Returns true if
-     * nothing went wrong (regardless of whether the purge
-     * fragment was executed) and false otherwise.
-     *
-     * The purge fragment might perform a truncate table,
-     * in which case the persistent table object we're inserting
-     * into might change.  Passing a pointer-to-pointer allows
-     * the callee to update the persistent table pointer.
-     */
-    void executePurgeFragmentIfNeeded(PersistentTable** table);
 
     /**
      * Return false iff all the work is done in init.  Inserting

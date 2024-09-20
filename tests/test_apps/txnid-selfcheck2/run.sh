@@ -162,12 +162,17 @@ function bigjars() {
         return
     fi
 
+    # if VOLTCORE is set, use it to find the relevant test directory
+    if [[ -d ${VOLTCORE}/tests/test_apps/txnid-selfcheck2 ]]; then
+        VOLTDB_TEST="${VOLTCORE}/tests/test_apps/txnid-selfcheck2"
     # voltdb (community) build has relevant tests 3 levels below the "base" (voltdb) directory
-    if [[ -d ${VOLTDB_BASE}/tests/test_apps/txnid-selfcheck2 ]]; then
+    elif [[ -d ${VOLTDB_BASE}/tests/test_apps/txnid-selfcheck2 ]]; then
         VOLTDB_TEST="${VOLTDB_BASE}/tests/test_apps/txnid-selfcheck2"
-    # pro build has to find the tests below the adjacent voltdb (community) directory
+    # pro build has to find the tests below the adjacent 'voltdb' (community) or 'internal' directory
     elif [[ -d ${VOLTDB_BASE}/../../../../voltdb/tests/test_apps/txnid-selfcheck2 ]]; then
         VOLTDB_TEST="${VOLTDB_BASE}/../../../../voltdb/tests/test_apps/txnid-selfcheck2"
+    elif [[ -d ${VOLTDB_BASE}/../../../../internal/tests/test_apps/txnid-selfcheck2 ]]; then
+        VOLTDB_TEST="${VOLTDB_BASE}/../../../../internal/tests/test_apps/txnid-selfcheck2"
     fi
     if [[ -e ${VOLTDB_TEST}/txnid-big-java1.jar && -e ${VOLTDB_TEST}/txnid-big-java2.jar ]]; then
         set -e
@@ -247,9 +252,27 @@ function server() {
     $VOLTDB start -l $LICENSE -H $HOST
 }
 
+# run the voltdb server locally with priority queues enabled
+function server-priority() {
+    jars-ifneeded
+    # run the server
+    $VOLTDB init -C deployment2.xml --force
+    $VOLTDB start -l $LICENSE -H $HOST
+}
+
 # run the client that drives the example
 function client() {
     async-benchmark
+}
+
+# run the client that drives the example, using V2 client
+function client2() {
+    async-benchmark2
+}
+
+# run the client that drives the example, using V2 client, with random priorities
+function client2p() {
+    async-benchmark2p
 }
 
 # Asynchronous benchmark sample
@@ -264,10 +287,61 @@ function async-benchmark() {
     java -ea -classpath txnid.jar:$CLASSPATH: -Dlog4j.configuration=file://$CLIENTLOG4J \
         txnIdSelfCheck.Benchmark $ARGS \
         --displayinterval=1 \
+        --duration=30 \
+        --servers=localhost \
+        --threads=20 \
+        --threadoffset=0 \
+        --minvaluesize=1024 \
+        --maxvaluesize=1024 \
+        --entropy=127 \
+        --fillerrowsize=10240 \
+        --replfillerrowmb=32 \
+        --partfillerrowmb=128 \
+        --progresstimeout=20 \
+        --usecompression=false \
+        --allowinprocadhoc=false
+        # --enabledthreads=partttlMigratelt,replttlMigratelt
+        # --disabledthreads=ddlt,partBiglt,replBiglt,partCappedlt,replCappedlt,replLoadlt,partLoadlt,adHocMayhemThread,idpt,partTrunclt,replTrunclt
+#ddlt,clients,partBiglt,replBiglt,partCappedlt,replCappedlt,replLoadlt,partLoadlt,adHocMayhemThread,idpt,readThread,partTrunclt,replTrunclt
+        # --sslfile=./keystore.props
+}
+
+function async-benchmark2() {
+    jars-ifneeded
+    java -ea -classpath txnid.jar:$CLASSPATH: -Dlog4j.configuration=file://$CLIENTLOG4J \
+        txnIdSelfCheck.Benchmark $ARGS \
+        --displayinterval=1 \
         --duration=100 \
         --servers=localhost \
         --threads=20 \
         --threadoffset=0 \
+        --useclientv2=true \
+        --minvaluesize=1024 \
+        --maxvaluesize=1024 \
+        --entropy=127 \
+        --fillerrowsize=10240 \
+        --replfillerrowmb=32 \
+        --partfillerrowmb=128 \
+        --progresstimeout=20 \
+        --usecompression=false \
+        --allowinprocadhoc=false
+        # --enabledthreads=partttlMigratelt,replttlMigratelt
+        # --disabledthreads=ddlt,partBiglt,replBiglt,partCappedlt,replCappedlt,replLoadlt,partLoadlt,adHocMayhemThread,idpt,partTrunclt,replTrunclt
+#ddlt,clients,partBiglt,replBiglt,partCappedlt,replCappedlt,replLoadlt,partLoadlt,adHocMayhemThread,idpt,readThread,partTrunclt,replTrunclt
+        # --sslfile=./keystore.props
+}
+
+function async-benchmark2p() {
+    jars-ifneeded
+    java -ea -classpath txnid.jar:$CLASSPATH: -Dlog4j.configuration=file://$CLIENTLOG4J \
+        txnIdSelfCheck.Benchmark $ARGS \
+        --displayinterval=1 \
+        --duration=100 \
+        --servers=localhost \
+        --threads=20 \
+        --threadoffset=0 \
+        --useclientv2=true \
+        --usepriorities=true \
         --minvaluesize=1024 \
         --maxvaluesize=1024 \
         --entropy=127 \

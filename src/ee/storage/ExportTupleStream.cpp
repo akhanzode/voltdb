@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -30,8 +30,6 @@
 using namespace std;
 using namespace voltdb;
 
-const size_t ExportTupleStream::s_EXPORT_BUFFER_HEADER_SIZE = 20; // committedSequenceNumber(8) + row count(4) + uniqueId(8)
-
 ExportTupleStream::ExportTupleStream(CatalogId partitionId,
                                      int64_t siteId,
                                      int64_t generation,
@@ -46,9 +44,7 @@ ExportTupleStream::ExportTupleStream(CatalogId partitionId,
       m_flushPending(false),
       m_nextFlushStream(NULL),
       m_prevFlushStream(NULL)
-{
-    extendBufferChain(m_defaultCapacity);
-}
+{}
 
 void ExportTupleStream::setGenerationIdCreated(int64_t generation) {
     // If stream is initialized first with the current generation ID, it may
@@ -135,20 +131,9 @@ size_t ExportTupleStream::appendTuple(
     hdr.writeInt(METADATA_COL_CNT + partitionColumn);           // partition index
     hdr.writeInt(METADATA_COL_CNT + tuple.columnCount());      // column count
 
-    // update m_offset
-    m_currBlock->consumed(streamHeaderSz + io.position());
-
-    // update uso.
-    const size_t startingUso = m_uso;
-    m_uso += (streamHeaderSz + io.position());
     vassert(seqNo > 0 && m_nextSequenceNumber == seqNo);
-    m_nextSequenceNumber++;
-    m_currBlock->recordCompletedSpTxn(uniqueId);
-//    cout << "Appending row of size " << streamHeaderSz + io.position()
-//            << " to uso " << m_currBlock->uso() + m_currBlock->offset()
-//            << " sequence number " << seqNo
-//            << " offset " << m_currBlock->offset() << std::endl;
-    return startingUso;
+
+    return recordTupleAppended(streamHeaderSz + io.position(), uniqueId);;
 }
 
 void ExportTupleStream::appendToList(ExportTupleStream** oldest, ExportTupleStream** newest)
@@ -247,6 +232,7 @@ void ExportTupleStream::commit(VoltDBEngine* engine, int64_t currentTxnId, int64
         }
         m_committedSequenceNumber = m_nextSequenceNumber-1;
         m_currBlock->setCommittedSequenceNumber(m_committedSequenceNumber);
+        m_currBlock->recordLastCommittedSpHandle(m_committedTxnId);
 
         pushPendingBlocks();
     }
@@ -314,9 +300,9 @@ bool ExportTupleStream::periodicFlush(int64_t timeInMillis,
             vassert(m_currBlock->getRowCount() > 0);
             // Most paths move a block to m_pendingBlocks and then use pushPendingBlocks (comment from there)
             // The block is handed off to the topend which is responsible for releasing the
-            // memory associated with the block data. The metadata is deleted here.
+            // memory associated with the block data.
+            m_currBlock->writeOutHeader();
             pushStreamBuffer(m_currBlock);
-            delete m_currBlock;
             m_currBlock = NULL;
             extendBufferChain(0);
             m_prevFlushStream = NULL;

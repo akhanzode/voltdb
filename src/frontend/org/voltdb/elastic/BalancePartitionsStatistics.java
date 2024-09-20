@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -33,6 +33,7 @@ import java.util.concurrent.TimeUnit;
 
 import org.voltcore.logging.VoltLogger;
 import org.voltdb.StatsSource;
+import org.voltdb.VoltTable;
 import org.voltdb.VoltTable.ColumnInfo;
 import org.voltdb.VoltType;
 import org.voltdb.utils.MiscUtils;
@@ -40,7 +41,7 @@ import org.voltdb.utils.MiscUtils;
 public class BalancePartitionsStatistics extends StatsSource {
     private static final VoltLogger log = new VoltLogger("ELASTIC");
 
-    private static long s_logIntervalNanos = TimeUnit.SECONDS.toNanos(120);
+    private static final long s_logIntervalNanos = TimeUnit.SECONDS.toNanos(120);
 
     long m_totalRangeSize;
 
@@ -57,19 +58,33 @@ public class BalancePartitionsStatistics extends StatsSource {
     private StatsPoint m_intervalStats;
     private StatsPoint m_overallStats;
 
+    public enum Rebalance {
+        TIMESTAMP               (VoltType.BIGINT),
+        PERCENTAGE_MOVED        (VoltType.FLOAT),
+        MOVED_ROWS              (VoltType.BIGINT),
+        ROWS_PER_SECOND         (VoltType.FLOAT),
+        ESTIMATED_REMAINING     (VoltType.BIGINT),
+        MEGABYTES_PER_SECOND    (VoltType.FLOAT),
+        CALLS_PER_SECOND        (VoltType.FLOAT),
+        CALLS_LATENCY           (VoltType.FLOAT),
+        CALLS_TIME              (VoltType.FLOAT),
+        CALLS_TRANSFER_TIME     (VoltType.FLOAT);
+
+        public final VoltType m_type;
+        Rebalance(VoltType type) { m_type = type; }
+    }
+
     public BalancePartitionsStatistics()
     {
         this(0L);
     }
 
-    public BalancePartitionsStatistics(long totalRangeSize)
-    {
+    public BalancePartitionsStatistics(long totalRangeSize) {
         super(false);
         initialize(totalRangeSize);
     }
 
-    public void initialize(long totalRangeSize)
-    {
+    public void initialize(long totalRangeSize) {
         m_overallStats = new StatsPoint("Overall", totalRangeSize);
 
         m_totalRangeSize = totalRangeSize;
@@ -89,8 +104,8 @@ public class BalancePartitionsStatistics extends StatsSource {
         m_balanceStart = System.nanoTime();
     }
 
-    public void logBalanceEnds(long rangeSizeMoved, long bytesTransferred, long callTimeNanos, long transferTimeNanos, long rowsTransferred)
-    {
+    public void logBalanceEnds(long rangeSizeMoved, long bytesTransferred,
+                               long callTimeNanos, long transferTimeNanos, long rowsTransferred) {
         final long balanceEnd = System.nanoTime();
         m_lastBalanceDuration = balanceEnd - m_balanceStart;
 
@@ -106,21 +121,21 @@ public class BalancePartitionsStatistics extends StatsSource {
         m_lastTransferTimeNanos = transferTimeNanos;
 
         m_overallStats = m_overallStats.update(balanceEnd,
-                                           m_lastBalanceDuration,
-                                           callTimeNanos,
-                                           transferTimeNanos,
-                                           rangeSizeMoved,
-                                           rowsTransferred,
-                                           bytesTransferred,
-                                           1);
+                m_lastBalanceDuration,
+                callTimeNanos,
+                transferTimeNanos,
+                rangeSizeMoved,
+                rowsTransferred,
+                bytesTransferred,
+                1);
         m_intervalStats = m_intervalStats.update(balanceEnd,
-                                             m_lastBalanceDuration,
-                                             callTimeNanos,
-                                             transferTimeNanos,
-                                             rangeSizeMoved,
-                                             rowsTransferred,
-                                             bytesTransferred,
-                                             1);
+                m_lastBalanceDuration,
+                callTimeNanos,
+                transferTimeNanos,
+                rangeSizeMoved,
+                rowsTransferred,
+                bytesTransferred,
+                1);
 
         markStatsPoint();
 
@@ -146,12 +161,10 @@ public class BalancePartitionsStatistics extends StatsSource {
         printLog();
     }
 
-    public void printLog()
-    {
+    public void printLog() {
         if (m_bytesTransferredInLastSec.isEmpty()) {
             log.info("No data has been migrated yet.");
-        }
-        else {
+        } else {
             log.info(String.format("JOIN PROGRESS SUMMARY: "
                                    + "time elapsed: %s  "
                                    + "amount completed: %.2f%%  "
@@ -183,76 +196,48 @@ public class BalancePartitionsStatistics extends StatsSource {
         return m_statsPoint;
     }
 
-    private void markStatsPoint()
-    {
-        if (!m_bytesTransferredInLastSec.isEmpty()) {
+    private void markStatsPoint() {
+        if (! m_bytesTransferredInLastSec.isEmpty()) {
             m_statsPoint = m_overallStats.capture(
                     "Point",
                     m_bytesTransferredInLastSec.peekLast().m_timestamp);
         }
     }
 
-    public static interface Constants
-    {
-        public final static String TIMESTAMP = "TIMESTAMP";
-        public final static String PERCENTAGE_MOVED = "PERCENTAGE_MOVED";
-        public final static String MOVED_ROWS = "MOVED_ROWS";
-        public final static String ROWS_PER_SECOND = "ROWS_PER_SECOND";
-        public final static String ESTIMATED_REMAINING = "ESTIMATED_REMAINING";
-        public final static String MEGABYTES_PER_SECOND = "MEGABYTES_PER_SECOND";
-        public final static String CALLS_PER_SECOND = "CALLS_PER_SECOND";
-        public final static String CALLS_LATENCY = "CALLS_LATENCY";
-        public final static String CALLS_TIME = "CALLS_TIME";
-        public final static String CALLS_TRANSFER_TIME = "CALLS_TRANSFER_TIME";
+    @Override
+    protected void populateColumnSchema(ArrayList<ColumnInfo> columns) {
+        for (Rebalance col : Rebalance.values()) {
+            columns.add(new VoltTable.ColumnInfo(col.name(), col.m_type));
+        }
     }
 
     @Override
-    protected void populateColumnSchema(ArrayList<ColumnInfo> columns)
-    {
-        columns.add(new ColumnInfo(Constants.TIMESTAMP, VoltType.BIGINT));
-        columns.add(new ColumnInfo(Constants.PERCENTAGE_MOVED, VoltType.FLOAT));
-        columns.add(new ColumnInfo(Constants.MOVED_ROWS, VoltType.BIGINT));
-        columns.add(new ColumnInfo(Constants.ROWS_PER_SECOND, VoltType.FLOAT));
-        columns.add(new ColumnInfo(Constants.ESTIMATED_REMAINING, VoltType.BIGINT));
-        columns.add(new ColumnInfo(Constants.MEGABYTES_PER_SECOND, VoltType.FLOAT));
-        columns.add(new ColumnInfo(Constants.CALLS_PER_SECOND, VoltType.FLOAT));
-        columns.add(new ColumnInfo(Constants.CALLS_LATENCY, VoltType.FLOAT));
-        columns.add(new ColumnInfo(Constants.CALLS_TIME, VoltType.FLOAT));
-        columns.add(new ColumnInfo(Constants.CALLS_TRANSFER_TIME, VoltType.FLOAT));
-    }
-
-    @Override
-    protected void updateStatsRow(Object rowKey, Object[] rowValues)
-    {
+    protected int updateStatsRow(Object rowKey, Object[] rowValues) {
         final StatsPoint point = m_statsPoint;
 
-        rowValues[columnNameToIndex.get(Constants.TIMESTAMP)] = System.currentTimeMillis();
-        rowValues[columnNameToIndex.get(Constants.PERCENTAGE_MOVED)] = point.getPercentageMoved();
-        rowValues[columnNameToIndex.get(Constants.MOVED_ROWS)] = point.getMovedRows();
-        rowValues[columnNameToIndex.get(Constants.ROWS_PER_SECOND)] = point.getRowsPerSecond();
-        rowValues[columnNameToIndex.get(Constants.ESTIMATED_REMAINING)] = point.getEstimatedRemaining();
-        rowValues[columnNameToIndex.get(Constants.MEGABYTES_PER_SECOND)] = point.getMegabytesPerSecond();
-        rowValues[columnNameToIndex.get(Constants.CALLS_PER_SECOND)] = point.getInvocationsPerSecond();
-        rowValues[columnNameToIndex.get(Constants.CALLS_LATENCY)] = point.getAverageInvocationLatency();
-        rowValues[columnNameToIndex.get(Constants.CALLS_TIME)] = point.getAverageInvocationTime();
-        rowValues[columnNameToIndex.get(Constants.CALLS_TRANSFER_TIME)] = point.getAverageInvocationTransferTime();
+        rowValues[Rebalance.TIMESTAMP.ordinal()] = System.currentTimeMillis();
+        rowValues[Rebalance.PERCENTAGE_MOVED.ordinal()] = point.getPercentageMoved();
+        rowValues[Rebalance.MOVED_ROWS.ordinal()] = point.getMovedRows();
+        rowValues[Rebalance.ROWS_PER_SECOND.ordinal()] = point.getRowsPerSecond();
+        rowValues[Rebalance.ESTIMATED_REMAINING.ordinal()] = point.getEstimatedRemaining();
+        rowValues[Rebalance.MEGABYTES_PER_SECOND.ordinal()] = point.getMegabytesPerSecond();
+        rowValues[Rebalance.CALLS_PER_SECOND.ordinal()] = point.getInvocationsPerSecond();
+        rowValues[Rebalance.CALLS_LATENCY.ordinal()] = point.getAverageInvocationLatency();
+        rowValues[Rebalance.CALLS_TIME.ordinal()] = point.getAverageInvocationTime();
+        rowValues[Rebalance.CALLS_TRANSFER_TIME.ordinal()] = point.getAverageInvocationTransferTime();
+        return Rebalance.values().length;
     }
 
     @Override
-    protected Iterator<Object> getStatsRowKeyIterator(boolean interval)
-    {
-        if (m_totalRangeSize > 0)
-        {
-            return Arrays.asList(Object.class.cast(new Long(1))).iterator();
-        }
-        else
-        {
-            return Collections.emptyList().iterator();
+    protected Iterator<Object> getStatsRowKeyIterator(boolean interval) {
+        if (m_totalRangeSize > 0) {
+            return Collections.singletonList((Object) 1L).iterator();
+        } else {
+            return Collections.emptyIterator();
         }
     }
 
-    public static class StatsPoint implements Serializable
-    {
+    public static class StatsPoint implements Serializable {
         private static final long serialVersionUID = 2635982992941464809L;
 
         /// Name for logging, etc..
@@ -284,9 +269,10 @@ public class BalancePartitionsStatistics extends StatsSource {
          * @param name          stats point name
          * @param totalRanges   total ranges to move
          */
-        public StatsPoint(String name, long totalRanges)
-        {
-            this(name, null, null, totalRanges, 0, 0, 0, 0, 0, 0, 0);
+        public StatsPoint(String name, long totalRanges) {
+            this(name, null, null, totalRanges,
+                    0, 0, 0, 0,
+                    0, 0, 0);
         }
 
         /**
@@ -312,8 +298,7 @@ public class BalancePartitionsStatistics extends StatsSource {
                 long invocationCount,
                 long invocationLatencyNanos,
                 long invocationTimeNanos,
-                long invocationTransferTimeNanos)
-        {
+                long invocationTransferTimeNanos) {
             // Substitute the current time for null start or end times
             long nowNanos = System.nanoTime();
             m_name = name;
@@ -365,14 +350,13 @@ public class BalancePartitionsStatistics extends StatsSource {
             return m_invocationCount;
         }
 
-        double getInvocationLatencyMillis()
-        {
+        double getInvocationLatencyMillis() {
             return m_invocationLatencyNanos / (double)TimeUnit.MILLISECONDS.toNanos(1);
         }
 
         double getThroughput()
         {
-            return getDurationMillis() == 0 ? 0.0 : m_movedBytes / getDurationMillis();
+            return getDurationMillis() == 0 ? 0.0 : (float) m_movedBytes / getDurationMillis();
         }
 
         double getCompletedFraction()
@@ -380,19 +364,16 @@ public class BalancePartitionsStatistics extends StatsSource {
             return m_totalRanges == 0 ? 0.0 : (double) m_movedRanges / m_totalRanges;
         }
 
-        public double getPercentageMoved()
-        {
+        public double getPercentageMoved() {
             return m_totalRanges == 0 ? 0.0 : (m_movedRanges / (double) m_totalRanges) * 100.0;
         }
 
-        public String getFormattedPercentageMovedRate()
-        {
+        public String getFormattedPercentageMovedRate() {
             double nanos = getDurationMillis() * MILLISECONDS.toNanos(1);
             return MiscUtils.HumanTime.formatRate(getPercentageMoved(), nanos, "%");
         }
 
-        public double getRowsPerSecond()
-        {
+        public double getRowsPerSecond() {
             final double durationInSecs = getDurationMillis() / 1000.0;
             return getDurationMillis() == 0 ? 0.0 : m_movedRows / durationInSecs;
         }
@@ -405,31 +386,27 @@ public class BalancePartitionsStatistics extends StatsSource {
         public double getEstimatedRemaining() {
             double estimatedRemaining = -1.0;
             if (m_movedRanges > 0) {
-                estimatedRemaining = ((m_totalRanges * getDurationMillis()) / m_movedRanges) - getDurationMillis();
+                estimatedRemaining = ((m_totalRanges * getDurationMillis()) / (float) m_movedRanges) - getDurationMillis();
             }
             return estimatedRemaining;
         }
 
-        public double getRangesPerSecond()
-        {
+        public double getRangesPerSecond() {
             final double durationInSecs = getDurationMillis() / 1000.0;
             return getDurationMillis() == 0 ? 0.0 : m_movedRanges / durationInSecs;
         }
 
-        public double getMegabytesPerSecond()
-        {
+        public double getMegabytesPerSecond() {
             return getDurationMillis() == 0 ?
                     0.0 : (m_movedBytes / (1024.0 * 1024.0)) / (getDurationMillis() / 1000.0);
         }
 
-        public double getInvocationsPerSecond()
-        {
+        public double getInvocationsPerSecond() {
             final double durationInSecs = getDurationMillis() / 1000.0;
             return getDurationMillis() == 0 ? 0.0 : m_invocationCount / durationInSecs;
         }
 
-        public double getAverageInvocationLatency()
-        {
+        public double getAverageInvocationLatency() {
             //Convert to floating point millis
             return m_invocationCount == 0 ? 0.0 : getInvocationLatencyMillis() / m_invocationCount;
         }
@@ -442,28 +419,27 @@ public class BalancePartitionsStatistics extends StatsSource {
             return m_invocationCount == 0 ? 0.0 : TimeUnit.NANOSECONDS.toMillis(m_invocationTransferTimeNanos) / (double) m_invocationCount;
         }
 
-        public final static String formatTimeInterval(double dms)
-        {
+        public static String formatTimeInterval(double dms) {
             long ldms = (long)dms;
             if (ldms < 0) {
                 ldms = 0;
             }
 
             final long day = MILLISECONDS.toDays(ldms);
-            final long hr  = MILLISECONDS.toHours(  ldms
-                                                  - DAYS.toMillis(day));
-            final long min = MILLISECONDS.toMinutes(  ldms
-                                                    - DAYS.toMillis(day)
-                                                    - HOURS.toMillis(hr));
-            final long sec = MILLISECONDS.toSeconds(  ldms
-                                                    - DAYS.toMillis(day)
-                                                    - HOURS.toMillis(hr)
-                                                    - MINUTES.toMillis(min));
-            final long ms  = MILLISECONDS.toMillis(  ldms
-                                                    - DAYS.toMillis(day)
-                                                    - HOURS.toMillis(hr)
-                                                    - MINUTES.toMillis(min)
-                                                    - SECONDS.toMillis(sec));
+            final long hr  = MILLISECONDS.toHours(ldms
+                    - DAYS.toMillis(day));
+            final long min = MILLISECONDS.toMinutes(ldms
+                    - DAYS.toMillis(day)
+                    - HOURS.toMillis(hr));
+            final long sec = MILLISECONDS.toSeconds(ldms
+                    - DAYS.toMillis(day)
+                    - HOURS.toMillis(hr)
+                    - MINUTES.toMillis(min));
+            final long ms  = MILLISECONDS.toMillis(ldms
+                    - DAYS.toMillis(day)
+                    - HOURS.toMillis(hr)
+                    - MINUTES.toMillis(min)
+                    - SECONDS.toMillis(sec));
             return String.format("%d %02d:%02d:%02d.%03d", day, hr, min, sec, ms);
         }
 
@@ -484,8 +460,7 @@ public class BalancePartitionsStatistics extends StatsSource {
                 long lastMovedRanges,
                 long lastMovedRows,
                 long lastMovedBytes,
-                long lastInvocationCount)
-        {
+                long lastInvocationCount) {
             return new StatsPoint(
                     m_name,
                     m_startTimeNanos,
@@ -506,8 +481,7 @@ public class BalancePartitionsStatistics extends StatsSource {
          * @param endTimeNanos  end time in nanoseconds
          * @return  immutable snapshot of stats point
          */
-        public StatsPoint capture(String name, long endTimeNanos)
-        {
+        public StatsPoint capture(String name, long endTimeNanos) {
             return new StatsPoint(
                     name,
                     m_startTimeNanos,
@@ -524,8 +498,7 @@ public class BalancePartitionsStatistics extends StatsSource {
         }
 
         @Override
-        public String toString()
-        {
+        public String toString() {
             return String.format("StatsPoint(%s): "
                     +   "duration=%.2f s"
                     + ", percent=%.2f%% (%s)"

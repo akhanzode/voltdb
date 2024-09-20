@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -204,7 +204,7 @@ public class TestClientFeatures extends TestCase {
         boolean exceptionCalled = false;
         try {
             // Query timeout is in seconds second arg.
-            ((ClientImpl) client).callProcedureWithClientTimeout(BatchTimeoutOverrideType.NO_TIMEOUT,
+            client.callProcedureWithClientTimeout(BatchTimeoutOverrideType.NO_TIMEOUT,
                     "ArbitraryDurationProc", 3, TimeUnit.SECONDS, 6000);
         } catch (ProcCallException ex) {
             assertEquals(ClientResponse.CONNECTION_TIMEOUT, ex.m_response.getStatus());
@@ -216,7 +216,7 @@ public class TestClientFeatures extends TestCase {
         exceptionCalled = false;
         try {
             // Query timeout is in seconds second arg.
-            ((ClientImpl) client).callProcedureWithClientTimeout(BatchTimeoutOverrideType.NO_TIMEOUT,
+            client.callProcedureWithClientTimeout(BatchTimeoutOverrideType.NO_TIMEOUT,
                     "ArbitraryDurationProc", 30, TimeUnit.SECONDS, 6000);
         } catch (ProcCallException ex) {
             exceptionCalled = true;
@@ -226,7 +226,7 @@ public class TestClientFeatures extends TestCase {
         //no timeout of 0
         try {
             // Query timeout is in seconds second arg.
-            ((ClientImpl) client).callProcedureWithClientTimeout(BatchTimeoutOverrideType.NO_TIMEOUT,
+            client.callProcedureWithClientTimeout(BatchTimeoutOverrideType.NO_TIMEOUT,
                     "ArbitraryDurationProc", 0, TimeUnit.SECONDS, 2000);
         } catch (ProcCallException ex) {
             exceptionCalled = true;
@@ -244,7 +244,7 @@ public class TestClientFeatures extends TestCase {
         }
         // Query timeout is in seconds third arg.
         //Async versions
-        ((ClientImpl) client).callProcedureWithClientTimeout(new MyCallback(), BatchTimeoutOverrideType.NO_TIMEOUT,
+        client.callProcedureWithClientTimeout(new MyCallback(), BatchTimeoutOverrideType.NO_TIMEOUT,
                 "ArbitraryDurationProc", 3, TimeUnit.SECONDS, 6000);
         try {
             latch.await();
@@ -264,7 +264,7 @@ public class TestClientFeatures extends TestCase {
             }
         }
         // Query timeout is in seconds third arg.
-        ((ClientImpl) client).callProcedureWithClientTimeout(new MyCallback2(), BatchTimeoutOverrideType.NO_TIMEOUT,
+        client.callProcedureWithClientTimeout(new MyCallback2(), BatchTimeoutOverrideType.NO_TIMEOUT,
                 "ArbitraryDurationProc", 30, TimeUnit.SECONDS, 6000);
         try {
             latch2.await();
@@ -284,7 +284,7 @@ public class TestClientFeatures extends TestCase {
             }
         }
         // Query timeout is in seconds third arg.
-        ((ClientImpl) client).callProcedureWithClientTimeout(new MyCallback3(), BatchTimeoutOverrideType.NO_TIMEOUT,
+        client.callProcedureWithClientTimeout(new MyCallback3(), BatchTimeoutOverrideType.NO_TIMEOUT,
                 "ArbitraryDurationProc", 0, TimeUnit.SECONDS, 6000);
         try {
             latch3.await();
@@ -306,7 +306,7 @@ public class TestClientFeatures extends TestCase {
         /*
          * Check that a super tiny timeout triggers fast
          */
-        ((ClientImpl) client).callProcedureWithClientTimeout(new MyCallback4(), BatchTimeoutOverrideType.NO_TIMEOUT,
+        client.callProcedureWithClientTimeout(new MyCallback4(), BatchTimeoutOverrideType.NO_TIMEOUT,
                 "ArbitraryDurationProc", 50, TimeUnit.NANOSECONDS, 6000);
         final long start = System.nanoTime();
         try {
@@ -317,6 +317,132 @@ public class TestClientFeatures extends TestCase {
         }
         final long delta = System.nanoTime() - start;
         assertTrue(TimeUnit.NANOSECONDS.toSeconds(delta) < 1);
+    }
+
+    /**
+     * Nonblocking async mode. This test forces backpressure based on
+     * hitting the max outstanding transactions limit.
+     */
+    Object backpressureEvent = new Object();
+    boolean backpressureOn = false;
+
+    class NbCSL extends ClientStatusListenerExt {
+        @Override
+        public void backpressure(boolean status) {
+            synchronized (backpressureEvent) {
+                System.out.printf("Nonblocking async test: backpressure: %s -> %s%n", backpressureOn, status);
+                backpressureOn = status;
+                if (!status) { // backpressure removed
+                    backpressureEvent.notify();
+                }
+            }
+        }
+    }
+
+    CountDownLatch nbReady = new CountDownLatch(1);
+
+    class NbCallback implements ProcedureCallback {
+        @Override
+        public void clientCallback(ClientResponse clientResponse) throws Exception {
+            assertEquals(ClientResponse.SUCCESS, clientResponse.getStatus());
+            nbReady.countDown();
+        }
+    }
+
+    public void testNonblockingAsync() throws Exception {
+        NbCSL csl = new NbCSL();
+        NbCallback nbcb = new NbCallback();
+
+        ClientConfig config = new ClientConfig(null, null, csl);
+        config.setNonblockingAsync(); // default, 500 uS
+        config.setMaxOutstandingTxns(1); // ridiculously low for testing
+        config.setBackpressureQueueThresholds(1, 100_000); // 1 request, 100,000 bytes
+
+        // Validate that setters are setting
+        assertEquals(500_000, config.getNonblockingAsync());
+        assertEquals(1, config.getMaxOutstandingTxns());
+        assertEquals(1, config.getBackpressureQueueThresholds()[0]);
+        assertEquals(100_000, config.getBackpressureQueueThresholds()[1]);
+
+        // Connect is still synchronous
+        Client client = ClientFactory.createClient(config);
+        client.createConnection("localhost");
+
+        // Some common timeouts
+        final int shortCall = 10;
+        final int longCall = 1000;
+        final int waitTmo = 2 * longCall;
+
+        // We may be backpressured from connection setup; this is an artifact
+        // of testing with a low limit on outstanding requests. Use a throwaway
+        // request to clear it (we have to make a request because of how the
+        // implementation reports backpressure)
+        boolean b0 = client.callProcedure(nbcb, "ArbitraryDurationProc", shortCall);
+        if (b0) { // it was accepted, wait for it to finish
+            b0 = nbReady.await(waitTmo, TimeUnit.MILLISECONDS);
+            assertTrue("initial call did not complete", b0);
+        } else { // it was refused, wait for backpressure to clear
+            synchronized (backpressureEvent) {
+                if (backpressureOn) {
+                    backpressureEvent.wait(waitTmo);
+                }
+                assertFalse("initial backpressure did not clear", backpressureOn);
+            }
+        }
+
+        // Based on 1 outstanding txn max, expect 2nd call to be refused
+        // since 1st call takes 1 sec to complete
+        boolean b1 = client.callProcedure(nbcb, "ArbitraryDurationProc", longCall);
+        assertTrue("first call refused", b1);
+        boolean b2 = client.callProcedure(nbcb, "ArbitraryDurationProc", shortCall);
+        assertFalse("second call accepted", b2);
+
+        // Wait for no backpressure (first call completion) with time limit
+        // Note the test for backpressure initially being on assumes we can
+        // get here before the first call completes after 1 second.
+        synchronized (backpressureEvent) {
+            assertTrue("backpressure not on", backpressureOn);
+            backpressureEvent.wait(waitTmo); // no loop used; should be no spurious wakeups
+            assertFalse("backpressure still on", backpressureOn);
+        }
+
+        // Now we can send the second request
+        boolean b2a = client.callProcedure(nbcb, "ArbitraryDurationProc", shortCall);
+        assertTrue("second call refused", b2a);
+
+        // Wait on completion
+        client.drain();
+        client.close();
+    }
+
+    /**
+     * Nonblocking async mode incompatibility checks
+     */
+    public void testNonblockingVersusRateLimiting() throws Exception {
+
+        boolean gotExc1 = false;
+        ClientConfig config1 = new ClientConfig();
+        config1.setMaxTransactionsPerSecond(100_000);
+        try {
+            config1.setNonblockingAsync(250_000);
+        } catch (IllegalStateException ex) {
+            System.out.printf("setNonblockingAsync got expected exception: %s\n", ex.getMessage());
+            gotExc1 = true;
+        }
+        assertTrue("setNonblockingAsync succeeded, should have failed", gotExc1);
+        assertEquals(-1, config1.getNonblockingAsync());
+
+        boolean gotExc2 = false;
+        ClientConfig config2 = new ClientConfig();
+        config2.setNonblockingAsync(250_000);
+        try {
+            config2.setMaxTransactionsPerSecond(100_000);
+        } catch (IllegalStateException ex) {
+            System.out.printf("setMaxTransactionsPerSecond got expected exception: %s\n", ex.getMessage());
+            gotExc2 = true;
+        }
+        assertTrue("setMaxTransactionsPerSecond succeeded, should have failed", gotExc2);
+        assertEquals(250_000, config2.getNonblockingAsync());
     }
 
     /**
@@ -429,12 +555,19 @@ public class TestClientFeatures extends TestCase {
         client.backpressureBarrier(System.nanoTime(), TimeUnit.DAYS.toNanos(1));
         client.m_listener.backpressure(true);
 
+        // Backpressure is on. Wait with a timeout of 200 mS.
+        // Expect completion somewhere in the interval (200 mS, 1 min)
+        // and backpressure to remain on: we timed out.
         long start = System.nanoTime();
         assertTrue(client.backpressureBarrier(System.nanoTime(), TimeUnit.MILLISECONDS.toNanos(200)));
         long delta = System.nanoTime() - start;
         assertTrue(delta > TimeUnit.MILLISECONDS.toNanos(200));
         assertTrue(delta < TimeUnit.MINUTES.toNanos(1));
 
+        // Backpressure is on. Arrange to turn it off in 20 mS.
+        // Wait with a timeout of 1 min. Expect completion somewhere
+        // in the interval (20 mS, 1 min) and backpressure to now
+        // be off: we did not time out.
         start = System.nanoTime();
         new Thread() {
             @Override
@@ -448,6 +581,7 @@ public class TestClientFeatures extends TestCase {
             }
         }.start();
         assertFalse(client.backpressureBarrier(System.nanoTime(), TimeUnit.MINUTES.toNanos(1)));
+        delta = System.nanoTime() - start;
         assertTrue(delta < TimeUnit.MINUTES.toNanos(1));
         assertTrue(delta > TimeUnit.MILLISECONDS.toNanos(20));
     }
@@ -461,11 +595,8 @@ public class TestClientFeatures extends TestCase {
         assertFalse(dut.m_heavyweight);
         assertEquals(3000, dut.m_maxOutstandingTxns);
         assertEquals(Integer.MAX_VALUE, dut.m_maxTransactionsPerSecond);
-        assertFalse(dut.m_autoTune);
-        assertEquals(5, dut.m_autoTuneTargetInternalLatency);
         assertEquals(TimeUnit.MINUTES.toNanos(2), dut.m_procedureCallTimeoutNanos);
         assertEquals(TimeUnit.MINUTES.toMillis(2), dut.m_connectionResponseTimeoutMS);
-        assertTrue(dut.m_useClientAffinity);
         assertFalse(dut.m_reconnectOnConnectionLoss);
         assertEquals(TimeUnit.SECONDS.toMillis(1), dut.m_initialConnectionRetryIntervalMS);
         assertEquals(TimeUnit.SECONDS.toMillis(8), dut.m_maxConnectionRetryIntervalMS);

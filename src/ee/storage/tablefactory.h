@@ -1,8 +1,8 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This file contains original code and/or modifications of original code.
- * Any modifications made by VoltDB Inc. are licensed under the following
+ * Any modifications made by Volt Active Data Inc. are licensed under the following
  * terms and conditions:
  *
  * This program is free software: you can redistribute it and/or modify
@@ -78,7 +78,7 @@ public:
         voltdb::CatalogId databaseId, char const* name, TupleSchema* schema,
         const std::vector<std::string> &columnNames, char *signature, bool tableIsMaterialized = false,
         int partitionColumn = 0, // defaults provided for ease of testing.
-        TableType tableType = PERSISTENT, int tableAllocationTargetSize = 0, int tuplelimit = INT_MAX,
+        TableType tableType = PERSISTENT, int tableAllocationTargetSize = 0,
         int32_t compactionThreshold = 95, bool drEnabled = false, bool isReplicated = false);
 
     static StreamedTable* getStreamedTableForTest(

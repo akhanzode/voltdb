@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -42,7 +42,7 @@ public class PartitionDRGateway implements DurableUniqueIdListener, TransactionC
     }
 
     // Keep sync with EE DRTxnPartitionHashFlag at types.h
-    public enum DRTxnPartitionHashFlag {
+    public static enum DRTxnPartitionHashFlag {
         PLACEHOLDER,
         REPLICATED,
         SINGLE,
@@ -72,20 +72,6 @@ public class PartitionDRGateway implements DurableUniqueIdListener, TransactionC
     // Warning: This flag is for debug only and is not cleared anywhere after it is set.
     protected boolean m_debugDetectedPoisonPill = false;
     public static ImmutableMap<Integer, PartitionDRGateway> m_partitionDRGateways = ImmutableMap.of();
-    public static final DRConflictManager m_conflictManager;
-    static {
-        if (MiscUtils.isPro()) {
-            DRConflictManager tmpObj = null;
-            try {
-                Class<?> klass = Class.forName("org.voltdb.dr2.DRConflictManagerImpl");
-                Constructor<?> constructor = klass.getConstructor();
-                tmpObj = (DRConflictManager) constructor.newInstance();
-            } catch (Exception e) {}
-            m_conflictManager = tmpObj;
-        } else {
-            m_conflictManager = null;
-        }
-    }
 
     public boolean debugDetectedPoisonPill() {
         return m_debugDetectedPoisonPill;
@@ -185,6 +171,10 @@ public class PartitionDRGateway implements DurableUniqueIdListener, TransactionC
         failedBufContainer.discard();
     }
 
+    public void onReportDRBuffer(int partitionId, String reason, ByteBuffer failedBuf) {
+        // Dont do anything if DR is enabled we wont come here at all.
+    }
+
     @Override
     public void lastUniqueIdsMadeDurable(long spUniqueId, long mpUniqueId) {}
 
@@ -207,6 +197,14 @@ public class PartitionDRGateway implements DurableUniqueIdListener, TransactionC
                 lastSpUniqueId, lastMpUniqueId, EventType.values()[eventType], cont);
     }
 
+    public static void reportDRBuffer(int partitionId, String reason, ByteBuffer buf) {
+        final PartitionDRGateway pdrg = m_partitionDRGateways.get(partitionId);
+        if (pdrg == null) {
+            return;
+        }
+        pdrg.onReportDRBuffer(partitionId, reason, buf);
+    }
+
     public static void pushPoisonPill(int partitionId, String reason, BBContainer failedBufContainer) {
         failedBufContainer.tag("pushPoisonPill");
         final PartitionDRGateway pdrg = m_partitionDRGateways.get(partitionId);
@@ -218,25 +216,6 @@ public class PartitionDRGateway implements DurableUniqueIdListener, TransactionC
     }
 
     public void forceAllDRNodeBuffersToDisk(final boolean nofsync) {}
-
-    public static int reportDRConflict(int partitionId, int remoteClusterId, long remoteTimestamp, String tableName, int action,
-                                       int deleteConflict, ByteBuffer existingMetaTableForDelete, ByteBuffer existingTupleTableForDelete,
-                                       ByteBuffer expectedMetaTableForDelete, ByteBuffer expectedTupleTableForDelete,
-                                       int insertConflict, ByteBuffer existingMetaTableForInsert, ByteBuffer existingTupleTableForInsert,
-                                       ByteBuffer newMetaTableForInsert, ByteBuffer newTupleTableForInsert) {
-        assert m_conflictManager != null : "Community edition should not have any conflicts";
-        return m_conflictManager.resolveConflict(partitionId,
-                                                 remoteClusterId,
-                                                 remoteTimestamp,
-                                                 tableName,
-                                                 DRRecordType.values()[action],
-                                                 DRConflictType.values()[deleteConflict],
-                                                 existingMetaTableForDelete, existingTupleTableForDelete,
-                                                 expectedMetaTableForDelete, expectedTupleTableForDelete,
-                                                 DRConflictType.values()[insertConflict],
-                                                 existingMetaTableForInsert, existingTupleTableForInsert,
-                                                 newMetaTableForInsert, newTupleTableForInsert);
-    }
 
     @Override
     public void transactionCommitted(long spHandle) {}

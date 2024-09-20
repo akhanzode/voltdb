@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2019 VoltDB Inc.
+ * Copyright (C) 2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -35,7 +35,7 @@ import org.voltdb.utils.BuildDirectoryUtils;
 import org.voltdb.utils.CatalogUtil;
 import org.voltdb.utils.InMemoryJarfile;
 import org.voltdb.utils.MiscUtils;
-import org.voltdb.utils.VoltFile;
+import org.voltdb.utils.VoltSnapshotFile;
 
 public class TestSnapshotUtil {
     @Test
@@ -54,7 +54,7 @@ public class TestSnapshotUtil {
                 // VIEW_E1 contains the partition column of its source streamed table (included in the snapshot).
                 "CREATE VIEW VIEW_E1 AS SELECT C1, COUNT(*) FROM EXPORT_A GROUP BY C1;\n";
         String testDir = BuildDirectoryUtils.getBuildDirectoryPath();
-        final File file = VoltFile.createTempFile("testGetNormalTableNamesFromInMemoryJar", ".jar", new File(testDir));
+        final File file = VoltSnapshotFile.createTempFile("testGetNormalTableNamesFromInMemoryJar", ".jar", new File(testDir));
 
         VoltProjectBuilder builder = new VoltProjectBuilder();
         builder.addLiteralSchema(schema);

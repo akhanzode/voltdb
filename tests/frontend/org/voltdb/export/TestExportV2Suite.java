@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -23,7 +23,6 @@
 
 package org.voltdb.export;
 
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -40,7 +39,6 @@ import org.voltdb.VoltTable;
 import org.voltdb.VoltTable.ColumnInfo;
 import org.voltdb.VoltType;
 import org.voltdb.client.Client;
-import org.voltdb.client.ClientImpl;
 import org.voltdb.client.ClientResponse;
 import org.voltdb.compiler.VoltProjectBuilder;
 import org.voltdb.iv2.MpInitiator;
@@ -100,10 +98,8 @@ public class TestExportV2Suite extends TestExportBaseSocketExport {
     {
         System.out.println("testExportMultiTable");
         final Client client = getClient();
-        m_streamNames.addAll(Arrays.asList("S_ALLOW_NULLS", "S_NO_NULLS"));
-        while (!((ClientImpl) client).isHashinatorInitialized()) {
-            Thread.sleep(1000);
-            System.out.println("Waiting for hashinator to be initialized...");
+        if (!client.waitForTopology(60_000)) {
+            throw new RuntimeException("Timed out waiting for topology info");
         }
 
         for (int i = 0; i < 100; i++) {
@@ -143,16 +139,15 @@ public class TestExportV2Suite extends TestExportBaseSocketExport {
             params = convertValsToParams("S_NO_NULLS", i, rowdata);
             client.callProcedure("ExportInsertNoNulls", params);
         }
-        quiesceAndVerifyTarget(client, m_streamNames, m_verifier, DEFAULT_DELAY_MS, true);
+        m_verifier.waitForTuplesAndVerify(client);
     }
 
     @Test
     public void testExportControlParams() throws Exception {
         System.out.println("testExportControlParams");
         final Client client = getClient();
-        while (!((ClientImpl) client).isHashinatorInitialized()) {
-            Thread.sleep(1000);
-            System.out.println("Waiting for hashinator to be initialized...");
+        if (!client.waitForTopology(60_000)) {
+            throw new RuntimeException("Timed out waiting for topology info");
         }
 
         String[] targets = {"S_ALLOW_NULLS"};

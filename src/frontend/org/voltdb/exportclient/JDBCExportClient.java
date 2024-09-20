@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -60,6 +60,7 @@ import com.google_voltpatches.common.util.concurrent.ListeningExecutorService;
 
 public class JDBCExportClient extends ExportClientBase {
     private static final VoltLogger m_logger = new VoltLogger("ExportClient");
+    private static final int LOG_RATE_LIMIT = 10; // seconds
 
     String schema_prefix;
     boolean ignoreGenerations = false;
@@ -87,8 +88,12 @@ public class JDBCExportClient extends ExportClientBase {
         ,UNRECOGNIZED;
     }
     private final Set<DatabaseType> supportsIfNotExists =
-            ImmutableSet.<DatabaseType>builder().add(
-                    DatabaseType.POSTGRES).add(DatabaseType.MYSQL).add(DatabaseType.VERTICA).build();
+        ImmutableSet.<DatabaseType>builder()
+        .add(DatabaseType.POSTGRES)
+        .add(DatabaseType.MYSQL)
+        .add(DatabaseType.NETEZZA)
+        .add(DatabaseType.VERTICA)
+        .build();
 
     static final class RefCountedDS {
         private final DataSource ds;
@@ -159,13 +164,16 @@ public class JDBCExportClient extends ExportClientBase {
         //If the column value is longer than the limit, truncate the value to avoid flushing too much data to log.
         private static final int MAX_COLUMN_PRINT_SIZE = 1024;
 
-        private Connection m_conn = null;
-        private PreparedStatement pstmt = null;
+        // Those 2 fields can be reset concurrently when a block timeout closes the connection
+        private volatile Connection m_conn = null;
+        private volatile PreparedStatement m_pstmt = null;
+
         private final ListeningExecutorService m_es;
         DatabaseType m_dbType = null;
         private String m_preparedStmtStr = null;
         private String m_createTableStr = null;
         private boolean m_supportsUpsert = false;
+        private boolean m_supportsDuplicateKey = false;
         private boolean m_warnedOfUnsupportedOperation = false;
         private boolean m_supportsBatchUpdates;
         private boolean m_disableAutoCommits = true;
@@ -362,12 +370,11 @@ public class JDBCExportClient extends ExportClientBase {
             DatabaseMetaData md = m_conn.getMetaData();
             supportsBatchUpdatesTmp = md.supportsBatchUpdates();
             String dbName = md.getDatabaseProductName();
-            boolean supportsDuplicateKey = false;
             boolean supportsUpsert = false;
             if (dbName.equals("MySQL")) {
                 m_dbType = DatabaseType.MYSQL;
                 identifierQuoteTemp = "`";
-                supportsDuplicateKey = true;
+                m_supportsDuplicateKey = true;
             } else if (dbName.equals("PostgreSQL")) {
                 m_dbType = DatabaseType.POSTGRES;
                 identifierQuoteTemp = "\"";
@@ -440,7 +447,7 @@ public class JDBCExportClient extends ExportClientBase {
                 m_preparedStmtStr = "UP" + pstmtStringTmp.substring(2);
                 m_supportsUpsert = true;
             }
-            else if (supportsDuplicateKey) {
+            else if (m_supportsDuplicateKey) {
                 m_preparedStmtStr = pstmtStringTmp + " ON DUPLICATE KEY UPDATE " + updateFields;
                 m_supportsUpsert = true;
             }
@@ -475,11 +482,14 @@ public class JDBCExportClient extends ExportClientBase {
                 } catch (SQLException e1) {
                     throw new RuntimeException(e1);
                 }
-                if (!e.getSQLState().equals(SQLSTATE_UNIQUE_VIOLATION) &&
-                        //Todo, this predicate is broken, the regex doesn't work
-                        !(m_dbType == DatabaseType.NETEZZA && !e.getMessage().matches(".+Relation\\s+'[^']+'\\s+already\\s+exists.+")) &&
-                        (m_dbType == DatabaseType.ORACLE && !e.getMessage().contains("ORA-00955"))) {
-                    //Crappy hack around the fact that create if not exists is racy in postgres
+                if ((e.getSQLState().equals(SQLSTATE_UNIQUE_VIOLATION)) ||
+                    (e.getMessage().toLowerCase().contains("already exists")) ||
+                    (m_dbType == DatabaseType.ORACLE && e.getMessage().contains("ORA-00955"))) {
+                    // table already exists
+                    // set m_createTableStr = null, then createTable() won't be called again
+                    m_logger.info("SQL Exception indicates the table already exists, proceeding with inserts");
+                    m_createTableStr = null;
+                } else {
                     throw new RuntimeException(e);
                 }
             }
@@ -572,12 +582,12 @@ public class JDBCExportClient extends ExportClientBase {
                     }
                     m_curGenId = curSchema.generation;
                     m_curSchema = curSchema;
-                    if (pstmt != null) {
+                    if (m_pstmt != null) {
                         try {
-                            pstmt.close();
+                            m_pstmt.close();
                         } catch (Exception e) {}
                         finally {
-                            pstmt = null;
+                            m_pstmt = null;
                         }
                     }
                     m_preparedStmtStr = null;
@@ -593,12 +603,12 @@ public class JDBCExportClient extends ExportClientBase {
         public void onBlockStart(ExportRow row) throws RestartBlockException {
             m_dataRows.clear();
             if (m_conn == null) {
-                if (pstmt != null) {
+                if (m_pstmt != null) {
                     try {
-                        pstmt.close();
+                        m_pstmt.close();
                     } catch (Exception e) {}
                     finally {
-                        pstmt = null;
+                        m_pstmt = null;
                     }
                 }
                 try {
@@ -614,21 +624,33 @@ public class JDBCExportClient extends ExportClientBase {
 
         @Override
         public void onBlockCompletion(ExportRow row) throws RestartBlockException {
+            PreparedStatement pstmt = m_pstmt;
+            Connection conn = m_conn;
+
+            if (pstmt == null || conn == null) {
+                m_logger.rateLimitedWarn(LOG_RATE_LIMIT, "Unable to commit, connection closed, probably after block timeout");
+                throw new RestartBlockException(true);
+            }
+
             try {
                 if (m_supportsBatchUpdates) {
                     pstmt.executeBatch();
                 }
                 if (m_disableAutoCommits) {
-                    m_conn.commit();
+                    conn.commit();
                 }
             } catch(BatchUpdateException e){
-                logBatchErrors(e);
+                if (!warnClosed(conn)) {
+                    logBatchErrors(e);
+                }
                 throw new RestartBlockException(true);
             } catch (SQLException e) {
-                rateLimitedLogError(m_logger, "commit() failed for row %s", Throwables.getStackTraceAsString(e));
+                if (!warnClosed(conn)) {
+                    m_logger.rateLimitedError(LOG_RATE_LIMIT, "commit() failed for row %s", Throwables.getStackTraceAsString(e));
+                }
                 throw new RestartBlockException(true);
             } catch (Exception e) {
-                rateLimitedLogError(m_logger, "Exception while executing and committing batch %s", Throwables.getStackTraceAsString(e));
+                m_logger.rateLimitedError(LOG_RATE_LIMIT, "Exception while executing and committing batch %s", Throwables.getStackTraceAsString(e));
                 throw new RestartBlockException(true);
             } finally{
                 m_dataRows.clear();
@@ -636,8 +658,20 @@ public class JDBCExportClient extends ExportClientBase {
             }
         }
 
-        private void logBatchErrors(BatchUpdateException e){
+        // Note: call on commit exception
+        private boolean warnClosed(Connection conn) {
+            try {
+                if (conn.isClosed()) {
+                    m_logger.rateLimitedWarn(LOG_RATE_LIMIT, "Unable to commit, connection closed, probably after block timeout");
+                    return true;
+                }
+            } catch (Exception e) {
+                // Ignore
+            }
+            return false;
+        }
 
+        private void logBatchErrors(BatchUpdateException e){
            int [] results = e.getUpdateCounts();
            StringBuilder builder = new StringBuilder();
            for(int i = 0; i < results.length; i++){
@@ -652,7 +686,7 @@ public class JDBCExportClient extends ExportClientBase {
                 }
             }
             Throwable rootCause = ExceptionUtils.getRootCause(e);
-            rateLimitedLogError(m_logger, "commit() failed in table %s for row(s):\n %s",
+            m_logger.rateLimitedError(LOG_RATE_LIMIT, "commit() failed in table %s for row(s):\n %s",
                     builder.toString(),
                     Throwables.getStackTraceAsString(rootCause != null ? rootCause : e));
         }
@@ -699,12 +733,12 @@ public class JDBCExportClient extends ExportClientBase {
 
             if (rowinst.getOperation() == ROW_OPERATION.UPDATE_NEW && !m_supportsUpsert) {
                 if (!m_warnedOfUnsupportedOperation) {
-                    rateLimitedLogWarn(m_logger, "JDBC export skipped past a row with an operation type " +
+                    m_logger.rateLimitedWarn(LOG_RATE_LIMIT, "JDBC export skipped past a row with an operation type " +
                             rowinst.getOperation().name() + " from stream " + rowinst.tableName);
                 }
                 return true;
             }
-            if (pstmt == null) {
+            if (m_pstmt == null) {
                 if (m_disableAutoCommits) {
                     try {
                         m_conn.setAutoCommit(false);
@@ -727,7 +761,7 @@ public class JDBCExportClient extends ExportClientBase {
                     if (m_logger.isDebugEnabled()) {
                         m_logger.debug(m_preparedStmtStr);
                     }
-                    pstmt = m_conn.prepareStatement(m_preparedStmtStr);
+                    m_pstmt = m_conn.prepareStatement(m_preparedStmtStr);
                 } catch (Exception e) {
                     m_logger.warn("JDBC export unable to prepare insert statement", e);
                     closeConnection();
@@ -735,56 +769,99 @@ public class JDBCExportClient extends ExportClientBase {
                 }
             }
 
+            // Insert values in statement - if the statement supports duplicate keys,
+            // insert each value twice at their expected positions in statement.
             Object[] row = rowinst.values;
             List<VoltType> columnTypes = rowinst.types;
             boolean restartBlock = false;
             try {
+                int nCols = columnTypes.size() - firstField;
+
                 for (int i = firstField; i < columnTypes.size(); i++) {
+
                     final int pstmtIndex = i + 1 - firstField;
+                    final int pstmtIndex2 = pstmtIndex + nCols;
+
                     if (row[i] == null) {
-                        pstmt.setNull(pstmtIndex, Types.NULL);
+                        m_pstmt.setNull(pstmtIndex, Types.NULL);
+                        if (m_supportsDuplicateKey) {
+                            m_pstmt.setNull(pstmtIndex2, Types.NULL);
+                        }
                     } else if (columnTypes.get(i) == VoltType.DECIMAL) {
-                        pstmt.setBigDecimal(pstmtIndex, (BigDecimal)row[i]);
+                        m_pstmt.setBigDecimal(pstmtIndex, (BigDecimal)row[i]);
+                        if (m_supportsDuplicateKey) {
+                            m_pstmt.setBigDecimal(pstmtIndex2, (BigDecimal)row[i]);
+                        }
                     } else if (columnTypes.get(i) == VoltType.TINYINT) {
-                        pstmt.setByte(pstmtIndex, (Byte)row[i]);
+                        m_pstmt.setByte(pstmtIndex, (Byte)row[i]);
+                        if (m_supportsDuplicateKey) {
+                            m_pstmt.setByte(pstmtIndex2, (Byte)row[i]);
+                        }
                     } else if (columnTypes.get(i) == VoltType.SMALLINT) {
-                        pstmt.setShort(pstmtIndex, (Short)row[i]);
+                        m_pstmt.setShort(pstmtIndex, (Short)row[i]);
+                        if (m_supportsDuplicateKey) {
+                            m_pstmt.setShort(pstmtIndex2, (Short)row[i]);
+                        }
                     } else if (columnTypes.get(i) == VoltType.INTEGER) {
-                        pstmt.setInt(pstmtIndex, (Integer)row[i]);
+                        m_pstmt.setInt(pstmtIndex, (Integer)row[i]);
+                        if (m_supportsDuplicateKey) {
+                            m_pstmt.setInt(pstmtIndex2, (Integer)row[i]);
+                        }
                     } else if (columnTypes.get(i) == VoltType.BIGINT) {
-                        pstmt.setLong(pstmtIndex, (Long)row[i]);
+                        m_pstmt.setLong(pstmtIndex, (Long)row[i]);
+                        if (m_supportsDuplicateKey) {
+                            m_pstmt.setLong(pstmtIndex2, (Long)row[i]);
+                        }
                     } else if (columnTypes.get(i) == VoltType.FLOAT) {
-                        pstmt.setDouble(pstmtIndex, (Double)row[i]);
+                        m_pstmt.setDouble(pstmtIndex, (Double)row[i]);
+                        if (m_supportsDuplicateKey) {
+                            m_pstmt.setDouble(pstmtIndex2, (Double)row[i]);
+                        }
                     } else if (columnTypes.get(i) == VoltType.STRING) {
-                        pstmt.setString(pstmtIndex, (String)row[i]);
+                        m_pstmt.setString(pstmtIndex, (String)row[i]);
+                        if (m_supportsDuplicateKey) {
+                            m_pstmt.setString(pstmtIndex2, (String)row[i]);
+                        }
                     } else if (columnTypes.get(i) == VoltType.TIMESTAMP) {
                         TimestampType timestamp = (TimestampType)row[i];
-                        pstmt.setTimestamp(pstmtIndex, timestamp.asJavaTimestamp());
+                        m_pstmt.setTimestamp(pstmtIndex, timestamp.asJavaTimestamp());
+                        if (m_supportsDuplicateKey) {
+                            m_pstmt.setTimestamp(pstmtIndex2, timestamp.asJavaTimestamp());
+                        }
                     } else if (columnTypes.get(i) == VoltType.GEOGRAPHY_POINT) {
                         GeographyPointValue gpv = (GeographyPointValue)row[i];
-                        pstmt.setString(pstmtIndex, gpv.toWKT());
+                        m_pstmt.setString(pstmtIndex, gpv.toWKT());
+                        if (m_supportsDuplicateKey) {
+                            m_pstmt.setString(pstmtIndex2, gpv.toWKT());
+                        }
                     } else if (columnTypes.get(i) == VoltType.GEOGRAPHY) {
                         GeographyValue gv = (GeographyValue)row[i];
-                        pstmt.setString(pstmtIndex, gv.toWKT());
+                        m_pstmt.setString(pstmtIndex, gv.toWKT());
+                        if (m_supportsDuplicateKey) {
+                            m_pstmt.setString(pstmtIndex2, gv.toWKT());
+                        }
                     } else if (columnTypes.get(i) == VoltType.VARBINARY) {
                         byte[] bytes = (byte[])row[i];
-                        pstmt.setBytes(pstmtIndex, bytes);
+                        m_pstmt.setBytes(pstmtIndex, bytes);
+                        if (m_supportsDuplicateKey) {
+                            m_pstmt.setBytes(pstmtIndex2, bytes);
+                        }
                     }
                 }
 
                 try {
                     if (m_supportsBatchUpdates) {
-                        pstmt.addBatch();
+                        m_pstmt.addBatch();
                         m_dataRows.add(new BatchRow(rowinst));
                     } else {
-                        pstmt.executeUpdate();
+                        m_pstmt.executeUpdate();
                     }
                 } catch (SQLException e) {
-                    rateLimitedLogError(m_logger, "executeUpdate() failed in processRow() for table %s %s", (rowinst == null ? "Unknown" : rowinst.tableName), Throwables.getStackTraceAsString(e));
+                    m_logger.rateLimitedError(LOG_RATE_LIMIT, "executeUpdate() failed in processRow() for table %s %s", (rowinst == null ? "Unknown" : rowinst.tableName), Throwables.getStackTraceAsString(e));
                     restartBlock = true;
                 }
             } catch (Exception e) {
-                rateLimitedLogError(m_logger, "processRow() failed in table %s, %s", (rowinst == null ? "Unknown" : rowinst.tableName), Throwables.getStackTraceAsString(e));
+                m_logger.rateLimitedError(LOG_RATE_LIMIT, "processRow() failed in table %s, %s", (rowinst == null ? "Unknown" : rowinst.tableName), Throwables.getStackTraceAsString(e));
                 restartBlock = true;
             }
 
@@ -803,8 +880,8 @@ public class JDBCExportClient extends ExportClientBase {
         private void closeConnection() {
             try {
                 try {
-                    if (pstmt != null) {
-                        pstmt.close();
+                    if (m_pstmt != null) {
+                        m_pstmt.close();
                     }
                 } catch (Exception e) {
                     m_logger.warn("Exception closing pstmt for reset for table ", e);
@@ -818,13 +895,15 @@ public class JDBCExportClient extends ExportClientBase {
                 }
             } finally {
                 m_conn = null;
-                pstmt = null;
+                m_pstmt = null;
             }
         }
 
+        // Note: this can be called concurrently to processRow/onBlockComplertion when a block timeout occurs
         @Override
         public void sourceNoLongerAdvertised(AdvertisedDataSource source) {
             if (m_es == null) {
+                closeConnection();
                 return;
             }
             m_es.shutdown();

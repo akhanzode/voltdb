@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -18,13 +18,18 @@
 package org.voltdb.client;
 
 import java.io.File;
-import java.io.FileWriter;
+import java.io.InterruptedIOException;
 import java.io.IOException;
+import java.net.ConnectException;
 import java.net.InetSocketAddress;
-import java.util.Arrays;
+import java.net.UnknownHostException;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -33,21 +38,22 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantLock;
-import java.util.logging.Logger;
+import java.util.concurrent.atomic.AtomicReference;
+import com.google_voltpatches.common.net.HostAndPort;
+import io.netty.handler.ssl.SslContext;
 
 import org.voltcore.utils.CoreUtils;
 import org.voltcore.utils.ssl.SSLConfiguration;
 import org.voltdb.ClientResponseImpl;
 import org.voltdb.VoltTable;
+import org.voltdb.client.ClientStatusListenerExt.AutoConnectionStatus;
+import org.voltdb.client.ClientStatusListenerExt.DisconnectCause;
 import org.voltdb.client.VoltBulkLoader.BulkLoaderFailureCallBack;
 import org.voltdb.client.VoltBulkLoader.BulkLoaderState;
 import org.voltdb.client.VoltBulkLoader.BulkLoaderSuccessCallback;
 import org.voltdb.client.VoltBulkLoader.VoltBulkLoader;
-import org.voltdb.common.Constants;
 import org.voltdb.utils.Encoder;
 
-import io.netty.handler.ssl.SslContext;
 
 /**
  *  A client that connects to one or more nodes in a VoltCluster
@@ -56,69 +62,90 @@ import io.netty.handler.ssl.SslContext;
  */
 public final class ClientImpl implements Client {
 
-    /*
-     * refresh the partition key cache every 1 second
-     */
-    static long PARTITION_KEYS_INFO_REFRESH_FREQUENCY = 1000;
+    // Global instance of null callback for performance (we only need one)
+    private static final ProcedureCallback NULL_CALLBACK = new NullCallback();
 
-    // call initiated by the user use positive handles
+    // Calls initiated by the user use positive handles
     private final AtomicLong m_handle = new AtomicLong(0);
 
-    /*
-     * Username and password as set by createConnection. Used
-     * to ensure that the same credentials are used every time
-     * with that inconsistent API.
-     */
-    // stored credentials
-    private boolean m_credentialsSet = false;
-    private final ReentrantLock m_credentialComparisonLock =
-            new ReentrantLock();
-    private String m_createConnectionUsername = null;
-    private byte[] m_hashedPassword = null;
-    private int m_passwordHashCode = 0;
-    final InternalClientStatusListener m_listener = new InternalClientStatusListener();
-    ClientStatusListenerExt m_clientStatusListener = null;
-
-    private ScheduledExecutorService m_ex = null;
-    /*
-     * Username and password as set by the constructor.
-     */
+    // Username and password as set from config
     private final String m_username;
-    private final byte m_passwordHash[];
+    private final byte[] m_passwordHash;
     private final ClientAuthScheme m_hashScheme;
+
+    // SSL context (null if not using SSL)
     private final SslContext m_sslContext;
 
+    // Mux/demux connections to cluster
+    private final Distributer m_distributer;
 
-    /**
-     * These threads belong to the network thread pool
-     * that invokes callbacks. These threads are "blessed"
-     * and should never experience backpressure. This ensures that the
-     * network thread pool doesn't block when queuing procedures from
-     * a callback.
-     */
+    // True for any kind of automatic reconnect.
+    private final boolean m_autoReconnect;
+
+    // Time (in msec) between reconnect attempts
+    private final long m_reconnectDelay;
+    private final long m_reconnectMaxDelay;
+
+    // For reconnect on connection loss (null if not enabled
+    // or if running in topology-change-aware mode).
+    private final ReconnectStatusListener m_reconnectStatusListener;
+
+    // Execution service for topology-change-aware clients
+    private final ScheduledExecutorService m_ex;
+    private final boolean m_topologyChangeAware;
+
+    // Our own status listener - package access for unit test
+    final InternalClientStatusListener m_listener = new InternalClientStatusListener();
+
+    // User's status listener
+    private final ClientStatusListenerExt m_clientStatusListener;
+
+    // Flow control mechanisms.
+    // Threads belonging to the network thread pool that invokes callbacks are "blessed"
+    // and should never experience backpressure. This ensures that the network thread
+    // pool doesn't block when queuing procedures from a callback.
+    private final Object m_backpressureLock = new Object();
     private final CopyOnWriteArrayList<Long> m_blessedThreadIds = new CopyOnWriteArrayList<>();
+    private boolean m_backpressure = false;
+    private boolean m_nonblocking = false;
+    private long m_asyncBlockingTimeout = 0;
 
-    private BulkLoaderState m_vblGlobals = new BulkLoaderState(this);
+    // Priority for all requests (if set)
+    private int m_requestPriority = ProcedureInvocation.NO_PRIORITY;
 
-    // global instance of null callback for performance (you only need one)
-    private static final ProcedureCallback NULL_CALLBACK = new NullCallback();
+    // Tracks historical connections for when we have nothing
+    // to ask for topo info.
+    private final Set<HostAndPort> m_connectHistory;
+    private boolean m_newConnectEpoch;
+
+    // For bulk-loader use
+    private BulkLoaderState m_vblGlobals;
+
+    // Client shutdown flag
+    private volatile boolean m_isShutdown;
+
 
     /****************************************************
                         Public API
      ****************************************************/
 
-    private volatile boolean m_isShutdown = false;
-
     /**
      * Create a new client without any initial connections.
-     * Also provide a hint indicating the expected serialized size of
-     * most outgoing procedure invocations. This helps size initial allocations
-     * for serializing network writes
      */
     ClientImpl(ClientConfig config) {
 
-        if (config.m_topologyChangeAware && !config.m_useClientAffinity) {
-            throw new IllegalArgumentException("The client affinity must be enabled to enable topology awareness.");
+        String username = config.m_username;
+        if (config.m_subject != null) {
+            username = ClientConfig.getUserNameFromSubject(config.m_subject);
+        }
+        m_username = username;
+
+        m_hashScheme = config.m_hashScheme;
+        if (config.m_cleartext) {
+            String passwd = config.m_password != null ? config.m_password : "";
+            m_passwordHash = ConnectionUtil.getHashedPassword(m_hashScheme, passwd);
+        } else {
+            m_passwordHash = Encoder.hexDecode(config.m_password);
         }
 
         if (config.m_enableSSL) {
@@ -127,274 +154,262 @@ public final class ClientImpl implements Client {
             m_sslContext = null;
         }
 
-        m_distributer = new Distributer(
-                config.m_heavyweight,
-                config.m_procedureCallTimeoutNanos,
-                config.m_connectionResponseTimeoutMS,
-                config.m_useClientAffinity,
-                config.m_sendReadsToReplicasBytDefaultIfCAEnabled,
-                config.m_subject,
-                m_sslContext);
+        m_distributer = new Distributer(config.m_heavyweight,
+                                        config.m_procedureCallTimeoutNanos,
+                                        config.m_connectionResponseTimeoutMS,
+                                        config.m_subject,
+                                        m_sslContext);
         m_distributer.addClientStatusListener(m_listener);
-        String username = config.m_username;
-        if (config.m_subject != null) {
-            username = ClientConfig.getUserNameFromSubject(config.m_subject);
-        }
-        m_username = username;
-        m_distributer.setTopologyChangeAware(config.m_topologyChangeAware);
-        if (config.m_topologyChangeAware) {
+
+        m_topologyChangeAware = config.m_topologyChangeAware;
+        m_autoReconnect = config.m_reconnectOnConnectionLoss | m_topologyChangeAware;
+        m_reconnectDelay = config.m_initialConnectionRetryIntervalMS;
+        m_reconnectMaxDelay = config.m_maxConnectionRetryIntervalMS;
+
+        m_distributer.setTopologyChangeAware(m_topologyChangeAware);
+        if (m_topologyChangeAware) {
             m_ex = Executors.newSingleThreadScheduledExecutor(CoreUtils.getThreadFactory("Topoaware thread"));
+            m_connectHistory = new LinkedHashSet<>();
+        } else {
+            m_ex = null;
+            m_connectHistory = null;
         }
 
-        if (config.m_reconnectOnConnectionLoss) {
-            m_reconnectStatusListener = new ReconnectStatusListener(this,
-                    config.m_initialConnectionRetryIntervalMS, config.m_maxConnectionRetryIntervalMS);
+        if (m_autoReconnect && !m_topologyChangeAware) {
+            m_reconnectStatusListener = new ReconnectStatusListener(this, m_reconnectDelay, m_reconnectMaxDelay);
             m_distributer.addClientStatusListener(m_reconnectStatusListener);
         } else {
             m_reconnectStatusListener = null;
         }
 
-        m_hashScheme = config.m_hashScheme;
-        if (config.m_cleartext) {
-            m_passwordHash = ConnectionUtil.getHashedPassword(m_hashScheme, config.m_password);
-        } else {
-            m_passwordHash = Encoder.hexDecode(config.m_password);
+        if (config.m_requestPriority > 0) {
+            m_requestPriority = config.m_requestPriority; // already validated
+            m_distributer.useRequestPriority();
         }
+
         if (config.m_listener != null) {
             m_distributer.addClientStatusListener(config.m_listener);
-            m_clientStatusListener = config.m_listener;
         }
+        m_clientStatusListener = config.m_listener;
 
         assert(config.m_maxOutstandingTxns > 0);
+        m_distributer.m_rateLimiter.setLimits(config.m_maxTransactionsPerSecond,
+                                              config.m_maxOutstandingTxns);
+
         m_blessedThreadIds.addAll(m_distributer.getThreadIds());
-        if (config.m_autoTune) {
-            m_distributer.m_rateLimiter.enableAutoTuning(
-                    config.m_autoTuneTargetInternalLatency);
-        }
-        else {
-            m_distributer.m_rateLimiter.setLimits(
-                    config.m_maxTransactionsPerSecond, config.m_maxOutstandingTxns);
-        }
+
+        m_nonblocking = config.m_nonblocking;
+        m_asyncBlockingTimeout = config.m_asyncBlockingTimeout;
+        m_distributer.setBackpressureQueueThresholds(config.m_backpressureQueueRequestLimit,
+                                                     config.m_backpressureQueueByteLimit);
     }
 
-    private boolean verifyCredentialsAreAlwaysTheSame(String username, byte[] hashedPassword) {
-        assert(username != null);
-        m_credentialComparisonLock.lock();
-        try {
-            if (m_credentialsSet == false) {
-                m_credentialsSet = true;
-                m_createConnectionUsername = username;
-                if (hashedPassword != null) {
-                    m_hashedPassword = Arrays.copyOf(hashedPassword, hashedPassword.length);
-                    m_passwordHashCode = Arrays.hashCode(hashedPassword);
-                }
-                return true;
-            }
-            else {
-                if (!m_createConnectionUsername.equals(username)) {
-                    return false;
-                }
-                if (hashedPassword == null) {
-                    return m_hashedPassword == null;
-                } else {
-                    for (int i = 0; i < hashedPassword.length; i++) {
-                        if (hashedPassword[i] != m_hashedPassword[i]) {
-                            return false;
-                        }
-                    }
-                }
-                return true;
-            }
-        } finally {
-            m_credentialComparisonLock.unlock();
-        }
-    }
-
-    public String getUsername() {
-        return m_createConnectionUsername;
-    }
-
-    public int getPasswordHashCode() {
-        return m_passwordHashCode;
-    }
-
+    /**
+     * Not in public API; used by unit test
+     */
     public SslContext getSSLContext() {
         return m_sslContext;
     }
 
-    public void createConnectionWithHashedCredentials(
-            String host,
-            int port,
-            String program,
-            byte[] hashedPassword) throws IOException {
-        if (m_isShutdown) {
-            throw new IOException("Client instance is shutdown");
-        }
-        final String subProgram = (program == null) ? "" : program;
-        final byte[] subPassword = (hashedPassword == null) ? ConnectionUtil.getHashedPassword(m_hashScheme, "") : hashedPassword;
-
-        if (!verifyCredentialsAreAlwaysTheSame(subProgram, subPassword)) {
-            throw new IOException("New connection authorization credentials do not match previous credentials for client.");
-        }
-
-        m_distributer.createConnectionWithHashedCredentials(host, subProgram, subPassword, port, m_hashScheme);
-    }
-
     /**
-     * Synchronously invoke a procedure call blocking until a result is available.
+     * Synchronously invoke a procedure call blocking until a result is available,
+     * with default procedure timeout and no batch timeout.
+     *
      * @param procName class name (not qualified by package) of the procedure to execute.
      * @param parameters vararg list of procedure's parameter values.
-     * @return array of VoltTable results.
-     * @throws org.voltdb.client.ProcCallException
-     * @throws NoConnectionsException
+     * @return ClientResponse for execution.
      */
     @Override
-    public final ClientResponse callProcedure(String procName, Object... parameters)
-            throws IOException, NoConnectionsException, ProcCallException {
-        return callProcedureWithClientTimeoutImpl(BatchTimeoutOverrideType.NO_TIMEOUT, procName,
-                Distributer.USE_DEFAULT_CLIENT_TIMEOUT, TimeUnit.SECONDS, parameters);
+    public final ClientResponse callProcedure(String procName,
+                                              Object... parameters)
+        throws IOException, NoConnectionsException, ProcCallException {
+        return callProcedureWithClientTimeoutImpl(BatchTimeoutOverrideType.NO_TIMEOUT,
+                                                  procName,
+                                                  Distributer.USE_DEFAULT_CLIENT_TIMEOUT,
+                                                  TimeUnit.SECONDS,
+                                                  parameters);
     }
 
     /**
-     * Synchronously invoke a procedure call blocking until a result is available.
-     * @param batchTimeout procedure invocation batch timeout.
-     * @param procName class name (not qualified by package) of the procedure to execute.
-     * @param parameters vararg list of procedure's parameter values.
-     * @return array of VoltTable results.
-     * @throws org.voltdb.client.ProcCallException
-     * @throws NoConnectionsException
-     */
-    @Override
-    public ClientResponse callProcedureWithTimeout(
-            int batchTimeout,
-            String procName,
-            Object... parameters) throws IOException, NoConnectionsException, ProcCallException {
-        return callProcedureWithClientTimeout(batchTimeout, procName,
-                Distributer.USE_DEFAULT_CLIENT_TIMEOUT, TimeUnit.SECONDS, parameters);
-    }
-
-    /**
-     * Same as the namesake without allPartition option.
-     */
-    public ClientResponse callProcedureWithClientTimeout(
-            int batchTimeout,
-            String procName,
-            long clientTimeout,
-            TimeUnit unit,
-            Object... parameters) throws IOException, ProcCallException {
-        return callProcedureWithClientTimeoutImpl(batchTimeout, procName, clientTimeout, unit, parameters);
-    }
-
-    /**
-     * Synchronously invoke a procedure call blocking until a result is available.
+     * Synchronously invoke a procedure call blocking until a result is available,
+     * with default procedure timeout.
      *
      * @param batchTimeout procedure invocation batch timeout.
-     * @param allPartition whether this is an all-partition invocation
+     * @param procName class name (not qualified by package) of the procedure to execute.
+     * @param parameters vararg list of procedure's parameter values.
+     * @return ClientResponse for execution.
+     */
+    @Override
+    public ClientResponse callProcedureWithTimeout(int batchTimeout,
+                                                   String procName,
+                                                   Object... parameters)
+        throws IOException, NoConnectionsException, ProcCallException {
+        return callProcedureWithClientTimeoutImpl(batchTimeout,
+                                                  procName,
+                                                  Distributer.USE_DEFAULT_CLIENT_TIMEOUT,
+                                                  TimeUnit.SECONDS,
+                                                  parameters);
+    }
+
+    /**
+     * Synchronously invoke a procedure call blocking until a result is available,
+     * with caller-specified procedure timeout.
+     *
+     * @param batchTimeout procedure invocation batch timeout.
      * @param procName class name (not qualified by package) of the procedure to execute.
      * @param clientTimeout timeout for the procedure
      * @param unit TimeUnit of procedure timeout
      * @param parameters vararg list of procedure's parameter values.
      * @return ClientResponse for execution.
-     * @throws org.voltdb.client.ProcCallException
-     * @throws NoConnectionsException
      */
-    protected ClientResponse callProcedureWithClientTimeoutImpl(
-            int batchTimeout,
-            String procName,
-            long clientTimeout,
-            TimeUnit unit,
-            Object... parameters) throws IOException, NoConnectionsException, ProcCallException {
+    @Override
+    public ClientResponse callProcedureWithClientTimeout(int batchTimeout,
+                                                         String procName,
+                                                         long clientTimeout,
+                                                         TimeUnit unit,
+                                                         Object... parameters)
+        throws IOException, NoConnectionsException, ProcCallException {
+        return callProcedureWithClientTimeoutImpl(batchTimeout,
+                                                  procName,
+                                                  clientTimeout,
+                                                  unit,
+                                                  parameters);
+    }
+
+    /**
+     * Synchronously invoke a procedure call blocking until a result is available.
+     * Common implementation.
+     *
+     * @param batchTimeout procedure invocation batch timeout.
+     * @param procName class name (not qualified by package) of the procedure to execute.
+     * @param clientTimeout timeout for the procedure
+     * @param unit TimeUnit of procedure timeout
+     * @param parameters vararg list of procedure's parameter values.
+     * @return ClientResponse for execution.
+     */
+    private ClientResponse callProcedureWithClientTimeoutImpl(int batchTimeout,
+                                                              String procName,
+                                                              long clientTimeout,
+                                                              TimeUnit unit,
+                                                              Object... parameters)
+        throws IOException, NoConnectionsException, ProcCallException {
         long handle = m_handle.getAndIncrement();
-        ProcedureInvocation invocation
-                = new ProcedureInvocation(handle, batchTimeout, -1, procName, parameters);
+        ProcedureInvocation invocation = new ProcedureInvocation(handle,
+                                                                 batchTimeout,
+                                                                 ProcedureInvocation.NO_PARTITION,
+                                                                 m_requestPriority,
+                                                                 procName,
+                                                                 parameters);
         long nanos = unit.toNanos(clientTimeout);
         return internalSyncCallProcedure(nanos, invocation);
     }
 
     /**
      * Asynchronously invoke a procedure call.
+     *
      * @param callback TransactionCallback that will be invoked with procedure results.
      * @param procName class name (not qualified by package) of the procedure to execute.
      * @param parameters vararg list of procedure's parameter values.
      * @return True if the procedure was queued and false otherwise
      */
     @Override
-    public final boolean callProcedure(
-            ProcedureCallback callback,
-            String procName,
-            Object... parameters) throws IOException {
+    public final boolean callProcedure(ProcedureCallback callback,
+                                       String procName,
+                                       Object... parameters) throws IOException {
         //Time unit doesn't matter in this case since the timeout isn't being specified
-        return callProcedureWithClientTimeout(callback, BatchTimeoutOverrideType.NO_TIMEOUT, procName,
-                Distributer.USE_DEFAULT_CLIENT_TIMEOUT, TimeUnit.NANOSECONDS, parameters);
+        return callProcedureWithClientTimeout(callback,
+                                              BatchTimeoutOverrideType.NO_TIMEOUT,
+                                              ProcedureInvocation.NO_PARTITION,
+                                              procName,
+                                              Distributer.USE_DEFAULT_CLIENT_TIMEOUT,
+                                              TimeUnit.NANOSECONDS,
+                                              parameters);
     }
 
     /**
-     * Asynchronously invoke a procedure call with timeout.
-     * @param callback TransactionCallback that will be invoked with procedure results.
-     * @param batchTimeout procedure invocation batch timeout.
-     * @param procName class name (not qualified by package) of the procedure to execute.
-     * @param parameters vararg list of procedure's parameter values.
-     * @return True if the procedure was queued and false otherwise
-     */
-    @Override
-    public final boolean callProcedureWithTimeout(
-            ProcedureCallback callback,
-            int batchTimeout,
-            String procName,
-            Object... parameters) throws IOException {
-        //Time unit doesn't matter in this case since the timeout isn't being specifie
-        return callProcedureWithClientTimeout(
-                callback,
-                batchTimeout,
-                -1,
-                procName,
-                Distributer.USE_DEFAULT_CLIENT_TIMEOUT,
-                TimeUnit.NANOSECONDS,
-                parameters);
-    }
-
-    /**
-     * Same as the namesake without allPartition option.
-     */
-    public boolean callProcedureWithClientTimeout(
-            ProcedureCallback callback,
-            int batchTimeout,
-            String procName,
-            long clientTimeout,
-            TimeUnit clientTimeoutUnit,
-            Object... parameters) throws IOException {
-        return callProcedureWithClientTimeout(
-                callback, batchTimeout, -1, procName, clientTimeout, clientTimeoutUnit, parameters);
-    }
-
-    /**
-     * Asynchronously invoke a procedure call.
+     * Asynchronously invoke a procedure call with specified batch timeout.
      *
      * @param callback TransactionCallback that will be invoked with procedure results.
      * @param batchTimeout procedure invocation batch timeout.
      * @param procName class name (not qualified by package) of the procedure to execute.
-     * @param timeout timeout for the procedure
-     * @param allPartition whether this is an all-partition invocation
-     * @param unit TimeUnit of procedure timeout
      * @param parameters vararg list of procedure's parameter values.
      * @return True if the procedure was queued and false otherwise
      */
-    public boolean callProcedureWithClientTimeout(
-            ProcedureCallback callback,
-            int batchTimeout,
-            int partitionDestination,
-            String procName,
-            long clientTimeout,
-            TimeUnit clientTimeoutUnit,
-            Object... parameters) throws IOException {
+    @Override
+    public final boolean callProcedureWithTimeout(ProcedureCallback callback,
+                                                  int batchTimeout,
+                                                  String procName,
+                                                  Object... parameters) throws IOException {
+        //Time unit doesn't matter in this case since the timeout isn't being specified
+        return callProcedureWithClientTimeout(callback,
+                                              batchTimeout,
+                                              ProcedureInvocation.NO_PARTITION,
+                                              procName,
+                                              Distributer.USE_DEFAULT_CLIENT_TIMEOUT,
+                                              TimeUnit.NANOSECONDS,
+                                              parameters);
+    }
+
+    /**
+     * Asynchronously invoke a procedure call with specified batch and query timeouts.
+     *
+     * @param callback TransactionCallback that will be invoked with procedure results.
+     * @param batchTimeout procedure invocation batch timeout.
+     * @param procName class name (not qualified by package) of the procedure to execute.
+     * @param clientTimeout query timeout
+     * @param clientTimeoutUnit units for query timeout
+     * @param parameters vararg list of procedure's parameter values.
+     * @return True if the procedure was queued and false otherwise
+     */
+    @Override
+    public boolean callProcedureWithClientTimeout(ProcedureCallback callback,
+                                                  int batchTimeout,
+                                                  String procName,
+                                                  long clientTimeout,
+                                                  TimeUnit clientTimeoutUnit,
+                                                  Object... parameters) throws IOException {
+        return callProcedureWithClientTimeout(callback,
+                                              batchTimeout,
+                                              ProcedureInvocation.NO_PARTITION,
+                                              procName,
+                                              clientTimeout,
+                                              clientTimeoutUnit,
+                                              parameters);
+    }
+
+    /**
+     * Asynchronously invoke a procedure call. Common implementation.
+     *
+     * @param callback TransactionCallback that will be invoked with procedure results.
+     * @param batchTimeout procedure invocation batch timeout.
+     * @param partitionDestination or NO_PARTITION
+     * @param procName class name (not qualified by package) of the procedure to execute.
+     * @param clientTimeout timeout for the procedure
+     * @param unit TimeUnit of procedure timeout
+     * @param parameters vararg list of procedure's parameter values.
+     * @return True if the procedure was queued and false otherwise
+     *
+     * If the request was not queued, then the callback will not have been
+     * called with any ClientResponse.
+     */
+    public boolean callProcedureWithClientTimeout(ProcedureCallback callback,
+                                                  int batchTimeout,
+                                                  int partitionDestination,
+                                                  String procName,
+                                                  long clientTimeout,
+                                                  TimeUnit clientTimeoutUnit,
+                                                  Object... parameters) throws IOException {
         if (callback instanceof ProcedureArgumentCacher) {
             ((ProcedureArgumentCacher) callback).setArgs(parameters);
         }
 
         long handle = m_handle.getAndIncrement();
-        ProcedureInvocation invocation
-                = new ProcedureInvocation(handle, batchTimeout, partitionDestination, procName, parameters);
-
+        ProcedureInvocation invocation = new ProcedureInvocation(handle,
+                                                                 batchTimeout,
+                                                                 partitionDestination,
+                                                                 m_requestPriority,
+                                                                 procName,
+                                                                 parameters);
         if (m_isShutdown) {
             return false;
         }
@@ -403,183 +418,158 @@ public final class ClientImpl implements Client {
             callback = NULL_CALLBACK;
         }
 
-        return internalAsyncCallProcedure(callback, clientTimeoutUnit.toNanos(clientTimeout), invocation);
+        return internalAsyncCallProcedure(callback, clientTimeoutUnit.toNanos(clientTimeout), m_nonblocking, invocation);
     }
 
-    @Deprecated
-    @Override
-    public int calculateInvocationSerializedSize(
-            String procName,
-            Object... parameters) {
-        final ProcedureInvocation invocation =
-            new ProcedureInvocation(0, procName, parameters);
-        return invocation.getSerializedSize();
-    }
-
-    @Deprecated
-    @Override
-    public final boolean callProcedure(
-           ProcedureCallback callback,
-           int expectedSerializedSize,
-           String procName,
-           Object... parameters) throws IOException {
-        return callProcedure(callback, procName, parameters);
-    }
-
-    private final ClientResponse internalSyncCallProcedure(
-            long clientTimeoutNanos,
-            ProcedureInvocation invocation) throws ProcCallException, IOException {
+    /**
+     * Implementation of synchronous procedure call.
+     *
+     * @param clientTimeoutNanos timeout on this query (0 for default)
+     * @param invocation the procedure to call
+     */
+    private final ClientResponse internalSyncCallProcedure(long clientTimeoutNanos,
+                                                           ProcedureInvocation invocation)
+        throws ProcCallException, IOException {
 
         if (m_isShutdown) {
-            throw new NoConnectionsException("Client instance is shutdown");
+            throw new NoConnectionsException("Client is shut down");
         }
 
         if (m_blessedThreadIds.contains(Thread.currentThread().getId())) {
-            throw new IOException("Can't invoke a procedure synchronously from with the client callback thread " +
+            throw new IOException("Can't invoke a procedure synchronously from within the client callback thread " +
                     " without deadlocking the client library");
         }
 
+        ClientResponse resp = null;
         SyncCallbackLight cb = new SyncCallbackLight();
-
-        boolean success = internalAsyncCallProcedure(cb, clientTimeoutNanos, invocation);
-        if (!success) {
-            final ClientResponseImpl r = new ClientResponseImpl(
-                    ClientResponse.GRACEFUL_FAILURE,
-                    ClientResponse.UNINITIALIZED_APP_STATUS_CODE,
-                    "",
-                    new VoltTable[0],
-                    String.format("Unable to queue client request."));
-            throw new ProcCallException(r, "Unable to queue client request.", null);
+        boolean queued = internalAsyncCallProcedure(cb, clientTimeoutNanos, false/*blocking*/, invocation);
+        if (!queued) { // request was not sent, so graceful failure, not request timed out
+             resp = new ClientResponseImpl(ClientResponse.GRACEFUL_FAILURE,
+                                           ClientResponse.UNINITIALIZED_APP_STATUS_CODE,
+                                           "",
+                                           new VoltTable[0],
+                                           "Procedure call not queued: timed out waiting for host connection");
+             throw new ProcCallException(resp);
         }
 
         try {
             cb.waitForResponse();
         } catch (final InterruptedException e) {
-            throw new java.io.InterruptedIOException("Interrupted while waiting for response");
+            throw new InterruptedIOException("Interrupted while waiting for response");
         }
-        if (cb.getResponse().getStatus() != ClientResponse.SUCCESS) {
-            throw new ProcCallException(cb.getResponse(), cb.getResponse().getStatusString(), null);
+        resp = cb.getResponse();
+
+        if (resp.getStatus() != ClientResponse.SUCCESS) {
+            throw new ProcCallException(resp);
         }
-        return cb.getResponse();
+        return resp;
     }
 
-    private final boolean internalAsyncCallProcedure(
-            ProcedureCallback callback,
-            long clientTimeoutNanos,
-            ProcedureInvocation invocation) throws IOException {
-        assert( ! m_isShutdown);
-        assert(callback != null);
+    /**
+     * Implementation of asynchronous procedure call.
+     *
+     * @param callback completion callback
+     * @param clientTimeoutNanos timeout on this query (0 for default)
+     * @param nonblockingAsync true iff async nonblocking request
+     * @param invocation the procedure to call
+     * @returns true iff request was queued
+     *
+     * The non-blocking mode can, at the client's request, block for
+     * a very short time hoping to ride out a short blip in backpressure.
+     *
+     * If this method returns 'false' then the callback has definitely
+     * not been called with a ClientResponse.
+     */
+    private final boolean internalAsyncCallProcedure(ProcedureCallback callback,
+                                                     long clientTimeoutNanos,
+                                                     boolean nonblockingAsync,
+                                                     ProcedureInvocation invocation) throws IOException {
+        if (m_isShutdown) {
+            throw new NoConnectionsException("Client is shut down");
+        }
 
-        final long nowNanos = System.nanoTime();
-        //Blessed threads (the ones that invoke callbacks) are not subject to backpressure
+        if (callback == null) {
+            throw new IllegalArgumentException("Callback required for async procedure call");
+        }
+
+        final long startNanos = System.nanoTime();
+
+        // Blessed threads (the ones that invoke callbacks) are not subject to backpressure
+        // and nor do they support non-blocking operation
         boolean isBlessed = m_blessedThreadIds.contains(Thread.currentThread().getId());
-        while (!m_distributer.queue(invocation, callback, isBlessed, nowNanos, clientTimeoutNanos)) {
-            if ( ! m_blockingQueue) {
-                return false;
-            }
 
-            /*
-             * Wait on backpressure honoring the timeout settings
-             */
-            final long delta = Math.max(1, System.nanoTime() - nowNanos);
-            final long timeout =
-                    clientTimeoutNanos == Distributer.USE_DEFAULT_CLIENT_TIMEOUT ?
-                            m_distributer.getProcedureTimeoutNanos() : clientTimeoutNanos;
-            try {
-                if (backpressureBarrier(nowNanos, timeout - delta)) {
-                    final ClientResponse response = new ClientResponseImpl(
-                            ClientResponse.CONNECTION_TIMEOUT,
-                            ClientResponse.UNINITIALIZED_APP_STATUS_CODE,
-                            "",
-                            new VoltTable[0],
-                            String.format("No response received in the allotted time (set to %d ms).",
-                                    TimeUnit.NANOSECONDS.toMillis(clientTimeoutNanos)));
-                    try {
-                        callback.clientCallback(response);
-                    }
-                    catch (Throwable thrown) {
-                        m_distributer.uncaughtException(callback, response, thrown);
-                    }
+        // Non-blocking mode
+        if (nonblockingAsync && !isBlessed) {
+            boolean queued = m_distributer.queueNonblocking(invocation, callback, startNanos, clientTimeoutNanos);
+            if (!queued && m_asyncBlockingTimeout > 0) {
+
+                // Wait on backpressure, but not for very long
+                boolean bp = true;
+                try {
+                    bp = backpressureBarrier(startNanos, m_asyncBlockingTimeout);
+                }
+                catch (InterruptedException e) {
+                    // ignore
+                }
+
+                // If backpressure cleared, issue a single retry
+                if (!bp) {
+                    queued = m_distributer.queueNonblocking(invocation, callback, startNanos, clientTimeoutNanos);
                 }
             }
+            return queued;
+        }
+
+        // Blocking mode
+        while (!m_distributer.queue(invocation, callback, isBlessed, startNanos, clientTimeoutNanos)) {
+
+            // Wait on backpressure, honoring the timeout settings
+            final long delta = Math.max(1, System.nanoTime() - startNanos);
+            final long timeout = clientTimeoutNanos == Distributer.USE_DEFAULT_CLIENT_TIMEOUT ?
+                m_distributer.getProcedureTimeoutNanos() :
+                clientTimeoutNanos;
+
+            boolean bp = true;
+            try {
+                bp = backpressureBarrier(startNanos, timeout - delta);
+            }
             catch (InterruptedException e) {
-                throw new java.io.InterruptedIOException("Interrupted while invoking procedure asynchronously");
+                // ignore
+            }
+            if (bp) { // proc call timeout expired and backpressure still present
+                return false;
             }
         }
+
         return true;
     }
 
     /**
-     * Serializes catalog and deployment file for UpdateApplicationCatalog.
-     * Catalog is serialized into byte array, deployment file is serialized into
-     * string.
-     *
-     * @param catalogPath
-     * @param deploymentPath
-     * @return Parameters that can be passed to UpdateApplicationCatalog
-     * @throws IOException If either of the files cannot be read
+     * Update classes: just a wrapper around the utility class.
      */
-    private Object[] getUpdateCatalogParams(File catalogPath, File deploymentPath)
-    throws IOException {
-        Object[] params = new Object[2];
-        if (catalogPath != null) {
-            params[0] = ClientUtils.fileToBytes(catalogPath);
-        }
-        else {
-            params[0] = null;
-        }
-        if (deploymentPath != null) {
-            params[1] = new String(ClientUtils.fileToBytes(deploymentPath), Constants.UTF8ENCODING);
-        }
-        else {
-            params[1] = null;
-        }
-        return params;
-    }
-
-    @Override
-    public ClientResponse updateApplicationCatalog(File catalogPath, File deploymentPath)
-    throws IOException, ProcCallException {
-        Object[] params = getUpdateCatalogParams(catalogPath, deploymentPath);
-        return callProcedure("@UpdateApplicationCatalog", params);
-    }
-
-    @Override
-    public boolean updateApplicationCatalog(ProcedureCallback callback,
-                                            File catalogPath,
-                                            File deploymentPath) throws IOException {
-        Object[] params = getUpdateCatalogParams(catalogPath, deploymentPath);
-        return callProcedure(callback, "@UpdateApplicationCatalog", params);
-    }
-
     @Override
     public ClientResponse updateClasses(File jarPath, String classesToDelete)
     throws IOException, ProcCallException {
-        byte[] jarbytes = null;
-        if (jarPath != null) {
-            jarbytes = ClientUtils.fileToBytes(jarPath);
-        }
-        return callProcedure("@UpdateClasses", jarbytes, classesToDelete);
+        return UpdateClasses.update(this, jarPath, classesToDelete);
     }
 
     @Override
     public boolean updateClasses(ProcedureCallback callback,
                                  File jarPath,
                                  String classesToDelete) throws IOException {
-        byte[] jarbytes = null;
-        if (jarPath != null) {
-            jarbytes = ClientUtils.fileToBytes(jarPath);
-        }
-        return callProcedure(callback, "@UpdateClasses", jarbytes, classesToDelete);
+        return UpdateClasses.update(this, callback, jarPath, classesToDelete);
     }
 
+    /**
+     * Drain active transactions from client
+     */
     @Override
     public void drain() throws InterruptedException {
         if (m_isShutdown) {
             return;
         }
         if (m_blessedThreadIds.contains(Thread.currentThread().getId())) {
-            throw new RuntimeException("Can't invoke backpressureBarrier from within the client callback thread " +
+            throw new RuntimeException("Can't invoke drain from within the client callback thread " +
                     " without deadlocking the client library");
         }
         m_distributer.drain();
@@ -588,18 +578,15 @@ public final class ClientImpl implements Client {
     /**
      * Shutdown the client closing all network connections and release
      * all memory resources.
-     * @throws InterruptedException
      */
     @Override
     public void close() throws InterruptedException {
         if (m_blessedThreadIds.contains(Thread.currentThread().getId())) {
-            throw new RuntimeException("Can't invoke backpressureBarrier from within the client callback thread " +
+            throw new RuntimeException("Can't invoke close from within the client callback thread " +
                     " without deadlocking the client library");
         }
         m_isShutdown = true;
-        synchronized (m_backpressureLock) {
-            m_backpressureLock.notifyAll();
-        }
+        setLocalBackpressureState(false);
 
         if (m_reconnectStatusListener != null) {
             m_distributer.removeClientStatusListener(m_reconnectStatusListener);
@@ -618,17 +605,27 @@ public final class ClientImpl implements Client {
         ClientFactory.decreaseClientNum();
     }
 
+     /**
+     * Block calling thread until there is no backpressure.
+     */
     @Override
     public void backpressureBarrier() throws InterruptedException {
-        backpressureBarrier( 0, 0);
+        backpressureBarrier(0, 0);
     }
 
     /**
-     * Wait on backpressure with a timeout. Returns true on timeout, false otherwise.
-     * Timeout nanos is the initial timeout quantity which will be adjusted to reflect remaining
-     * time on spurious wakeups
+     * Wait on backpressure with a timeout. Not part of public API, but exposed
+     * for test code.
+     *
+     * Return value is:
+     * false on no backpressure or pending shutdown
+     * true on timeout (thus backpressure stil in effect)
+     *
+     * @param start time request processing started (nanoseconds since epoch), 0 for no timeout
+     * @param timeoutNanos timeout value, ignored if start is 0
+     * @return true on timeout, false otherwise
      */
-    public boolean backpressureBarrier(final long start, long timeoutNanos) throws InterruptedException {
+    boolean backpressureBarrier(final long start, final long timeoutNanos) throws InterruptedException {
         if (m_isShutdown) {
             return false;
         }
@@ -636,48 +633,47 @@ public final class ClientImpl implements Client {
             throw new RuntimeException("Can't invoke backpressureBarrier from within the client callback thread " +
                     " without deadlocking the client library");
         }
-        if (m_backpressure) {
+
+        if (start == 0) {
+            // wait indefinitely.
             synchronized (m_backpressureLock) {
-                if (m_backpressure) {
-                    while (m_backpressure && !m_isShutdown) {
-                       if (start != 0) {
-                           if (timeoutNanos <= 0) {
-                               // timeout nano value is negative or zero, indicating it timed out.
-                               return true;
-                           }
-
-                            //Wait on the condition for the specified timeout remaining
-                            m_backpressureLock.wait(timeoutNanos / TimeUnit.MILLISECONDS.toNanos(1), (int)(timeoutNanos % TimeUnit.MILLISECONDS.toNanos(1)));
-
-                            //Condition is true, break and return false
-                            if (!m_backpressure) {
-                                break;
-                            }
-
-                            //Calculate whether the timeout should be triggered
-                            final long nowNanos = System.nanoTime();
-                            final long deltaNanos = Math.max(1, nowNanos - start);
-                            if (deltaNanos >= timeoutNanos) {
-                                return true;
-                            }
-
-                            //Reassigning timeout nanos with remainder of timeout
-                            timeoutNanos -= deltaNanos;
-                       } else {
-                           m_backpressureLock.wait();
-                       }
-                    }
+                while (m_backpressure && !m_isShutdown) {
+                    m_backpressureLock.wait();
                 }
+                return false;
             }
         }
-        return false;
+
+        else {
+            // wait with time limit.
+            // the trickery with Math.min ensures the remaining time ticks down
+            // even if the clock is not ticking upwards.
+            final long msToNs = TimeUnit.MILLISECONDS.toNanos(1);
+            synchronized (m_backpressureLock) {
+                long remainingTime = start + timeoutNanos - System.nanoTime();
+                while (m_backpressure && !m_isShutdown) {
+                    if (remainingTime <= 0) {
+                        return true;
+                    }
+                    m_backpressureLock.wait(remainingTime / msToNs, (int)(remainingTime % msToNs));
+                    remainingTime = Math.min(start + timeoutNanos - System.nanoTime(), remainingTime - 1);
+                }
+                return false;
+            }
+        }
     }
 
-    class HostConfig {
+    /*
+     * Convenient class holding details of single host. The strange implementation
+     * of setValue is needed because a HostConfig is set up by reading a VoltTable
+     * in which each row has a parameter name and a value.
+     */
+    private class HostConfig {
         String m_ipAddress;
         String m_hostName;
         int m_clientPort;
         int m_adminPort;
+
         void setValue(String param, String value) {
             if ("IPADDRESS".equalsIgnoreCase(param)) {
                 m_ipAddress = value;
@@ -695,32 +691,51 @@ public final class ClientImpl implements Client {
         }
     }
 
+    /*
+     * Internal listener for client events. Handles loss of connection
+     * and backpressure.
+     *
+     * Package access: used by Distributer.
+     */
     class InternalClientStatusListener extends ClientStatusListenerExt {
 
-        boolean m_useAdminPort = false;
-        boolean m_adminPortChecked = false;
-        AtomicInteger connectionTaskCount = new AtomicInteger(0);
+        private boolean m_useAdminPort = false;
+        private boolean m_adminPortChecked = false;
+        private AtomicInteger connectionTaskCount = new AtomicInteger(0);
+
         @Override
         public void backpressure(boolean status) {
-            synchronized (m_backpressureLock) {
-                if (status) {
-                    m_backpressure = true;
-                } else {
-                    m_backpressure = false;
-                    m_backpressureLock.notifyAll();
+            setLocalBackpressureState(status);
+        }
+
+        @Override
+        public void connectionCreated(String hostname, int port, AutoConnectionStatus status) {
+            if (m_topologyChangeAware && status == AutoConnectionStatus.SUCCESS) {
+                // Track potential targets for reconnection. A new epoch begins
+                // on the first successful connection after having no connections;
+                // previous targets are then forgotten.
+                synchronized (m_connectHistory) {
+                    if (m_newConnectEpoch) {
+                        m_newConnectEpoch = false;
+                        m_connectHistory.clear();
+                    }
+                    m_connectHistory.add(HostAndPort.fromParts(hostname, port));
                 }
             }
         }
 
         @Override
         public void connectionLost(String hostname, int port, int connectionsLeft,
-                ClientStatusListenerExt.DisconnectCause cause) {
+                                   DisconnectCause cause) {
             if (connectionsLeft == 0) {
-                //Wake up client and let it attempt to queue work
-                //and then fail with a NoConnectionsException
-                synchronized (m_backpressureLock) {
-                    m_backpressure = false;
-                    m_backpressureLock.notifyAll();
+                if (m_topologyChangeAware && !m_isShutdown) {
+                    // Special-case handling of no connections in topo-change aware mode.
+                    // Must make a connection first of all.
+                    createAnyConnection();
+                } else {
+                    // Wake up client and let it attempt to queue work
+                    // and then fail with a NoConnectionsException
+                    setLocalBackpressureState(false);
                 }
             }
         }
@@ -771,46 +786,97 @@ public final class ClientImpl implements Client {
         }
 
         /**
-         * notify client upon a connection creation failure.
+         * Notify client upon a connection creation failure when the connection
+         * arose from topology-aware client action. Not used for successful
+         * completion, since the Distributer takes care of that in its
+         * createConnectionWithHashedCredentials routine.
+         *
          * @param host HostConfig with IP address and port
-         * @param status The status of connection creation
+         * @param status Reason for failure
          */
-        void nofifyClientConnectionCreation(HostConfig host, ClientStatusListenerExt.AutoConnectionStatus status) {
-            if (m_clientStatusListener != null) {
-                m_clientStatusListener.connectionCreated((host != null) ? host.m_hostName : "",
-                        (host != null) ? host.m_clientPort : -1, status);
+        void notifyAutoConnectFailure(HostConfig host, AutoConnectionStatus status) {
+            if (host != null) {
+                notifyAutoConnectFailure(host.m_hostName, host.m_clientPort, status);
+            } else {
+                notifyAutoConnectFailure("", -1, status);
             }
         }
-        void retryConnectionCreationIfNeeded(int failCount) {
-            if (failCount == 0) {
-                try {
-                    m_distributer.setCreateConnectionsUponTopologyChangeComplete();
-                } catch (Exception e) {
-                    nofifyClientConnectionCreation(null, ClientStatusListenerExt.AutoConnectionStatus.UNABLE_TO_CONNECT);
-                }
-            } else if (connectionTaskCount.get() < 2) {
-                //if there are tasks in the queue, do not need schedule again since all the tasks do the same job
-                m_ex.schedule(new CreateConnectionTask(this, connectionTaskCount), 10, TimeUnit.SECONDS);
+
+        void notifyAutoConnectFailure(String host, int port, AutoConnectionStatus status) {
+            if (m_clientStatusListener != null) {
+                m_clientStatusListener.connectionCreated(host, port, status);
             }
         }
 
         /**
-         * find all the host which have not been connected to the client via @SystemInformation
-         * and make connections
+         * Handles completion of automatic reconnection attempt.
+         * Success: kick distributer into querying updated toplogy.
+         * Failure: schedule a retry.
+         * @param failCount - non-zero if retry needed
+         * @param first - determines which task to requeue
+         * @param retry - the number of previous retries
+         */
+        void retryConnectionCreationIfNeeded(int failCount, boolean first, int retry) {
+            if (failCount == 0) {
+                try {
+                    m_distributer.setCreateConnectionsUponTopologyChangeComplete();
+                } catch (Exception e) {
+                    notifyAutoConnectFailure(null, AutoConnectionStatus.UNABLE_TO_QUERY_TOPOLOGY);
+                }
+            } else if (m_isShutdown) {
+                notifyAutoConnectFailure(null, AutoConnectionStatus.UNABLE_TO_CONNECT);
+            } else if (first) {
+                m_ex.schedule(new FirstConnectionTask(this, connectionTaskCount, retry+1), reconnectDelay(retry+1), TimeUnit.MILLISECONDS);
+            } else if (connectionTaskCount.get() < 2) { // TODO: why 2? current task has decremented count, so count is only count of queued
+                // if there are tasks in the queue, do not need schedule again since all the tasks do the same job
+                m_ex.schedule(new CreateConnectionTask(this, connectionTaskCount, retry+1), reconnectDelay(retry+1), TimeUnit.MILLISECONDS);
+            }
+        }
+
+        /*
+         * Calculate delay before n'th (n>0) reconnection attempt,
+         * doubling at each retry, up to a maximum delay.
+         */
+        long reconnectDelay(int n) {
+            long delay = m_reconnectDelay;
+            for (int i=1; delay<m_reconnectMaxDelay && i<n; i++) {
+                delay = Math.min(delay * 2, m_reconnectMaxDelay);
+            }
+            return delay;
+        }
+
+        /**
+         * Find all the host which have not been connected to the client via @SystemInformation
+         * and make connections (called from Distributer)
          */
         public void createConnectionsUponTopologyChange() {
-            m_ex.execute(new CreateConnectionTask(this, connectionTaskCount));
+            m_ex.execute(new CreateConnectionTask(this, connectionTaskCount, 0));
+        }
+
+        /**
+         * We have no connections; make the first one
+         */
+        public void createAnyConnection() {
+            m_ex.execute(new FirstConnectionTask(this, connectionTaskCount, 0));
         }
     }
 
-    class CreateConnectionTask implements Runnable {
+    /*
+     * Asynchronously create connection, used for topology-aware clients.
+     * Runs in thread managed by ScheduledServiceExecutor.
+     */
+    private class CreateConnectionTask implements Runnable {
         final InternalClientStatusListener listener;
         final AtomicInteger connectionTaskCount;
-        public CreateConnectionTask(InternalClientStatusListener listener, AtomicInteger connectionTaskCount ) {
+        final int retryCount;
+
+        CreateConnectionTask(InternalClientStatusListener listener, AtomicInteger connectionTaskCount, int retryCount) {
             this.listener = listener;
             this.connectionTaskCount = connectionTaskCount;
+            this.retryCount = retryCount;
             connectionTaskCount.incrementAndGet();
         }
+
         @Override
         public void run() {
             int failCount = 0;
@@ -821,45 +887,91 @@ public final class ClientImpl implements Client {
                     for(Map.Entry<Integer, HostConfig> entry : hosts.entrySet()) {
                         HostConfig config = entry.getValue();
                         try {
-                            createConnection(config.m_ipAddress,config.getPort(listener.m_useAdminPort));
-                            listener.nofifyClientConnectionCreation(config, ClientStatusListenerExt.AutoConnectionStatus.SUCCESS);
+                            createConnectionImpl(config.m_ipAddress,config.getPort(listener.m_useAdminPort));
                         } catch (Exception e) {
-                            listener.nofifyClientConnectionCreation(config, ClientStatusListenerExt.AutoConnectionStatus.UNABLE_TO_CONNECT);
+                            listener.notifyAutoConnectFailure(config, AutoConnectionStatus.UNABLE_TO_CONNECT);
                             failCount++;
                         }
                     }
                 } else {
-                    listener.nofifyClientConnectionCreation(null, ClientStatusListenerExt.AutoConnectionStatus.UNABLE_TO_QUERY_TOPOLOGY);
+                    listener.notifyAutoConnectFailure(null, AutoConnectionStatus.UNABLE_TO_QUERY_TOPOLOGY);
                     failCount++;
                 }
             } catch (Exception e) {
-                listener.nofifyClientConnectionCreation(null, ClientStatusListenerExt.AutoConnectionStatus.UNABLE_TO_QUERY_TOPOLOGY);
+                listener.notifyAutoConnectFailure(null, AutoConnectionStatus.UNABLE_TO_QUERY_TOPOLOGY);
                 failCount++;
             } finally {
                 connectionTaskCount.decrementAndGet();
-                listener.retryConnectionCreationIfNeeded(failCount);
+                listener.retryConnectionCreationIfNeeded(failCount, false, retryCount);
             }
         }
     }
-     /****************************************************
+
+    /*
+     * Asynchronously create connection, used for topology-aware clients in the
+     * specific case that we have zero connections left (and therefore cannot now
+     * know the topology). Uses the connect history to get a connection to any
+     * one of the previously-connected hosts. From there, normal topo handling
+     * can take over again. Runs in thread managed by ScheduledServiceExecutor.
+     */
+    private class FirstConnectionTask implements Runnable {
+        final InternalClientStatusListener listener;
+        final AtomicInteger connectionTaskCount;
+        final LinkedHashSet<HostAndPort> targets;
+        final int retryCount;
+
+        FirstConnectionTask(InternalClientStatusListener listener, AtomicInteger connectionTaskCount, int retryCount) {
+            this.listener = listener;
+            this.connectionTaskCount = connectionTaskCount;
+            this.retryCount = retryCount;
+            synchronized (m_connectHistory) {
+                targets = new LinkedHashSet<>(m_connectHistory);
+                m_newConnectEpoch = true; // discard old history in successful completion
+            }
+            connectionTaskCount.incrementAndGet();
+        }
+
+        @Override
+        public void run() {
+            int failCount = 0;
+            try {
+                for (HostAndPort hap : targets) {
+                    try {
+                        createConnectionImpl(hap.getHost(), hap.getPort());
+                        setLocalBackpressureState(false);
+                        break; // one is enough
+                    } catch (Exception e) {
+                        // Does client need to know about this?
+                        failCount++;
+                    }
+                }
+                if (targets.isEmpty()) { // should not happen, but there's no way out of this
+                    listener.notifyAutoConnectFailure(null, AutoConnectionStatus.NO_KNOWN_SERVERS);
+                }
+            }
+            finally {
+                connectionTaskCount.decrementAndGet();
+                listener.retryConnectionCreationIfNeeded(failCount, true, retryCount);
+            }
+        }
+    }
+
+    /*
+     * Updates local backpressure state, controlling the
+     * barrier/retry loop in internalAsyncCallProcedure
+     */
+    private void setLocalBackpressureState(boolean onoff) {
+        synchronized (m_backpressureLock) {
+            m_backpressure = onoff;
+            if (!onoff) {
+                m_backpressureLock.notifyAll();
+            }
+        }
+    }
+
+    /****************************************************
                         Implementation
      ****************************************************/
-
-
-
-    static final Logger LOG = Logger.getLogger(ClientImpl.class.getName());  // Logger shared by client package.
-    private final Distributer m_distributer;                             // de/multiplexes connections to a cluster
-    private final Object m_backpressureLock = new Object();
-    private boolean m_backpressure = false;
-
-    private boolean m_blockingQueue = true;
-
-    private final ReconnectStatusListener m_reconnectStatusListener;
-
-    @Override
-    public void configureBlocking(boolean blocking) {
-        m_blockingQueue = blocking;
-    }
 
     @Override
     public ClientStatsContext createStatsContext() {
@@ -871,65 +983,97 @@ public final class ClientImpl implements Client {
         return m_distributer.getInstanceId();
     }
 
-    /**
-     * Not exposed to users for the moment.
-     */
-    public void resetInstanceId() {
-        m_distributer.resetInstanceId();
-    }
-
     @Override
     public String getBuildString() {
         return m_distributer.getBuildString();
     }
 
-    @Override
-    public boolean blocking() {
-        return m_blockingQueue;
+    // Used by system tests
+    public void resetInstanceId() {
+        m_distributer.resetInstanceId();
     }
 
-    private static String getHostnameFromHostnameColonPort(String server) {
-        server = server.trim();
-        String[] parts = server.split(":");
-        if (parts.length == 1) {
-            return server;
-        }
-        else {
-            assert (parts.length == 2);
-            return parts[0].trim();
-        }
-    }
-
-    private static int getPortFromHostnameColonPort(String server,
-            int defaultPort) {
-        String[] parts = server.split(":");
-        if (parts.length == 1) {
-            return defaultPort;
-        }
-        else {
-            assert (parts.length == 2);
-            return Integer.parseInt(parts[1]);
-        }
+    // Package access for unit test
+    static HostAndPort parseHostAndPort(String server) {
+        return HostAndPort.fromString(server.trim()).withDefaultPort(Client.VOLTDB_SERVER_PORT).requireBracketsForIPv6();
     }
 
     @Override
     public void createConnection(String host) throws IOException {
-        if (m_username == null) {
-            throw new IllegalStateException("Attempted to use createConnection(String host) " +
-                    "with a client that wasn't constructed with a username and password specified");
-        }
-        int port = getPortFromHostnameColonPort(host, Client.VOLTDB_SERVER_PORT);
-        host = getHostnameFromHostnameColonPort(host);
-        createConnectionWithHashedCredentials(host, port, m_username, m_passwordHash);
+        HostAndPort hp = parseHostAndPort(host);
+        createConnectionImpl(hp.getHost(), hp.getPort());
     }
 
     @Override
     public void createConnection(String host, int port) throws IOException {
+        createConnectionImpl(host, port);
+    }
+
+    private void createConnectionImpl(String host, int port) throws IOException {
         if (m_username == null) {
-            throw new IllegalStateException("Attempted to use createConnection(String host) " +
-                    "with a client that wasn't constructed with a username and password specified");
+            throw new IllegalStateException("Attempted to use createConnection() with a client" +
+                                            " that wasn't constructed with a username and password specified");
         }
-        createConnectionWithHashedCredentials(host, port, m_username, m_passwordHash);
+        if (m_isShutdown) {
+            throw new NoConnectionsException("Client is shut down");
+        }
+        m_distributer.createConnectionWithHashedCredentials(host, m_username, m_passwordHash, port, m_hashScheme);
+    }
+
+    @Override
+    public void createAnyConnection(String hostList) throws IOException {
+        createAnyConnection(hostList, 0, 0);
+    }
+
+    @Override
+    public void createAnyConnection(String hostList, long timeout, long delay) throws IOException {
+        List<HostAndPort> servers = hostAndPortList(hostList);
+        long startTime = System.currentTimeMillis();
+        while (true) {
+            Iterator<HostAndPort> it = servers.iterator();
+            while (it.hasNext()) {
+                HostAndPort srv = it.next();
+                String host = srv.getHost();
+                int port = srv.getPort();
+                try {
+                    createConnectionImpl(host, port);
+                    return; // we only need one
+                } catch (UnknownHostException e) { // this is an IOException
+                    it.remove(); // not likely to be recoverable
+                } catch (IOException e) {
+                    // may retry
+                } catch (Exception e) {
+                    it.remove(); // no retry for this bad boy
+                }
+                if (m_clientStatusListener != null) {
+                    m_clientStatusListener.connectionCreated(host, port, AutoConnectionStatus.UNABLE_TO_CONNECT);
+                }
+            }
+            if (servers.isEmpty() || System.currentTimeMillis() - startTime >= timeout) {
+                throw new ConnectException("Failed to connect to cluster");
+            }
+            try {
+                Thread.sleep(delay);
+            } catch (InterruptedException ex) {
+                throw new InterruptedIOException("Interrupted while waiting to retry connect");
+            }
+        }
+    }
+
+    private List<HostAndPort> hostAndPortList(String servers) {
+        List<HostAndPort> list = new ArrayList<>();
+        for (String srv : servers.split(",")) {
+            srv = srv.trim();
+            if (!srv.isEmpty()) {
+                list.add(HostAndPort.fromString(srv)
+                                    .withDefaultPort(VOLTDB_SERVER_PORT)
+                                    .requireBracketsForIPv6());
+            }
+        }
+        if (list.isEmpty()) {
+            throw new IllegalArgumentException("Empty server list");
+        }
+        return list;
     }
 
     @Override
@@ -950,68 +1094,72 @@ public final class ClientImpl implements Client {
     @Override
     public void writeSummaryCSV(String statsRowName, ClientStats stats, String path) throws IOException {
         // don't do anything (be silent) if empty path
-        if ((path == null) || (path.length() == 0)) {
-            return;
+        if (path != null && !path.isEmpty()) {
+            ClientStatsUtil.writeSummaryCSV(statsRowName, stats, path);
         }
-
-        FileWriter fw = new FileWriter(path, true);
-        if (statsRowName != null && ! statsRowName.isEmpty()) {
-            fw.append(statsRowName).append(",");
-        }
-        fw.append(String.format("%d,%d,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%d\n",
-                stats.getStartTimestamp(),
-                stats.getDuration(),
-                stats.getInvocationsCompleted(),
-                stats.kPercentileLatencyAsDouble(0.0),
-                stats.kPercentileLatencyAsDouble(1.0),
-                stats.kPercentileLatencyAsDouble(0.95),
-                stats.kPercentileLatencyAsDouble(0.99),
-                stats.kPercentileLatencyAsDouble(0.999),
-                stats.kPercentileLatencyAsDouble(0.9999),
-                stats.kPercentileLatencyAsDouble(0.99999),
-                stats.getInvocationErrors(),
-                stats.getInvocationAborts(),
-                stats.getInvocationTimeouts()));
-        fw.close();
     }
 
-    //Hidden method to check if Hashinator is initialized.
+    // Hidden method to check if Hashinator is initialized.
     public boolean isHashinatorInitialized() {
         return m_distributer.isHashinatorInitialized();
     }
 
-    //Hidden method for getPartitionForParameter
+    // Hidden method for getPartitionForParameter
     public long getPartitionForParameter(byte typeValue, Object value) {
         return m_distributer.getPartitionForParameter(typeValue, value);
+    }
 
+    // Hidden method for getPartitionForParameter
+    public long getPartitionForParameter(byte[] bytes) {
+        return m_distributer.getPartitionForParameter(bytes);
     }
 
     @Override
-    public VoltBulkLoader getNewBulkLoader(String tableName, int maxBatchSize, boolean upsertMode, BulkLoaderFailureCallBack failureCallback) throws Exception
-    {
-        synchronized(m_vblGlobals) {
-            return new VoltBulkLoader(m_vblGlobals, tableName, maxBatchSize, upsertMode, failureCallback, null);
-        }
+    public VoltBulkLoader getNewBulkLoader(String tableName, int maxBatchSize, boolean upsertMode, BulkLoaderFailureCallBack failureCallback) throws Exception {
+        return getNewBulkLoader(tableName, maxBatchSize, upsertMode, failureCallback, null);
     }
 
     @Override
-    public VoltBulkLoader getNewBulkLoader(String tableName, int maxBatchSize, BulkLoaderFailureCallBack failureCallback) throws Exception
-    {
-        synchronized(m_vblGlobals) {
-            return new VoltBulkLoader(m_vblGlobals, tableName, maxBatchSize, failureCallback);
-        }
+    public VoltBulkLoader getNewBulkLoader(String tableName, int maxBatchSize, BulkLoaderFailureCallBack failureCallback) throws Exception {
+        return getNewBulkLoader(tableName, maxBatchSize, false, failureCallback, null);
     }
 
     @Override
-    public VoltBulkLoader getNewBulkLoader(String tableName, int maxBatchSize, boolean upsertMode, BulkLoaderFailureCallBack failureCallback, BulkLoaderSuccessCallback successCallback) throws Exception {
-        synchronized(m_vblGlobals) {
-            return new VoltBulkLoader(m_vblGlobals, tableName, maxBatchSize, upsertMode, failureCallback, successCallback);
+    public VoltBulkLoader getNewBulkLoader(String tableName, int maxBatchSize, boolean upsertMode, BulkLoaderFailureCallBack failureCallback,
+                                           BulkLoaderSuccessCallback successCallback) throws Exception {
+        synchronized (this) {
+            if (m_vblGlobals == null) {
+                m_vblGlobals = new BulkLoaderState(this);
+            }
         }
+        return m_vblGlobals.newBulkLoader(tableName, maxBatchSize, upsertMode, failureCallback, successCallback);
+    }
+
+    @Override
+    public boolean waitForTopology(long timeout) {
+        boolean ready = false;
+        long start = System.currentTimeMillis();
+        long delta = Math.min(timeout, 500);
+        try {
+            while (!(ready = m_distributer.isHashinatorInitialized()) &&
+                   System.currentTimeMillis() - start < timeout) {
+                Thread.sleep(delta);
+            }
+        }
+        catch (InterruptedException ex) {
+            // treat like timed out
+        }
+        return ready;
     }
 
     @Override
     public boolean isAutoReconnectEnabled() {
-        return (m_reconnectStatusListener != null);
+        return m_autoReconnect;
+    }
+
+    @Override
+    public boolean isTopologyChangeAwareEnabled() {
+        return m_topologyChangeAware;
     }
 
     @Override
@@ -1023,14 +1171,14 @@ public final class ClientImpl implements Client {
         try {
             latch.await();
         } catch (InterruptedException e) {
-            throw new java.io.InterruptedIOException("Interrupted while waiting for response");
+            throw new InterruptedIOException("Interrupted while waiting for response");
         }
         return callBack.getResponse();
     }
 
     @Override
-    public boolean callAllPartitionProcedure(AllPartitionProcedureCallback callback, String procedureName,
-            Object... params) throws IOException, ProcCallException {
+    public boolean callAllPartitionProcedure(AllPartitionProcedureCallback callback, String procedureName, Object... params)
+            throws IOException, ProcCallException {
         if (callback == null) {
             throw new IllegalArgumentException("AllPartitionProcedureCallback can not be null");
         }
@@ -1056,7 +1204,7 @@ public final class ClientImpl implements Client {
                 {
                     final ClientResponse r = new ClientResponseImpl(ClientResponse.GRACEFUL_FAILURE, new VoltTable[0],
                             "The procedure is not queued for execution.");
-                    throw new ProcCallException(r, null, null);
+                    throw new ProcCallException(r);
                 }
             } catch(Exception ex) {
                 try {
@@ -1117,7 +1265,7 @@ public final class ClientImpl implements Client {
     /**
      * Procedure call back for async callAllPartitionProcedure
      */
-    class OnePartitionProcedureCallback implements ProcedureCallback {
+    private class OnePartitionProcedureCallback implements ProcedureCallback {
 
         final ClientResponseWithPartitionKey[] m_responses;
         final int m_index;
@@ -1131,7 +1279,7 @@ public final class ClientImpl implements Client {
          * @param index  The index for PartitionClientResponse
          * @param responses The final result array
          */
-        public OnePartitionProcedureCallback(AtomicInteger counter, Object partitionKey, int index,
+        OnePartitionProcedureCallback(AtomicInteger counter, Object partitionKey, int index,
                   ClientResponseWithPartitionKey[] responses, AllPartitionProcedureCallback cb) {
             m_partitionCounter = counter;
             m_partitionKey = partitionKey;
@@ -1148,8 +1296,7 @@ public final class ClientImpl implements Client {
             }
         }
 
-        public void exceptionCallback(Exception e) throws Exception {
-
+        void exceptionCallback(Exception e) throws Exception {
             if ( e instanceof ProcCallException) {
                 ProcCallException pe = (ProcCallException)e;
                 m_responses[m_index] = new ClientResponseWithPartitionKey(m_partitionKey, pe.getClientResponse());
@@ -1178,13 +1325,14 @@ public final class ClientImpl implements Client {
         SyncAllPartitionProcedureCallback(CountDownLatch latch)  {
             m_latch = latch;
         }
-         @Override
+
+        @Override
         public void clientCallback(ClientResponseWithPartitionKey[] clientResponse) throws Exception {
              m_responses = clientResponse;
              m_latch.countDown();
         }
 
-        public ClientResponseWithPartitionKey[] getResponse() {
+        ClientResponseWithPartitionKey[] getResponse() {
             return m_responses;
         }
     }

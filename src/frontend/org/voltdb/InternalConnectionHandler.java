@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -17,10 +17,7 @@
 
 package org.voltdb;
 
-import java.util.Map;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Predicate;
-
+import com.google_voltpatches.common.collect.ImmutableMap;
 import org.voltcore.logging.Level;
 import org.voltcore.logging.VoltLogger;
 import org.voltdb.AuthSystem.AuthUser;
@@ -32,7 +29,10 @@ import org.voltdb.client.ProcedureCallback;
 import org.voltdb.iv2.MpInitiator;
 import org.voltdb.utils.MiscUtils;
 
-import com.google_voltpatches.common.collect.ImmutableMap;
+import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Predicate;
 
 /**
  * This class packs the parameters and dispatches the transactions.
@@ -81,17 +81,30 @@ public class InternalConnectionHandler {
         return VoltDB.instance().getCatalogContext();
     }
 
+    // Basic
     public boolean callProcedure(
             AuthUser user,
             boolean isAdmin,
             int timeout,
             ProcedureCallback cb,
             String procName,
-            Object...args)
-    {
-        return callProcedure(user, isAdmin, timeout, cb, false, null, procName, args);
+            Object...args) {
+        return callProcedure(null, user, isAdmin, timeout, -1, cb, false, null, procName, args);
     }
 
+    // Basic plus hostname
+    public boolean callProcedure(
+            String hostname,
+            AuthUser user,
+            boolean isAdmin,
+            int timeout,
+            ProcedureCallback cb,
+            String procName,
+            Object...args) {
+        return callProcedure(hostname, user, isAdmin, timeout, -1, cb, false, null, procName, args);
+    }
+
+    // Basic plus ntPriority and backPressurePredicate
     public boolean callProcedure(
             AuthUser user,
             boolean isAdmin,
@@ -100,11 +113,11 @@ public class InternalConnectionHandler {
             boolean ntPriority,
             Predicate<Integer> backPressurePredicate,
             String procName,
-            Object...args)
-    {
-        return callProcedure(null, user, isAdmin, timeout, cb, ntPriority, backPressurePredicate, procName, args);
+            Object...args) {
+        return callProcedure(null, user, isAdmin, timeout, -1, cb, ntPriority, backPressurePredicate, procName, args);
     }
 
+    // Basic plus hostname, ntPriority, and backPressurePredicate
     public boolean callProcedure(
             String hostname,
             AuthUser user,
@@ -115,6 +128,23 @@ public class InternalConnectionHandler {
             Predicate<Integer> backPressurePredicate,
             String procName,
             Object... args) {
+        return callProcedure(hostname, user, isAdmin, timeout, -1, cb, ntPriority, backPressurePredicate, procName, args);
+
+    }
+
+    // Once with everything: the above plus requestPriority
+    public boolean callProcedure(
+            String hostname,
+            AuthUser user,
+            boolean isAdmin,
+            int timeout, // or NO_TIMEOUT
+            int requestPriority, // if negative: StoredProcedureInvocation will use SYSTEM_PRIORITY
+            ProcedureCallback cb,
+            boolean ntPriority,
+            Predicate<Integer> backPressurePredicate,
+            String procName,
+            Object... args) {
+
         Procedure catProc = InvocationDispatcher.getProcedureFromName(procName, getCatalogContext());
         if (catProc == null) {
             String fmt = "Cannot invoke procedure %s. Procedure not found.";
@@ -131,9 +161,14 @@ public class InternalConnectionHandler {
             task.setBatchTimeout(timeout);
         }
 
+        if (requestPriority >= 0) {
+            task.setRequestPriority(requestPriority);
+        }
+
         return callProcedure(hostname, user, isAdmin, task, catProc, cb, ntPriority, backPressurePredicate);
     }
 
+    // With prefabricated StoredProcedureInvocation
     public boolean callProcedure(String hostname, AuthUser user, boolean isAdmin, StoredProcedureInvocation task,
             Procedure catProc, ProcedureCallback cb, boolean ntPriority, Predicate<Integer> backPressurePredicate) {
         assert task.getProcName().equals(catProc.getTypeName()) || catProc.getSystemproc();
@@ -161,8 +196,7 @@ public class InternalConnectionHandler {
             return false;
         }
 
-        boolean mp = (partitions[0] == MpInitiator.MP_INIT_PID) || (partitions.length > 1);
-        final InternalClientResponseAdapter adapter = mp ? m_adapters.get(MpInitiator.MP_INIT_PID) : m_adapters.get(partitions[0]);
+        final InternalClientResponseAdapter adapter = getInternalClientResponseAdapter(partitions);
         String adapterName = (hostname == null ? DEFAULT_INTERNAL_ADAPTER_NAME : hostname);
         InternalAdapterTaskAttributes kattrs = new InternalAdapterTaskAttributes(
                 adapterName, isAdmin, adapter.connectionId());
@@ -176,7 +210,28 @@ public class InternalConnectionHandler {
         return true;
     }
 
-    // Use null backPressurePredicate for no back pressure
+    private InternalClientResponseAdapter getInternalClientResponseAdapter(int[] partitions) {
+        boolean mp = (partitions[0] == MpInitiator.MP_INIT_PID) || (partitions.length > 1);
+        final InternalClientResponseAdapter adapter = mp ? m_adapters.get(MpInitiator.MP_INIT_PID) : m_adapters.get(partitions[0]);
+        return Objects.requireNonNull(adapter, "Adapter cannot be null");
+    }
+
+    /**
+     * use this version for no back pressure
+     *
+     * @param caller connection context
+     * @param statsCollector for procedure results
+     * @param procCallback
+     * @param proc name
+     * @param fieldList proc param names
+     * @return success
+     */
+    public boolean callProcedure(InternalConnectionContext caller,
+                                 InternalConnectionStatsCollector statsCollector,
+                                 ProcedureCallback procCallback, String proc, Object... fieldList) {
+        return callProcedure(caller, null, statsCollector, procCallback, proc, fieldList);
+    }
+
     public boolean callProcedure(InternalConnectionContext caller,
                                  Predicate<Integer> backPressurePredicate,
                                  InternalConnectionStatsCollector statsCollector,
@@ -192,6 +247,7 @@ public class InternalConnectionHandler {
         StoredProcedureInvocation task = new StoredProcedureInvocation();
 
         task.setProcName(proc);
+        task.setRequestPriority(caller.getPriority());
         task.setParams(fieldList);
         try {
             task = MiscUtils.roundTripForCL(task);
@@ -215,8 +271,7 @@ public class InternalConnectionHandler {
             return false;
         }
 
-        boolean mp = (partitions[0] == MpInitiator.MP_INIT_PID) || (partitions.length > 1);
-        final InternalClientResponseAdapter adapter = mp ? m_adapters.get(MpInitiator.MP_INIT_PID) : m_adapters.get(partitions[0]);
+        final InternalClientResponseAdapter adapter = getInternalClientResponseAdapter(partitions);
         InternalAdapterTaskAttributes kattrs = new InternalAdapterTaskAttributes(caller,  adapter.connectionId());
 
         final AuthUser user = getCatalogContext().authSystem.getImporterUser();

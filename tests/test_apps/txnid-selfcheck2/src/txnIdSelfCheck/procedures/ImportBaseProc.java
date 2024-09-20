@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -68,7 +68,7 @@ public class ImportBaseProc extends VoltProcedure {
             if (fcid != cid)
                 throw new VoltAbortException(getClass().getName() +
                         " serious error expected cid " + cid + " != fetched cid: "+ fcid);
-            long mts = Math.max(row.getLong("ts"), ts);
+            long mts = Math.max(row.getTimestampAsLong("ts"), ts);
             long mcnt = Math.max(row.getLong("cnt"), cnt);
             //System.err.println("Invoke update query: mts " + mts + " mcnt " + mcnt + " cid " + cid + " ts " + ts + " cnt " + cnt);
             voltQueueSQL(update, mts, mcnt, cid);

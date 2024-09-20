@@ -27,13 +27,11 @@ AS
 -- Export Table for Partitioned Data Table deletions
 %%STREAM name=export_partitioned_table_kafka, export_target=kafka_target, partition_key=rowid
 
-%%STREAM name=export_partitioned_table_rabbit, export_target=rabbit_target, partition_key=rowid
-
 %%STREAM name=export_partitioned_table_file, export_target=file_target, partition_key=rowid
 
 %%STREAM name=export_partitioned_table_jdbc, export_target=jdbc_target, partition_key=rowid
 
-%%STREAM name=topic_stream, topic=True, partition_key=rowid
+%%STREAM name=TOPIC_STREAM, partition_key=rowid, topic_target=TOPIC_STREAM, topic_key=rowid
 
 %%TABLE name=export_mirror_partitioned_table, partition_key=rowid
 
@@ -42,11 +40,6 @@ AS
 -- TODO single export_done table with: VARCHAR(128) tablename, BIGINT txnid, BIGINT rowid
 
 CREATE STREAM export_done_table_kafka EXPORT TO TARGET kafka_target
-(
-  txnid                     BIGINT        NOT NULL
-);
-
-CREATE STREAM export_done_table_rabbit EXPORT TO TARGET rabbit_target
 (
   txnid                     BIGINT        NOT NULL
 );
@@ -64,8 +57,6 @@ CREATE STREAM export_done_table_file EXPORT TO TARGET file_target
 -- Export Table for Replicated Data Table deletions
 %%STREAM name=export_replicated_table_kafka, export_target=kafka_target
 
-%%STREAM name=export_replicated_table_rabbit, export_target=rabbit_target
-
 %%STREAM name=export_replicated_table_file, export_target=file_target
 
 %%STREAM name=export_replicated_table_jdbc, export_target=jdbc_target
@@ -73,7 +64,8 @@ CREATE STREAM export_done_table_file EXPORT TO TARGET file_target
 %%TABLE name=export_replicated_table_cdc, export_target=kafka_target, export_cdc="insert, update, delete"
 
 CREATE PROCEDURE PARTITION ON TABLE export_partitioned_table_kafka COLUMN rowid PARAMETER 0 FROM CLASS genqa.procedures.JiggleExportGroupSinglePartition;
-CREATE PROCEDURE PARTITION ON TABLE topic_stream COLUMN rowid PARAMETER 0 FROM CLASS genqa.procedures.InsertTopicStream;
+CREATE PROCEDURE PARTITION ON TABLE TOPIC_STREAM COLUMN rowid PARAMETER 0 FROM CLASS genqa.procedures.InsertTopicStream;
+CREATE PROCEDURE PARTITION ON TABLE TOPIC_STREAM COLUMN rowid PARAMETER 0 FROM CLASS genqa.procedures.InsertTopicStream2;
 CREATE PROCEDURE PARTITION ON TABLE partitioned_table COLUMN rowid PARAMETER 0 FROM CLASS genqa.procedures.JiggleSinglePartition;
 CREATE PROCEDURE PARTITION ON TABLE export_partitioned_table_kafka COLUMN rowid PARAMETER 0 FROM CLASS genqa.procedures.JiggleExportSinglePartition;
 CREATE PROCEDURE FROM CLASS genqa.procedures.InsertExportDoneDetails;

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -40,6 +40,8 @@ vector<string> TableStats::generateTableStatsColumnNames() {
     columnNames.push_back("STRING_DATA_MEMORY");
     columnNames.push_back("TUPLE_LIMIT");
     columnNames.push_back("PERCENT_FULL");
+    columnNames.push_back("DR");
+    columnNames.push_back("EXPORT");
     return columnNames;
 }
 
@@ -48,43 +50,63 @@ vector<string> TableStats::generateTableStatsColumnNames() {
 void TableStats::populateTableStatsSchema(vector<ValueType> &types, vector<int32_t> &columnLengths, vector<bool> &allowNull,
         vector<bool> &inBytes) {
     StatsSource::populateBaseSchema(types, columnLengths, allowNull, inBytes);
+    // TABLE_NAME
     types.push_back(ValueType::tVARCHAR);
     columnLengths.push_back(4096);
     allowNull.push_back(false);
     inBytes.push_back(false);
 
+    // TABLE_TYPE
     types.push_back(ValueType::tVARCHAR);
     columnLengths.push_back(4096);
     allowNull.push_back(false);
     inBytes.push_back(false);
 
+    // TUPLE_COUNT
     types.push_back(ValueType::tBIGINT);
     columnLengths.push_back(NValue::getTupleStorageSize(ValueType::tBIGINT));
     allowNull.push_back(false);
     inBytes.push_back(false);
 
+    // TUPLE_ALLOCATED_MEMORY
     types.push_back(ValueType::tBIGINT);
     columnLengths.push_back(NValue::getTupleStorageSize(ValueType::tBIGINT));
     allowNull.push_back(false);
     inBytes.push_back(false);
 
+    // TUPLE_DATA_MEMORY
     types.push_back(ValueType::tBIGINT);
     columnLengths.push_back(NValue::getTupleStorageSize(ValueType::tBIGINT));
     allowNull.push_back(false);
     inBytes.push_back(false);
 
+    // STRING_DATA_MEMORY
     types.push_back(ValueType::tBIGINT);
     columnLengths.push_back(NValue::getTupleStorageSize(ValueType::tBIGINT));
     allowNull.push_back(false);
     inBytes.push_back(false);
 
+    // TUPLE_LIMIT
     types.push_back(ValueType::tINTEGER);
     columnLengths.push_back(NValue::getTupleStorageSize(ValueType::tINTEGER));
+    allowNull.push_back(true);
+    inBytes.push_back(false);
+
+    // PERCENT_FULL
+    types.push_back(ValueType::tINTEGER);
+    columnLengths.push_back(NValue::getTupleStorageSize(ValueType::tINTEGER));
+    allowNull.push_back(true);
+    inBytes.push_back(false);
+
+    // DR
+    types.push_back(ValueType::tVARCHAR);
+    columnLengths.push_back(15);
     allowNull.push_back(false);
     inBytes.push_back(false);
 
-    types.push_back(ValueType::tINTEGER);
-    columnLengths.push_back(NValue::getTupleStorageSize(ValueType::tINTEGER));
+    // EXPORT
+    types.push_back(ValueType::tVARCHAR);
+    columnLengths.push_back(15);
     allowNull.push_back(false);
     inBytes.push_back(false);
 }
@@ -108,7 +130,8 @@ TempTable* TableStats::generateEmptyTableStatsTable() {
 TableStats::TableStats(Table* table)
     : StatsSource(), m_table(table), m_lastTupleCount(0),
       m_lastAllocatedTupleMemory(0), m_lastOccupiedTupleMemory(0),
-      m_lastStringDataMemory(0) { }
+      m_lastStringDataMemory(0) {
+}
 
 /**
  * Configure a StatsSource superclass for a set of statistics. Since this class is only used in the EE it can be assumed that
@@ -124,6 +147,8 @@ void TableStats::configure(std::string const& name) {
     StatsSource::configure(name);
     m_tableName = ValueFactory::getStringValue(m_table->name());
     m_tableType = ValueFactory::getStringValue(m_table->tableType());
+    m_trueValue = ValueFactory::getStringValue("true");
+    m_falseValue = ValueFactory::getStringValue("false");
 }
 
 /**
@@ -142,7 +167,6 @@ void TableStats::updateStatsTuple(TableTuple *tuple) {
     tuple->setNValue( StatsSource::m_columnName2Index["TABLE_NAME"], m_tableName);
     tuple->setNValue( StatsSource::m_columnName2Index["TABLE_TYPE"], m_tableType);
     int64_t tupleCount = m_table->activeTupleCount();
-    int tupleLimit = m_table->tupleLimit();
     // This overflow is unlikely (requires 2 terabytes of allocated string memory)
     int64_t allocated_tuple_mem_kb = m_table->allocatedTupleMemory() / 1024;
     int64_t occupied_tuple_mem_kb = 0;
@@ -177,14 +201,22 @@ void TableStats::updateStatsTuple(TableTuple *tuple) {
     tuple->setNValue(StatsSource::m_columnName2Index["STRING_DATA_MEMORY"],
             ValueFactory::getBigIntValue(string_data_mem_kb));
 
-    bool hasTupleLimit = tupleLimit == INT_MAX ? false : true;
-    tuple->setNValue(StatsSource::m_columnName2Index["TUPLE_LIMIT"],
-            hasTupleLimit ? ValueFactory::getIntegerValue(tupleLimit): ValueFactory::getNullValue());
-    int32_t percentage = 0;
-    if (hasTupleLimit && tupleLimit > 0) {
-        percentage = static_cast<int32_t> (ceil(static_cast<double>(tupleCount) * 100.0 / tupleLimit));
+    tuple->setNValue(StatsSource::m_columnName2Index["TUPLE_LIMIT"], ValueFactory::getNullValue());
+    tuple->setNValue(StatsSource::m_columnName2Index["PERCENT_FULL"],ValueFactory::getNullValue());
+
+
+    NValue *drValue = &m_falseValue;
+    NValue *expValue = &m_falseValue;
+    if (persistentTable != NULL) {
+        TableType tableType = persistentTable->getTableType();
+        if (isTableWithStream(tableType)) {
+            expValue = &m_trueValue;
+        } else if (persistentTable->isDREnabled()) {
+            drValue = &m_trueValue;
+        }
     }
-    tuple->setNValue(StatsSource::m_columnName2Index["PERCENT_FULL"],ValueFactory::getIntegerValue(percentage));
+    tuple->setNValue( StatsSource::m_columnName2Index["EXPORT"], *expValue);
+    tuple->setNValue( StatsSource::m_columnName2Index["DR"], *drValue);
 }
 
 /**
@@ -199,4 +231,6 @@ void TableStats::populateSchema(vector<ValueType> &types, vector<int32_t> &colum
 TableStats::~TableStats() {
     m_tableName.free();
     m_tableType.free();
+    m_trueValue.free();
+    m_falseValue.free();
 }

@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -228,6 +228,9 @@ public class TestExecutionEngine extends TestCase {
                                 "",
                                 0,
                                 64*1024,
+                                false,
+                                -1,
+                                false,
                                 100,
                                 new HashinatorConfig(configBytes, 0, 0), false));
             }
@@ -360,6 +363,9 @@ public class TestExecutionEngine extends TestCase {
                                 "",
                                 0,
                                 64*1024,
+                                false,
+                                -1,
+                                false,
                                 100,
                                 new HashinatorConfig(configBytes, 0, 0), false));
             }
@@ -439,6 +445,9 @@ public class TestExecutionEngine extends TestCase {
                         "",
                         0,
                         64*1024,
+                        false,
+                        -1,
+                        false,
                         100,
                         new HashinatorConfig(ElasticHashinator.getConfigureBytes(1), 0, 0), true);
     }
@@ -451,7 +460,7 @@ public class TestExecutionEngine extends TestCase {
     @Override
     protected void setUp() throws Exception {
         super.setUp();
-        VoltDB.instance().readBuildInfo("Test");
+        VoltDB.instance().readBuildInfo();
         m_catalog = TPCCProjectBuilder.getTPCCSchemaCatalog();
         m_twoSiteCatalog = TPCCProjectBuilder.getTPCCSchemaCatalogMultiSite(2);
     }

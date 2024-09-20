@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -223,4 +223,10 @@ public interface ProducerDRGateway {
     public enum Mode {
         NEW, REJOIN, RECOVER, JOIN;
     }
+
+    /**
+     * Returns current state which is held in private format, hence Object return.
+     * @return producer's dr state
+     */
+    public Object getProducerDRState();
 }

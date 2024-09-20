@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -64,16 +64,41 @@ public class ProcedureStatsCollector extends SiteStatsSource {
     // Mapping from the variable name of the user-defined SQLStmts to its stats.
     private final Map<String, StatementStats> m_stmtStatsMap;
     private final StatsData m_procStatsData;
-    private final boolean m_isTransactional;
+    private final ProcType m_procType;
     private final boolean m_isUAC;
+
+    public enum ProcedureColumns {
+        PARTITION_ID            (VoltType.INTEGER),
+        PROCEDURE               (VoltType.STRING),
+        STATEMENT               (VoltType.STRING),
+        INVOCATIONS             (VoltType.BIGINT),
+        TIMED_INVOCATIONS       (VoltType.BIGINT),
+        MIN_EXECUTION_TIME      (VoltType.BIGINT),
+        MAX_EXECUTION_TIME      (VoltType.BIGINT),
+        AVG_EXECUTION_TIME      (VoltType.BIGINT),
+        MIN_RESULT_SIZE         (VoltType.INTEGER),
+        MAX_RESULT_SIZE         (VoltType.INTEGER),
+        AVG_RESULT_SIZE         (VoltType.INTEGER),
+        MIN_PARAMETER_SET_SIZE  (VoltType.INTEGER),
+        MAX_PARAMETER_SET_SIZE  (VoltType.INTEGER),
+        AVG_PARAMETER_SET_SIZE  (VoltType.INTEGER),
+        ABORTS                  (VoltType.BIGINT),
+        FAILURES                (VoltType.BIGINT),
+        TRANSACTIONAL           (VoltType.TINYINT),
+        COMPOUND                (VoltType.TINYINT);
+
+        public final VoltType m_type;
+        ProcedureColumns(VoltType type) { m_type = type; }
+    }
+
+    public enum ProcType { TRANS, NONTRANS, COMPOUND };
 
     public ProcedureStatsCollector(long siteId,
                                    int partitionId,
                                    Procedure catProc,
                                    ArrayList<String> stmtNames,
-                                   boolean isTransactional)
-    {
-        this(siteId, partitionId, catProc.getClassname(), catProc.getSinglepartition(), stmtNames, isTransactional);
+                                   ProcType procType) {
+        this(siteId, partitionId, catProc.getClassname(), catProc.getSinglepartition(), stmtNames, procType);
     }
 
     public ProcedureStatsCollector(long siteId,
@@ -81,8 +106,7 @@ public class ProcedureStatsCollector extends SiteStatsSource {
                                    String procName,
                                    boolean singlePartition,
                                    ArrayList<String> stmtNames,
-                                   boolean isTransactional)
-    {
+                                   ProcType procType) {
         super(siteId, false);
         m_partitionId = partitionId;
         m_procName = procName;
@@ -103,7 +127,7 @@ public class ProcedureStatsCollector extends SiteStatsSource {
                 m_stmtStatsMap.put(stmtName, new StatementStats(stmtName, hasCoordinatorTask));
             }
         }
-        m_isTransactional = isTransactional;
+        m_procType = procType;
 
         // check if this proc is UpdateCore for 100% sampling rate
         m_isUAC = (m_procName != null) && (m_procName.startsWith(UpdateCore.class.getName()));
@@ -154,14 +178,13 @@ public class ProcedureStatsCollector extends SiteStatsSource {
         final long endTime = System.nanoTime();
         final long duration = endTime - statsToken.startTimeNanos;
         if (duration < 0) {
-            if (Math.abs(duration) > 1000000000) {
+            if (duration < -1000000000) {
                 log.info("Procedure: " + m_procName +
                          " recorded a negative execution time larger than one second: " + duration);
             }
             return;
         }
 
-        m_procStatsData.m_timedInvocations++;
         // sampled timings
         m_procStatsData.m_totalTimedExecutionTime += duration;
         m_procStatsData.m_minExecutionTime = Math.min(duration, m_procStatsData.m_minExecutionTime);
@@ -180,6 +203,10 @@ public class ProcedureStatsCollector extends SiteStatsSource {
         m_procStatsData.m_maxParameterSetSize = Math.max(statsToken.parameterSetSize, m_procStatsData.m_maxParameterSetSize);
         m_procStatsData.m_incrMinParameterSetSize = Math.min(statsToken.parameterSetSize, m_procStatsData.m_incrMinParameterSetSize);
         m_procStatsData.m_incrMaxParameterSetSize = Math.max(statsToken.parameterSetSize, m_procStatsData.m_incrMaxParameterSetSize);
+
+        // update this after the above, in the hope that the unsynchronized stats row
+        // iterator will tend to skip rows that have no valid min/max
+        m_procStatsData.m_timedInvocations++;
 
         // stop here if no statements
         if (statsToken.stmtStats == null) {
@@ -241,7 +268,7 @@ public class ProcedureStatsCollector extends SiteStatsSource {
         // This is a sampled invocation.
         // Update timings and size statistics below.
         if (duration < 0) {
-            if (Math.abs(duration) > 1000000000) {
+            if (duration < -1000000000) {
                 log.info("Statement: " + stmtStats.m_stmtName + " in procedure: " + m_procName +
                          " recorded a negative execution time larger than one second: " +
                          duration);
@@ -249,7 +276,6 @@ public class ProcedureStatsCollector extends SiteStatsSource {
             return;
         }
 
-        dataToUpdate.m_timedInvocations++;
         // sampled timings
         dataToUpdate.m_totalTimedExecutionTime += duration;
         dataToUpdate.m_minExecutionTime = Math.min(duration, dataToUpdate.m_minExecutionTime);
@@ -269,6 +295,10 @@ public class ProcedureStatsCollector extends SiteStatsSource {
         dataToUpdate.m_maxParameterSetSize = Math.max(parameterSetSize, dataToUpdate.m_maxParameterSetSize);
         dataToUpdate.m_incrMinParameterSetSize = Math.min(parameterSetSize, dataToUpdate.m_incrMinParameterSetSize);
         dataToUpdate.m_incrMaxParameterSetSize = Math.max(parameterSetSize, dataToUpdate.m_incrMaxParameterSetSize);
+
+        // update this after the above, in the hope that the unsynchronized stats row
+        // iterator will tend to skip rows that have no valid min/max
+        dataToUpdate.m_timedInvocations++;
     }
 
     /**
@@ -277,15 +307,16 @@ public class ProcedureStatsCollector extends SiteStatsSource {
      * which must also be called so that it can update its columns.
      * @param rowKey The corresponding StatementStats structure for this row.
      * @param rowValues Values of each column of the row of stats. Used as output.
+     * @return next column index to write
      */
     @Override
-    protected void updateStatsRow(Object rowKey, Object rowValues[]) {
-        super.updateStatsRow(rowKey, rowValues);
-        rowValues[columnNameToIndex.get("PARTITION_ID")] = m_partitionId;
-        rowValues[columnNameToIndex.get("PROCEDURE")] = m_procName;
+    protected int updateStatsRow(Object rowKey, Object rowValues[]) {
+        int offset = super.updateStatsRow(rowKey, rowValues);
+        rowValues[offset + ProcedureColumns.PARTITION_ID.ordinal()] = m_partitionId;
+        rowValues[offset + ProcedureColumns.PROCEDURE.ordinal()] = m_procName;
         StatementStats currRow = (StatementStats)rowKey;
         assert(currRow != null);
-        rowValues[columnNameToIndex.get("STATEMENT")] = currRow.m_stmtName;
+        rowValues[offset + ProcedureColumns.STATEMENT.ordinal()] = currRow.m_stmtName;
 
         long invocations = currRow.getInvocations();
         long timedInvocations = currRow.getTimedInvocations();
@@ -319,29 +350,29 @@ public class ProcedureStatsCollector extends SiteStatsSource {
             timedInvocations -= currRow.getLastTimedInvocationsAndReset();
         }
 
-        rowValues[columnNameToIndex.get("INVOCATIONS")] = invocations;
-        rowValues[columnNameToIndex.get("TIMED_INVOCATIONS")] = timedInvocations;
-        rowValues[columnNameToIndex.get("MIN_EXECUTION_TIME")] = minExecutionTime;
-        rowValues[columnNameToIndex.get("MAX_EXECUTION_TIME")] = maxExecutionTime;
+        rowValues[offset + ProcedureColumns.INVOCATIONS.ordinal()] = invocations;
+        rowValues[offset + ProcedureColumns.TIMED_INVOCATIONS.ordinal()] = timedInvocations;
+        rowValues[offset + ProcedureColumns.MIN_EXECUTION_TIME.ordinal()] = minExecutionTime;
+        rowValues[offset + ProcedureColumns.MAX_EXECUTION_TIME.ordinal()] = maxExecutionTime;
         if (timedInvocations != 0) {
-            rowValues[columnNameToIndex.get("AVG_EXECUTION_TIME")] =
-                 (totalTimedExecutionTime / timedInvocations);
-            rowValues[columnNameToIndex.get("AVG_RESULT_SIZE")] =
-                    (totalResultSize / timedInvocations);
-            rowValues[columnNameToIndex.get("AVG_PARAMETER_SET_SIZE")] =
-                    (totalParameterSetSize / timedInvocations);
+            rowValues[offset + ProcedureColumns.AVG_EXECUTION_TIME.ordinal()] = (totalTimedExecutionTime / timedInvocations);
+            rowValues[offset + ProcedureColumns.AVG_RESULT_SIZE.ordinal()] = (totalResultSize / timedInvocations);
+            rowValues[offset + ProcedureColumns.AVG_PARAMETER_SET_SIZE.ordinal()] = (totalParameterSetSize / timedInvocations);
         } else {
-            rowValues[columnNameToIndex.get("AVG_EXECUTION_TIME")] = 0L;
-            rowValues[columnNameToIndex.get("AVG_RESULT_SIZE")] = 0;
-            rowValues[columnNameToIndex.get("AVG_PARAMETER_SET_SIZE")] = 0;
+            rowValues[offset + ProcedureColumns.AVG_EXECUTION_TIME.ordinal()] = 0L;
+            rowValues[offset + ProcedureColumns.AVG_RESULT_SIZE.ordinal()] = 0;
+            rowValues[offset + ProcedureColumns.AVG_PARAMETER_SET_SIZE.ordinal()] = 0;
         }
-        rowValues[columnNameToIndex.get("ABORTS")] = abortCount;
-        rowValues[columnNameToIndex.get("FAILURES")] = failureCount;
-        rowValues[columnNameToIndex.get("MIN_RESULT_SIZE")] = minResultSize;
-        rowValues[columnNameToIndex.get("MAX_RESULT_SIZE")] = maxResultSize;
-        rowValues[columnNameToIndex.get("MIN_PARAMETER_SET_SIZE")] = minParameterSetSize;
-        rowValues[columnNameToIndex.get("MAX_PARAMETER_SET_SIZE")] = maxParameterSetSize;
-        rowValues[columnNameToIndex.get("TRANSACTIONAL")] = (byte) (m_isTransactional ? 1 : 0);
+        rowValues[offset + ProcedureColumns.ABORTS.ordinal()] = abortCount;
+        rowValues[offset + ProcedureColumns.FAILURES.ordinal()] = failureCount;
+        rowValues[offset + ProcedureColumns.MIN_RESULT_SIZE.ordinal()] = minResultSize;
+        rowValues[offset + ProcedureColumns.MAX_RESULT_SIZE.ordinal()] = maxResultSize;
+        rowValues[offset + ProcedureColumns.MIN_PARAMETER_SET_SIZE.ordinal()] = minParameterSetSize;
+        rowValues[offset + ProcedureColumns.MAX_PARAMETER_SET_SIZE.ordinal()] = maxParameterSetSize;
+        rowValues[offset + ProcedureColumns.TRANSACTIONAL.ordinal()] = (byte) (m_procType == ProcType.TRANS ? 1 : 0);
+        rowValues[offset + ProcedureColumns.COMPOUND.ordinal()] = (byte) (m_procType == ProcType.COMPOUND ? 1 : 0);
+
+        return offset + ProcedureColumns.values().length;
     }
 
     /**
@@ -350,24 +381,7 @@ public class ProcedureStatsCollector extends SiteStatsSource {
      */
     @Override
     protected void populateColumnSchema(ArrayList<VoltTable.ColumnInfo> columns) {
-        super.populateColumnSchema(columns);
-        columns.add(new VoltTable.ColumnInfo("PARTITION_ID", VoltType.INTEGER));
-        columns.add(new VoltTable.ColumnInfo("PROCEDURE", VoltType.STRING));
-        columns.add(new VoltTable.ColumnInfo("STATEMENT", VoltType.STRING));
-        columns.add(new VoltTable.ColumnInfo("INVOCATIONS", VoltType.BIGINT));
-        columns.add(new VoltTable.ColumnInfo("TIMED_INVOCATIONS", VoltType.BIGINT));
-        columns.add(new VoltTable.ColumnInfo("MIN_EXECUTION_TIME", VoltType.BIGINT));
-        columns.add(new VoltTable.ColumnInfo("MAX_EXECUTION_TIME", VoltType.BIGINT));
-        columns.add(new VoltTable.ColumnInfo("AVG_EXECUTION_TIME", VoltType.BIGINT));
-        columns.add(new VoltTable.ColumnInfo("MIN_RESULT_SIZE", VoltType.INTEGER));
-        columns.add(new VoltTable.ColumnInfo("MAX_RESULT_SIZE", VoltType.INTEGER));
-        columns.add(new VoltTable.ColumnInfo("AVG_RESULT_SIZE", VoltType.INTEGER));
-        columns.add(new VoltTable.ColumnInfo("MIN_PARAMETER_SET_SIZE", VoltType.INTEGER));
-        columns.add(new VoltTable.ColumnInfo("MAX_PARAMETER_SET_SIZE", VoltType.INTEGER));
-        columns.add(new VoltTable.ColumnInfo("AVG_PARAMETER_SET_SIZE", VoltType.INTEGER));
-        columns.add(new VoltTable.ColumnInfo("ABORTS", VoltType.BIGINT));
-        columns.add(new VoltTable.ColumnInfo("FAILURES", VoltType.BIGINT));
-        columns.add(new VoltTable.ColumnInfo("TRANSACTIONAL", VoltType.TINYINT));
+        super.populateColumnSchema(columns, ProcedureColumns.class);
     }
 
     @Override
@@ -390,13 +404,11 @@ public class ProcedureStatsCollector extends SiteStatsSource {
                     if (m_incremental) {
                         if (nextToReturn.getTimedInvocations() - nextToReturn.getLastTimedInvocations() == 0) {
                             nextToReturn = null;
-                            continue;
                         }
                     }
                     else {
                         if (nextToReturn.getTimedInvocations() == 0) {
                             nextToReturn = null;
-                            continue;
                         }
                     }
                 } while (nextToReturn == null && iter.hasNext());

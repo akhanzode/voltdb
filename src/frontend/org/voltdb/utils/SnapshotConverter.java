@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -29,9 +29,9 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 
 import org.voltcore.logging.VoltLogger;
+import org.voltdb.sysprocs.saverestore.SnapshotPathType;
 import org.voltdb.sysprocs.saverestore.SnapshotUtil;
 import org.voltdb.sysprocs.saverestore.SnapshotUtil.Snapshot;
-import org.voltdb.sysprocs.saverestore.SnapshotPathType;
 import org.voltdb.sysprocs.saverestore.SnapshotUtil.SpecificSnapshotFilter;
 import org.voltdb.sysprocs.saverestore.SnapshotUtil.TableFiles;
 
@@ -48,6 +48,7 @@ public class SnapshotConverter {
         File outdir = null;
         String type = null;
         char delimiter = '\0';
+        boolean filterHiddenColumns = false;
 
         for (int ii = 0; ii < args.length; ii++) {
             String arg = args[ii];
@@ -65,14 +66,15 @@ public class SnapshotConverter {
                 if (!f.exists()) {
                     System.err.println("Error: " + dir + " does not exist");
                     invalidDir = true;
-                }
-                if (!f.canRead()) {
-                    System.err.println("Error: " + dir + " does not have read permission set");
-                    invalidDir = true;
-                }
-                if (!f.canExecute()) {
-                    System.err.println("Error: " + dir + " does not have execute permission set");
-                    invalidDir = true;
+                } else {
+                    if (!f.canRead()) {
+                        System.err.println("Error: " + dir + " does not have read permission set");
+                        invalidDir = true;
+                    }
+                    if (!f.canExecute()) {
+                        System.err.println("Error: " + dir + " does not have execute permission set");
+                        invalidDir = true;
+                    }
                 }
                 directories.add(f);
                 if (invalidDir) {
@@ -103,18 +105,19 @@ public class SnapshotConverter {
                 if (!outdir.exists()) {
                     System.err.println("Error: " + outdir.getPath() + " does not exist");
                     invalidDir = true;
-                }
-                if (!outdir.canRead()) {
-                    System.err.println("Error: " + outdir.getPath() + " does not have read permission set");
-                    invalidDir = true;
-                }
-                if (!outdir.canExecute()) {
-                    System.err.println("Error: " + outdir.getPath() + " does not have execute permission set");
-                    invalidDir = true;
-                }
-                if (!outdir.canWrite()) {
-                    System.err.println("Error: " + outdir.getPath() + " does not have write permission set");
-                    invalidDir = true;
+                } else {
+                    if (!outdir.canRead()) {
+                        System.err.println("Error: " + outdir.getPath() + " does not have read permission set");
+                        invalidDir = true;
+                    }
+                    if (!outdir.canExecute()) {
+                        System.err.println("Error: " + outdir.getPath() + " does not have execute permission set");
+                        invalidDir = true;
+                    }
+                    if (!outdir.canWrite()) {
+                        System.err.println("Error: " + outdir.getPath() + " does not have write permission set");
+                        invalidDir = true;
+                    }
                 }
                 if (invalidDir) {
                     System.exit(-1);
@@ -135,6 +138,8 @@ public class SnapshotConverter {
                     printHelpAndQuit(-1);
                 }
                 ii++;
+            } else if (arg.equals("--filter-hidden")) {
+                filterHiddenColumns = true;
             } else {
                 if (snapshotName != null) {
                     System.err.println("Error: Multiple snapshots specified for conversion. First - " + snapshotName + " second " + args[ii]);
@@ -259,9 +264,8 @@ public class SnapshotConverter {
                     fail = true;
                 }
             } catch (IOException e) {
-                System.err.println(e.getMessage());
                 System.err.println("Error: Failed to create output file "
-                        + outfile.getPath() + " for table " + tableName);
+                        + outfile.getPath() + " for table " + tableName + ": " + e);
                 fail = true;
             }
         }
@@ -290,10 +294,10 @@ public class SnapshotConverter {
                     }
                 }
                 try {
-                    CSVTableSaveFile.convertTableSaveFile(delimiter, partitions, outfile, infile);
+                    CSVTableSaveFile.convertTableSaveFile(delimiter, partitions, outfile, infile, filterHiddenColumns);
                 } catch (Exception e) {
-                    System.err.println(e.getMessage());
                     System.err.println("Error: Failed to convert " + infile.getPath() + " to " + outfile.getPath());
+                    e.printStackTrace();
                 }
             }
         }
@@ -306,7 +310,7 @@ public class SnapshotConverter {
     private static void printHelpAndQuit( int code) {
         System.out.println("Usage: snapshotconverter --help");
         System.out.println("snapshotconverter --dir dir1 --dir dir2 --dir dir3 " +
-                "--table table1 --table table2 --table table3 --type CSV|TSV --outdir dir snapshot_name --timezone GMT+0");
+                "--table table1 --table table2 --table table3 --type CSV|TSV --outdir dir snapshot_name --timezone GMT+0 [--filter-hidden]");
         System.exit(code);
     }
 }

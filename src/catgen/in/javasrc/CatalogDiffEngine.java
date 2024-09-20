@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 Volt Active Data Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -37,8 +37,8 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 
 import org.apache.commons.lang3.StringUtils;
-import org.voltdb.VoltType;
 import org.voltdb.TableType;
+import org.voltdb.VoltType;
 import org.voltdb.catalog.CatalogChangeGroup.FieldChange;
 import org.voltdb.catalog.CatalogChangeGroup.TypeChanges;
 import org.voltdb.compiler.MaterializedViewProcessor;
@@ -166,7 +166,10 @@ public class CatalogDiffEngine {
      * @param next Tip of the new catalog.
      */
     public CatalogDiffEngine(Catalog prev, Catalog next, boolean forceVerbose) {
-        initialize(prev, next);
+        this(prev, next, forceVerbose, true);
+    }
+
+    protected CatalogDiffEngine(Catalog prev, Catalog next, boolean forceVerbose, boolean runDiff) {
         m_supported = true;
         if (forceVerbose) {
             m_triggeredVerbosity = true;
@@ -192,23 +195,13 @@ public class CatalogDiffEngine {
             m_changes.put(dc, new CatalogChangeGroup(dc));
         }
 
-        diffRecursively(prev, next);
-        if (m_triggeredVerbosity || m_triggerForVerbosity.equals("final")) {
-            System.out.println("DEBUG VERBOSE diffRecursively Errors:" +
-                               ( m_supported ? " <none>" : "\n" + errors()));
-            System.out.println("DEBUG VERBOSE diffRecursively Commands: " + commands());
+        if (runDiff) {
+            runDiff(prev, next);
         }
     }
 
     public CatalogDiffEngine(Catalog prev, Catalog next) {
         this(prev, next, false);
-    }
-
-    /**
-     * Override this to do initializations before the diff is calculated.
-     * The parameters are the same catalog parameters passed into the constructor.
-     */
-    protected void initialize(Catalog prev, Catalog next) {
     }
 
     public String commands() {
@@ -306,6 +299,15 @@ public class CatalogDiffEngine {
 
     public String errors() {
         return m_errors.toString();
+    }
+
+    protected void runDiff(Catalog prev, Catalog next) {
+        diffRecursively(prev, next);
+        if (m_triggeredVerbosity || m_triggerForVerbosity.equals("final")) {
+            System.out.println("DEBUG VERBOSE diffRecursively Errors:" +
+                               ( m_supported ? " <none>" : "\n" + errors()));
+            System.out.println("DEBUG VERBOSE diffRecursively Commands: " + commands());
+        }
     }
 
     enum ChangeType {
@@ -459,19 +461,6 @@ public class CatalogDiffEngine {
     }
 
     /**
-     * @return true if the parameter is an instance of Statement owned
-     * by a table node.  This indicates that the Statement is the
-     * DELETE statement in a
-     *   LIMIT PARTITION ROWS <n> EXECUTE (DELETE ...)
-     * constraint.
-     */
-    static protected boolean isTableLimitDeleteStmt(final CatalogType catType) {
-        if (catType instanceof Statement && catType.getParent() instanceof Table)
-            return true;
-        return false;
-    }
-
-    /**
      * Check if an addition or deletion can be safely completed
      * in any database state.
      *
@@ -507,6 +496,10 @@ public class CatalogDiffEngine {
             suspect instanceof Constraint ||
             suspect instanceof Task)
         {
+            return null;
+        }
+        else if (suspect instanceof Topic) {
+            m_requiresNewExportGeneration = true;
             return null;
         }
         else if (suspect instanceof TimeToLive) {
@@ -570,22 +563,11 @@ public class CatalogDiffEngine {
             return null;
         }
 
-        else if (suspect instanceof Connector) {
-            m_requiresNewExportGeneration = true;
-            return null;
-        }
-
-        else if (suspect instanceof ThreadPool) {
-            m_requiresNewExportGeneration = true;
-            return null;
-        }
-
-        else if (suspect instanceof ConnectorTableInfo) {
-            m_requiresNewExportGeneration = true;
-            return null;
-        }
-
-        else if (suspect instanceof ConnectorProperty) {
+        else if (suspect instanceof Connector
+                || suspect instanceof ThreadPool
+                || suspect instanceof ConnectorTableInfo
+                || suspect instanceof ConnectorProperty
+                || suspect instanceof Topic) {
             m_requiresNewExportGeneration = true;
             return null;
         }
@@ -673,10 +655,6 @@ public class CatalogDiffEngine {
             return null;
         }
 
-        else if (isTableLimitDeleteStmt(suspect)) {
-            return null;
-        }
-
         //TODO: This code is also pretty fishy
         // -- See the "salmon of doubt" comment in checkModifyWhitelist
 
@@ -695,9 +673,13 @@ public class CatalogDiffEngine {
                 }
                 return null;
             }
-        }
 
-        return "May not dynamically add/drop schema object: '" + suspect + "'\n";
+            if (parent instanceof Topic) {
+                m_requiresNewExportGeneration = true;
+                return null;
+            }
+        }
+        return "May not dynamically add/drop schema object: '" + suspect + "', parent: " + suspect.getParent() + "\n";
     }
 
     /**
@@ -985,6 +967,10 @@ public class CatalogDiffEngine {
             m_requiresNewExportGeneration = true;
             return null;
         }
+        if (suspect instanceof Topic) {
+            m_requiresNewExportGeneration = true;
+            return null;
+        }
 
         // Avoid over-generalization when describing limitations that are dependent on particular
         // cases of BEFORE and AFTER values by listing the offending values.
@@ -1028,8 +1014,15 @@ public class CatalogDiffEngine {
         if (suspect instanceof Constraint && field.equals("index"))
             return null;
         if (suspect instanceof Table) {
-            if (field.equals("signature") || field.equals("tuplelimit") )
+            if (field.equals("signature")) {
                 return null;
+            }
+            if (field.equals("topicName") && prevType != null) {
+                if (!(((Table)suspect).getTopicname().equals(((Table)prevType).getTopicname()))) {
+                    m_requiresNewExportGeneration = true;
+                }
+                return null;
+            }
 
             if (field.equals("tableType") && prevType != null) {
                 if (((Table)suspect).getTabletype() != ((Table)prevType).getTabletype()) {
@@ -1145,10 +1138,6 @@ public class CatalogDiffEngine {
             }
         }
 
-        else if (isTableLimitDeleteStmt(suspect)) {
-            return null;
-        }
-
         // Also allow any field changes (that haven't triggered an early return already)
         // if they are found anywhere in these sub-trees.
 
@@ -1183,13 +1172,15 @@ public class CatalogDiffEngine {
                 return null;
             }
 
-            if (isTableLimitDeleteStmt(parent)) {
+            // allow topic property changes
+            if (parent instanceof Topic && suspect instanceof Property) {
+                m_requiresNewExportGeneration = true;
                 return null;
             }
         }
 
         return "May not dynamically modify field '" + field +
-                        "' of schema object '" + suspect + "'" + restrictionQualifier;
+                        "' of schema object '" + suspect + "'" + restrictionQualifier + ", parent:" + suspect.getParent();
     }
 
     /**
@@ -1400,6 +1391,11 @@ public class CatalogDiffEngine {
                 suspect instanceof ConnectorProperty ||
                 suspect instanceof ConnectorTableInfo) {
             // export table related change, should not skip EE
+            return true;
+        }
+
+        // Note: only topics encoded inline need an EE update but this flag is coarse
+        if (suspect instanceof Topic || suspect.getParent() instanceof Topic) {
             return true;
         }
 
